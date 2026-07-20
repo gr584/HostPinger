@@ -1,0 +1,278 @@
+@page "/"
+@rendermode InteractiveServer
+@using System.ComponentModel.DataAnnotations
+@inject IDbContextFactory<HostPingerDbContext> DbFactory
+@inject NavigationManager Navigation
+@implements IDisposable
+
+<PageTitle>Hosts</PageTitle>
+
+<h1>Hosts</h1>
+
+@if (_rows.Count == 0)
+{
+    <p class="text-muted">No hosts yet — add one below to start monitoring.</p>
+}
+else
+{
+    <p class="text-muted">Click a host to open its ping graph.</p>
+    <table class="table table-hover align-middle">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Address</th>
+                <th>Status</th>
+                <th>Last ping</th>
+                <th style="width: 13rem;"></th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var row in _rows)
+            {
+                <tr class="host-row" @onclick="() => OpenGraph(row.Host.Id)">
+                    <td>@row.Host.Name</td>
+                    <td><code>@row.Host.Address</code></td>
+                    <td>
+                        @if (!row.Host.IsEnabled)
+                        {
+                            <span class="badge text-bg-secondary">Paused</span>
+                        }
+                        else if (row.Last is null)
+                        {
+                            <span class="badge text-bg-light text-muted">Waiting…</span>
+                        }
+                        else if (row.Last.RoundtripMs is null)
+                        {
+                            <span class="badge text-bg-danger">Down</span>
+                        }
+                        else
+                        {
+                            <span class="badge text-bg-success">Up</span>
+                        }
+                    </td>
+                    <td>
+                        @if (row.Last is { } last)
+                        {
+                            <span class="ping-value">@(last.RoundtripMs is int ms ? $"{ms} ms" : "no reply")</span>
+                            <small class="text-muted ms-2">@RelativeTime(last.TimestampUtc)</small>
+                        }
+                        else
+                        {
+                            <span class="text-muted">—</span>
+                        }
+                    </td>
+                    <td class="text-end">
+                        @if (_pendingDeleteId == row.Host.Id)
+                        {
+                            <button class="btn btn-sm btn-danger" @onclick="() => DeleteAsync(row.Host.Id)" @onclick:stopPropagation>Confirm delete</button>
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => _pendingDeleteId = null" @onclick:stopPropagation>Cancel</button>
+                        }
+                        else
+                        {
+                            <button class="btn btn-sm btn-outline-primary" @onclick="() => BeginEdit(row.Host)" @onclick:stopPropagation>Edit</button>
+                            <button class="btn btn-sm btn-outline-danger" @onclick="() => _pendingDeleteId = row.Host.Id" @onclick:stopPropagation>Delete</button>
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+<div class="card" style="max-width: 44rem;">
+    <div class="card-body">
+        <h5 class="card-title">@(_form.Id is null ? "Add host" : "Edit host")</h5>
+        @if (_error is not null)
+        {
+            <div class="alert alert-danger py-2">@_error</div>
+        }
+        <EditForm Model="_form" OnValidSubmit="SaveAsync">
+            <DataAnnotationsValidator />
+            <div class="row g-2">
+                <div class="col-sm-4">
+                    <label class="form-label" for="host-name">Name</label>
+                    <InputText id="host-name" class="form-control" @bind-Value="_form.Name" />
+                    <ValidationMessage For="() => _form.Name" />
+                </div>
+                <div class="col-sm-5">
+                    <label class="form-label" for="host-address">Address</label>
+                    <InputText id="host-address" class="form-control" @bind-Value="_form.Address"
+                               placeholder="e.g. 192.168.1.1 or example.com" />
+                    <ValidationMessage For="() => _form.Address" />
+                </div>
+                <div class="col-sm-3">
+                    <label class="form-label d-block">&nbsp;</label>
+                    <div class="form-check">
+                        <InputCheckbox id="host-enabled" class="form-check-input" @bind-Value="_form.IsEnabled" />
+                        <label class="form-check-label" for="host-enabled">Enabled</label>
+                    </div>
+                </div>
+            </div>
+            <div class="mt-3">
+                <button type="submit" class="btn btn-primary btn-sm">@(_form.Id is null ? "Add host" : "Save changes")</button>
+                @if (_form.Id is not null)
+                {
+                    <button type="button" class="btn btn-outline-secondary btn-sm ms-1" @onclick="ResetForm">Cancel</button>
+                }
+            </div>
+        </EditForm>
+    </div>
+</div>
+
+@code {
+    private sealed record HostRow(MonitoredHost Host, PingAttempt? Last);
+
+    private List<HostRow> _rows = [];
+    private HostForm _form = new();
+    private int? _pendingDeleteId;
+    private string? _error;
+    private readonly CancellationTokenSource _cts = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        _ = AutoRefreshAsync();
+    }
+
+    private async Task AutoRefreshAsync()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+            while (await timer.WaitForNextTickAsync(_cts.Token))
+            {
+                await LoadAsync();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);
+        var rows = await db.Hosts.AsNoTracking()
+            .OrderBy(h => h.Name)
+            .Select(h => new
+            {
+                Host = h,
+                Last = h.PingAttempts.OrderByDescending(a => a.TimestampUtc).FirstOrDefault(),
+            })
+            .ToListAsync(_cts.Token);
+        _rows = rows.Select(r => new HostRow(r.Host, r.Last)).ToList();
+    }
+
+    private async Task SaveAsync()
+    {
+        var name = _form.Name.Trim();
+        var address = _form.Address.Trim();
+        await using var db = await DbFactory.CreateDbContextAsync();
+        try
+        {
+            if (_form.Id is int id)
+            {
+                var host = await db.Hosts.FindAsync(id);
+                if (host is null)
+                {
+                    _error = "This host no longer exists.";
+                    return;
+                }
+
+                host.Name = name;
+                host.Address = address;
+                host.IsEnabled = _form.IsEnabled;
+            }
+            else
+            {
+                db.Hosts.Add(new MonitoredHost
+                {
+                    Name = name,
+                    Address = address,
+                    IsEnabled = _form.IsEnabled,
+                    CreatedUtc = DateTime.UtcNow,
+                });
+            }
+
+            await db.SaveChangesAsync();
+        }
+        catch (DbUpdateException)
+        {
+            _error = $"A host with address \"{address}\" already exists.";
+            return;
+        }
+
+        _error = null;
+        ResetForm();
+        await LoadAsync();
+    }
+
+    private async Task DeleteAsync(int id)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        await db.Hosts.Where(h => h.Id == id).ExecuteDeleteAsync();
+        _pendingDeleteId = null;
+        if (_form.Id == id)
+        {
+            ResetForm();
+        }
+
+        await LoadAsync();
+    }
+
+    private void BeginEdit(MonitoredHost host)
+    {
+        _form = new HostForm
+        {
+            Id = host.Id,
+            Name = host.Name,
+            Address = host.Address,
+            IsEnabled = host.IsEnabled,
+        };
+        _error = null;
+        _pendingDeleteId = null;
+    }
+
+    private void ResetForm()
+    {
+        _form = new HostForm();
+        _error = null;
+    }
+
+    private void OpenGraph(int hostId) => Navigation.NavigateTo($"graph/{hostId}");
+
+    private static string RelativeTime(DateTime timestampUtc)
+    {
+        var age = DateTime.UtcNow - timestampUtc;
+        return age switch
+        {
+            { TotalSeconds: < 5 } => "just now",
+            { TotalMinutes: < 1 } => $"{(int)age.TotalSeconds}s ago",
+            { TotalHours: < 1 } => $"{(int)age.TotalMinutes}m ago",
+            { TotalDays: < 1 } => $"{(int)age.TotalHours}h ago",
+            _ => timestampUtc.ToLocalTime().ToString("g"),
+        };
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        _cts.Dispose();
+    }
+
+    private sealed class HostForm
+    {
+        public int? Id { get; set; }
+
+        [Required(ErrorMessage = "Name is required.")]
+        [StringLength(100)]
+        public string Name { get; set; } = string.Empty;
+
+        [Required(ErrorMessage = "Address is required.")]
+        [StringLength(253)]
+        public string Address { get; set; } = string.Empty;
+
+        public bool IsEnabled { get; set; } = true;
+    }
+}

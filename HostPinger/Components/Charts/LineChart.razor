@@ -1,0 +1,316 @@
+@using System.Globalization
+
+<div class="chart-card">
+    @if (!HasAnyData)
+    {
+        <div class="chart-empty">No ping data in this window yet.</div>
+    }
+    else
+    {
+        <div class="chart-wrap">
+            <svg width="@F(Width)" height="@F(Height)" viewBox="0 0 @F(Width) @F(Height)" role="img"
+                 aria-label="Ping round-trip time over time"
+                 @onmousemove="OnMouseMove" @onmouseleave="ClearHover">
+                @foreach (var tick in _yTicks)
+                {
+                    var y = YToPixel(tick);
+                    <line x1="@F(PlotLeft)" y1="@F(y)" x2="@F(PlotLeft + _plotWidth)" y2="@F(y)" class="grid" />
+                    @SvgText(PlotLeft - 8, y, "end", true, MutedInk, 11, YLabel(tick))
+                }
+                @foreach (var tick in _xTicks)
+                {
+                    var x = XToPixel(tick);
+                    <line x1="@F(x)" y1="@F(PlotTop + _plotHeight)" x2="@F(x)" y2="@F(PlotTop + _plotHeight + 4)" class="axis" />
+                    @SvgText(x, PlotTop + _plotHeight + 17, "middle", false, MutedInk, 11, TimeLabel(tick))
+                }
+                <line x1="@F(PlotLeft)" y1="@F(PlotTop + _plotHeight)" x2="@F(PlotLeft + _plotWidth)" y2="@F(PlotTop + _plotHeight)" class="axis" />
+
+                @foreach (var item in _rendered)
+                {
+                    @foreach (var segment in item.Geometry.Segments)
+                    {
+                        @if (segment.Count == 1)
+                        {
+                            <circle cx="@F(segment[0].X + PlotLeft)" cy="@F(segment[0].Y + PlotTop)" r="2.5" fill="@item.Series.Color" />
+                        }
+                        else
+                        {
+                            <polyline points="@PointsAttribute(segment)" fill="none" stroke="@item.Series.Color"
+                                      stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
+                        }
+                    }
+                    @foreach (var marker in item.Geometry.DownMarkers)
+                    {
+                        <path d="@DownMarkerPath(marker, item.Lane)" stroke="@item.Series.Color" stroke-width="1.5" fill="none" />
+                    }
+                    @if (_directLabels.TryGetValue(item.Series.Label, out var label))
+                    {
+                        <circle cx="@F(label.CircleX)" cy="@F(label.Y)" r="4" fill="@item.Series.Color" />
+                        @SvgText(label.TextX, label.Y, "start", true, SecondaryInk, 12, item.Series.Label)
+                    }
+                }
+                @if (_hoverX is double crosshairX)
+                {
+                    <line x1="@F(crosshairX)" y1="@F(PlotTop)" x2="@F(crosshairX)" y2="@F(PlotTop + _plotHeight)" class="crosshair" />
+                }
+            </svg>
+            @if (_hoverX is double tooltipX && _hoverRows.Count > 0)
+            {
+                <div class="chart-tooltip" style="left: @(F(TooltipLeft(tooltipX)))px; top: 12px;">
+                    <div class="tooltip-time">@_hoverTime</div>
+                    @foreach (var row in _hoverRows)
+                    {
+                        <div class="tooltip-row">
+                            <span class="swatch" style="background:@row.Color"></span>
+                            <span class="name">@row.Label</span>
+                            <span class="val">@row.Value</span>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    }
+    @if (Series.Count >= 2)
+    {
+        <div class="legend">
+            @foreach (var series in Series)
+            {
+                <button type="button" class="legend-item @(_hidden.Contains(series.Label) ? "is-hidden" : "")"
+                        @onclick="() => ToggleSeries(series.Label)">
+                    <span class="swatch" style="background:@series.Color"></span>
+                    <span class="name">@series.Label</span>
+                    <span class="val">@LatestText(series)</span>
+                </button>
+            }
+        </div>
+    }
+    else if (Series.Count == 1)
+    {
+        <div class="legend">
+            <div class="legend-item static">
+                <span class="swatch" style="background:@Series[0].Color"></span>
+                <span class="name">@Series[0].Label</span>
+                <span class="val">@LatestText(Series[0])</span>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private const double PlotLeft = 56;
+    private const double PlotTop = 16;
+    private const double BottomPad = 34;
+    private const double HoverRadiusPx = 24;
+    private const string MutedInk = "#898781";
+    private const string SecondaryInk = "#52514e";
+
+    [Parameter, EditorRequired] public IReadOnlyList<ChartSeriesData> Series { get; set; } = [];
+    [Parameter] public DateTime RangeStartUtc { get; set; }
+    [Parameter] public DateTime RangeEndUtc { get; set; }
+    [Parameter] public double Width { get; set; } = 920;
+    [Parameter] public double Height { get; set; } = 340;
+
+    private double _rightPad;
+    private double _plotWidth;
+    private double _plotHeight;
+    private double _scaleMax = 1;
+    private IReadOnlyList<double> _yTicks = [];
+    private IReadOnlyList<DateTime> _xTicks = [];
+    private List<RenderedSeries> _rendered = [];
+    private Dictionary<string, DirectLabel> _directLabels = new();
+    private readonly HashSet<string> _hidden = [];
+    private double? _hoverX;
+    private string _hoverTime = string.Empty;
+    private List<HoverRow> _hoverRows = [];
+
+    private sealed record RenderedSeries(ChartSeriesData Series, ChartSeriesGeometry Geometry, int Lane);
+    private sealed record DirectLabel(double CircleX, double TextX, double Y);
+    private sealed record HoverRow(string Label, string Color, string Value);
+
+    private bool HasAnyData => Series.Any(s => s.Samples.Count > 0);
+
+    protected override void OnParametersSet() => Recompute();
+
+    private void Recompute()
+    {
+        var visible = Series.Where(s => !_hidden.Contains(s.Label)).ToList();
+        var showDirectLabels = Series.Count is >= 2 and <= 4;
+        _rightPad = showDirectLabels ? 120 : 20;
+        _plotWidth = Math.Max(50, Width - PlotLeft - _rightPad);
+        _plotHeight = Math.Max(50, Height - PlotTop - BottomPad);
+
+        double maxValue = 0;
+        foreach (var series in visible)
+        {
+            foreach (var sample in series.Samples)
+            {
+                if (sample.TimestampUtc >= RangeStartUtc && sample.TimestampUtc <= RangeEndUtc
+                    && sample.RoundtripMs is int value && value > maxValue)
+                {
+                    maxValue = value;
+                }
+            }
+        }
+
+        _yTicks = ChartMath.NiceTicks(maxValue, 6);
+        _scaleMax = _yTicks[^1];
+        _xTicks = ChartMath.TimeTicks(RangeStartUtc, RangeEndUtc, 7);
+        _rendered = visible
+            .Select((s, i) => new RenderedSeries(
+                s,
+                ChartMath.BuildGeometry(s.Samples, RangeStartUtc, RangeEndUtc, _scaleMax, _plotWidth, _plotHeight),
+                i))
+            .ToList();
+
+        _directLabels = new();
+        if (showDirectLabels)
+        {
+            var labeled = _rendered
+                .Where(r => r.Geometry.Segments.Count > 0)
+                .Select(r => (r.Series.Label, LastPoint: r.Geometry.Segments[^1][^1]))
+                .ToList();
+            var positions = ChartMath.SpreadLabels(
+                labeled.Select(l => l.LastPoint.Y + PlotTop).ToList(),
+                16, PlotTop + 6, PlotTop + _plotHeight);
+            for (var i = 0; i < labeled.Count; i++)
+            {
+                _directLabels[labeled[i].Label] = new DirectLabel(
+                    PlotLeft + _plotWidth + 10, PlotLeft + _plotWidth + 18, positions[i]);
+            }
+        }
+    }
+
+    private void ToggleSeries(string label)
+    {
+        if (!_hidden.Remove(label))
+        {
+            _hidden.Add(label);
+        }
+
+        ClearHover();
+        Recompute();
+    }
+
+    private void OnMouseMove(MouseEventArgs e)
+    {
+        var x = e.OffsetX;
+        if (x < PlotLeft || x > PlotLeft + _plotWidth || _rendered.Count == 0)
+        {
+            ClearHover();
+            return;
+        }
+
+        var rangeTicks = (RangeEndUtc - RangeStartUtc).Ticks;
+        var targetUtc = RangeStartUtc + TimeSpan.FromTicks((long)((x - PlotLeft) / _plotWidth * rangeTicks));
+
+        var rows = new List<HoverRow>();
+        var bestDistance = double.MaxValue;
+        var bestTime = default(DateTime);
+        foreach (var item in _rendered)
+        {
+            var index = ChartMath.NearestSampleIndex(item.Series.Samples, targetUtc);
+            if (index < 0)
+            {
+                continue;
+            }
+
+            var sample = item.Series.Samples[index];
+            if (sample.TimestampUtc < RangeStartUtc || sample.TimestampUtc > RangeEndUtc)
+            {
+                continue;
+            }
+
+            var sampleX = XToPixel(sample.TimestampUtc);
+            var distance = Math.Abs(sampleX - x);
+            if (distance > HoverRadiusPx)
+            {
+                continue;
+            }
+
+            rows.Add(new HoverRow(
+                item.Series.Label,
+                item.Series.Color,
+                sample.RoundtripMs is int value ? $"{value} ms" : "down"));
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                bestTime = sample.TimestampUtc;
+            }
+        }
+
+        if (rows.Count == 0)
+        {
+            ClearHover();
+            return;
+        }
+
+        _hoverX = XToPixel(bestTime);
+        _hoverTime = bestTime.ToLocalTime().ToString("HH:mm:ss");
+        _hoverRows = rows;
+    }
+
+    private void ClearHover()
+    {
+        _hoverX = null;
+        _hoverTime = string.Empty;
+        _hoverRows = [];
+    }
+
+    private double XToPixel(DateTime timestampUtc) =>
+        PlotLeft + (timestampUtc - RangeStartUtc).Ticks / (double)(RangeEndUtc - RangeStartUtc).Ticks * _plotWidth;
+
+    private double YToPixel(double value) =>
+        PlotTop + _plotHeight - value / _scaleMax * _plotHeight;
+
+    private double TooltipLeft(double hoverX) =>
+        hoverX > PlotLeft + _plotWidth * 0.6 ? hoverX - 195 : hoverX + 14;
+
+    private string PointsAttribute(IReadOnlyList<ChartPoint> segment) =>
+        string.Join(' ', segment.Select(p => $"{F(p.X + PlotLeft)},{F(p.Y + PlotTop)}"));
+
+    private string DownMarkerPath(ChartPoint marker, int lane)
+    {
+        var cx = marker.X + PlotLeft;
+        var cy = PlotTop + _plotHeight - 5 - lane * 8;
+        return $"M {F(cx - 3)} {F(cy - 3)} L {F(cx + 3)} {F(cy + 3)} M {F(cx - 3)} {F(cy + 3)} L {F(cx + 3)} {F(cy - 3)}";
+    }
+
+    private string YLabel(double tick)
+    {
+        var text = tick.ToString(tick % 1 == 0 ? "0" : "0.##", CultureInfo.InvariantCulture);
+        return tick == _yTicks[^1] ? $"{text} ms" : text;
+    }
+
+    private string TimeLabel(DateTime tickUtc)
+    {
+        var range = RangeEndUtc - RangeStartUtc;
+        var format = range <= TimeSpan.FromDays(1) ? "HH:mm"
+            : range <= TimeSpan.FromDays(7) ? "ddd HH:mm"
+            : "MM-dd";
+        return tickUtc.ToLocalTime().ToString(format);
+    }
+
+    private static string LatestText(ChartSeriesData series)
+    {
+        if (series.Samples.Count == 0)
+        {
+            return "no data";
+        }
+
+        var last = series.Samples[^1];
+        return last.RoundtripMs is int value ? $"{value} ms" : "down";
+    }
+
+    private static string F(double value) => value.ToString("0.##", CultureInfo.InvariantCulture);
+
+    // Razor reserves the <text> tag, so SVG text elements are emitted as raw markup with inline
+    // presentation attributes (scoped CSS would not reach injected markup either).
+    private static MarkupString SvgText(double x, double y, string anchor, bool middleBaseline, string fill, int fontSize, string content)
+    {
+        var baseline = middleBaseline ? " dominant-baseline=\"middle\"" : string.Empty;
+        return new MarkupString(
+            $"<text x=\"{F(x)}\" y=\"{F(y)}\" text-anchor=\"{anchor}\"{baseline} fill=\"{fill}\" " +
+            $"font-size=\"{fontSize}\" style=\"font-variant-numeric: tabular-nums\">" +
+            $"{System.Net.WebUtility.HtmlEncode(content)}</text>");
+    }
+}

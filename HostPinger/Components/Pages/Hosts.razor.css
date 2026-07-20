@@ -1,0 +1,7 @@
+.host-row {
+    cursor: pointer;
+}
+
+.ping-value {
+    font-variant-numeric: tabular-nums;
+}

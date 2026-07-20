@@ -1,0 +1,181 @@
+@page "/graph"
+@page "/graph/{HostIdsSegment}"
+@rendermode InteractiveServer
+@using HostPinger.Components.Charts
+@inject IDbContextFactory<HostPingerDbContext> DbFactory
+@inject NavigationManager Navigation
+@implements IDisposable
+
+<PageTitle>Ping graph</PageTitle>
+
+<h1>Ping graph</h1>
+
+@if (_allHosts.Count == 0)
+{
+    <p class="text-muted">No hosts configured yet. <a href="/">Add one on the Hosts page.</a></p>
+}
+else
+{
+    <div class="d-flex flex-wrap column-gap-4 row-gap-1 mb-2">
+        @foreach (var (host, index) in _allHosts.Select((h, i) => (h, i)))
+        {
+            <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="@($"host-{host.Id}")"
+                       checked="@_selected.Contains(host.Id)"
+                       disabled="@(!_selected.Contains(host.Id) && _selected.Count >= ChartPalette.MaxSeries)"
+                       @onchange="e => ToggleHost(host.Id, (bool)e.Value!)" />
+                <label class="form-check-label" for="@($"host-{host.Id}")">
+                    <span class="swatch" style="background:@ChartPalette.GetColor(index)"></span>@host.Name
+                </label>
+            </div>
+        }
+    </div>
+    @if (_selected.Count >= ChartPalette.MaxSeries)
+    {
+        <p class="text-muted small">Up to @ChartPalette.MaxSeries hosts can be plotted at once.</p>
+    }
+
+    <div class="btn-group mb-3" role="group" aria-label="Time window">
+        @foreach (var window in Windows)
+        {
+            <button type="button"
+                    class="btn btn-sm @(window.Span == _window ? "btn-primary" : "btn-outline-secondary")"
+                    @onclick="() => SetWindowAsync(window.Span)">@window.Label</button>
+        }
+    </div>
+
+    @if (_series.Count == 0)
+    {
+        <p class="text-muted">Select at least one host to plot.</p>
+    }
+    else
+    {
+        <LineChart Series="_series" RangeStartUtc="_rangeStart" RangeEndUtc="_rangeEnd" />
+    }
+}
+
+@code {
+    private static readonly (string Label, TimeSpan Span)[] Windows =
+    [
+        ("15 min", TimeSpan.FromMinutes(15)),
+        ("1 h", TimeSpan.FromHours(1)),
+        ("6 h", TimeSpan.FromHours(6)),
+        ("24 h", TimeSpan.FromHours(24)),
+        ("7 d", TimeSpan.FromDays(7)),
+    ];
+
+    private const int MaxPointsPerSeries = 600;
+
+    [Parameter] public string? HostIdsSegment { get; set; }
+
+    private List<MonitoredHost> _allHosts = [];
+    private HashSet<int> _selected = [];
+    private TimeSpan _window = TimeSpan.FromHours(1);
+    private List<ChartSeriesData> _series = [];
+    private DateTime _rangeStart;
+    private DateTime _rangeEnd;
+    private readonly CancellationTokenSource _cts = new();
+    private bool _refreshLoopStarted;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _selected = ParseIds(HostIdsSegment);
+        await LoadAsync();
+        if (!_refreshLoopStarted)
+        {
+            _refreshLoopStarted = true;
+            _ = AutoRefreshAsync();
+        }
+    }
+
+    private async Task AutoRefreshAsync()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+            while (await timer.WaitForNextTickAsync(_cts.Token))
+            {
+                await LoadAsync();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        _rangeEnd = DateTime.UtcNow;
+        _rangeStart = _rangeEnd - _window;
+
+        await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);
+        _allHosts = await db.Hosts.AsNoTracking().OrderBy(h => h.Id).ToListAsync(_cts.Token);
+
+        var ids = _selected.Where(id => _allHosts.Any(h => h.Id == id)).ToArray();
+        var attempts = await db.PingAttempts.AsNoTracking()
+            .Where(a => ids.Contains(a.HostId) && a.TimestampUtc >= _rangeStart)
+            .OrderBy(a => a.TimestampUtc)
+            .Select(a => new { a.HostId, a.TimestampUtc, a.RoundtripMs })
+            .ToListAsync(_cts.Token);
+        var samplesByHost = attempts
+            .GroupBy(a => a.HostId)
+            .ToDictionary(
+                g => g.Key,
+                g => (IReadOnlyList<ChartSample>)g.Select(a => new ChartSample(a.TimestampUtc, a.RoundtripMs)).ToList());
+
+        _series = _allHosts
+            .Select((host, index) => (host, index))
+            .Where(t => _selected.Contains(t.host.Id))
+            .Select(t => new ChartSeriesData(
+                t.host.Name,
+                ChartPalette.GetColor(t.index),
+                ChartMath.Downsample(
+                    samplesByHost.GetValueOrDefault(t.host.Id) ?? Array.Empty<ChartSample>(),
+                    MaxPointsPerSeries)))
+            .ToList();
+    }
+
+    private void ToggleHost(int hostId, bool isChecked)
+    {
+        if (isChecked)
+        {
+            _selected.Add(hostId);
+        }
+        else
+        {
+            _selected.Remove(hostId);
+        }
+
+        var url = _selected.Count == 0
+            ? "graph"
+            : $"graph/{string.Join(',', _allHosts.Where(h => _selected.Contains(h.Id)).Select(h => h.Id))}";
+        Navigation.NavigateTo(url, replace: true);
+    }
+
+    private async Task SetWindowAsync(TimeSpan window)
+    {
+        _window = window;
+        await LoadAsync();
+    }
+
+    private static HashSet<int> ParseIds(string? segment)
+    {
+        var ids = new HashSet<int>();
+        foreach (var part in (segment ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (int.TryParse(part, out var id))
+            {
+                ids.Add(id);
+            }
+        }
+
+        return ids;
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        _cts.Dispose();
+    }
+}
