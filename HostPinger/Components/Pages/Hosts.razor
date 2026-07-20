@@ -21,9 +21,9 @@ else
             <tr>
                 <th>Name</th>
                 <th>Address</th>
-                <th>Enabled</th>
                 <th>Status</th>
                 <th>Last ping</th>
+                <th>Enabled</th>
                 <th style="width: 13rem;"></th>
             </tr>
         </thead>
@@ -33,14 +33,6 @@ else
                 <tr class="host-row" @onclick="() => OpenGraph(row.Host.Id)">
                     <td>@row.Host.Name</td>
                     <td><code>@row.Host.Address</code></td>
-                    <td @onclick:stopPropagation>
-                        <div class="form-check form-switch">
-                            <input class="form-check-input" type="checkbox" role="switch"
-                                   title="@(row.Host.IsEnabled ? "Pause monitoring" : "Resume monitoring")"
-                                   checked="@row.Host.IsEnabled"
-                                   @onchange="e => SetEnabledAsync(row.Host.Id, (bool)e.Value!)" />
-                        </div>
-                    </td>
                     <td>
                         @if (!row.Host.IsEnabled)
                         {
@@ -69,6 +61,14 @@ else
                         {
                             <span class="text-muted">—</span>
                         }
+                    </td>
+                    <td @onclick:stopPropagation>
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" role="switch"
+                                   title="@(row.Host.IsEnabled ? "Pause monitoring" : "Resume monitoring")"
+                                   checked="@row.Host.IsEnabled"
+                                   @onchange="e => SetEnabledAsync(row.Host.Id, (bool)e.Value!)" />
+                        </div>
                     </td>
                     <td class="text-end">
                         @if (_pendingDeleteId == row.Host.Id)
