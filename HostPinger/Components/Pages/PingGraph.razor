@@ -4,6 +4,7 @@
 @using HostPinger.Components.Charts
 @inject IDbContextFactory<HostPingerDbContext> DbFactory
 @inject NavigationManager Navigation
+@inject IJSRuntime JS
 @implements IDisposable
 
 <PageTitle>Ping graph</PageTitle>
@@ -16,24 +17,45 @@
 }
 else
 {
-    <div class="d-flex flex-wrap column-gap-4 row-gap-1 mb-2">
-        @foreach (var (host, index) in _allHosts.Select((h, i) => (h, i)))
+    <div class="host-picker mb-2">
+        <button type="button" class="btn btn-outline-secondary dropdown-toggle" @onclick="ToggleDropdown">
+            @SelectionSummary
+        </button>
+        @if (_dropdownOpen)
         {
-            <div class="form-check">
-                <input class="form-check-input" type="checkbox" id="@($"host-{host.Id}")"
-                       checked="@_selected.Contains(host.Id)"
-                       disabled="@(!_selected.Contains(host.Id) && _selected.Count >= ChartPalette.MaxSeries)"
-                       @onchange="e => ToggleHost(host.Id, (bool)e.Value!)" />
-                <label class="form-check-label" for="@($"host-{host.Id}")">
-                    <span class="swatch" style="background:@ChartPalette.GetColor(index)"></span>@host.Name
-                </label>
+            <div class="picker-backdrop" @onclick="CloseDropdown"></div>
+            <div class="picker-panel">
+                <input @ref="_searchInput" class="form-control form-control-sm mb-2" type="search"
+                       placeholder="Search hosts…" value="@_search"
+                       @oninput="e => _search = (string?)e.Value ?? string.Empty"
+                       @onkeydown="OnSearchKeyDown" />
+                @{ var filtered = FilteredHosts().ToList(); }
+                <div class="picker-list">
+                    @foreach (var (host, index) in filtered)
+                    {
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="@($"host-{host.Id}")"
+                                   checked="@_selected.Contains(host.Id)"
+                                   disabled="@(!_selected.Contains(host.Id) && _selected.Count >= ChartPalette.MaxSeries)"
+                                   @onchange="e => ToggleHostAsync(host.Id, (bool)e.Value!)" />
+                            <label class="form-check-label" for="@($"host-{host.Id}")">
+                                <span class="swatch" style="background:@ChartPalette.GetColor(index)"></span>@host.Name
+                                <small class="text-muted ms-1">@host.Address</small>
+                            </label>
+                        </div>
+                    }
+                    @if (filtered.Count == 0)
+                    {
+                        <div class="text-muted small">No hosts match "@_search".</div>
+                    }
+                </div>
+                @if (_selected.Count >= ChartPalette.MaxSeries)
+                {
+                    <div class="text-muted small mt-1">Up to @ChartPalette.MaxSeries hosts can be plotted at once.</div>
+                }
             </div>
         }
     </div>
-    @if (_selected.Count >= ChartPalette.MaxSeries)
-    {
-        <p class="text-muted small">Up to @ChartPalette.MaxSeries hosts can be plotted at once.</p>
-    }
 
     <div class="btn-group mb-3" role="group" aria-label="Time window">
         @foreach (var window in Windows)
@@ -76,6 +98,17 @@ else
     private DateTime _rangeEnd;
     private readonly CancellationTokenSource _cts = new();
     private bool _refreshLoopStarted;
+    private bool _dropdownOpen;
+    private bool _focusSearchPending;
+    private string _search = string.Empty;
+    private ElementReference _searchInput;
+
+    private string SelectionSummary => _selected.Count switch
+    {
+        0 => "Select hosts…",
+        1 => _allHosts.FirstOrDefault(h => h.Id == _selected.First())?.Name ?? "1 host selected",
+        var count => $"{count} hosts selected",
+    };
 
     protected override async Task OnParametersSetAsync()
     {
@@ -86,6 +119,48 @@ else
             _refreshLoopStarted = true;
             _ = AutoRefreshAsync();
         }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_focusSearchPending)
+        {
+            _focusSearchPending = false;
+            await _searchInput.FocusAsync();
+        }
+    }
+
+    private void ToggleDropdown()
+    {
+        _dropdownOpen = !_dropdownOpen;
+        if (_dropdownOpen)
+        {
+            _search = string.Empty;
+            _focusSearchPending = true;
+        }
+    }
+
+    private void CloseDropdown() => _dropdownOpen = false;
+
+    private void OnSearchKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape")
+        {
+            CloseDropdown();
+        }
+    }
+
+    private IEnumerable<(MonitoredHost Host, int Index)> FilteredHosts()
+    {
+        var hosts = _allHosts.Select((host, index) => (Host: host, Index: index));
+        if (string.IsNullOrWhiteSpace(_search))
+        {
+            return hosts;
+        }
+
+        return hosts.Where(t =>
+            t.Host.Name.Contains(_search, StringComparison.OrdinalIgnoreCase)
+            || t.Host.Address.Contains(_search, StringComparison.OrdinalIgnoreCase));
     }
 
     private async Task AutoRefreshAsync()
@@ -136,7 +211,7 @@ else
             .ToList();
     }
 
-    private void ToggleHost(int hostId, bool isChecked)
+    private async Task ToggleHostAsync(int hostId, bool isChecked)
     {
         if (isChecked)
         {
@@ -147,10 +222,13 @@ else
             _selected.Remove(hostId);
         }
 
+        // Update the URL without navigating: a navigation would remount the page (per-page
+        // interactivity) and close the picker while the user is still selecting hosts.
         var url = _selected.Count == 0
             ? "graph"
             : $"graph/{string.Join(',', _allHosts.Where(h => _selected.Contains(h.Id)).Select(h => h.Id))}";
-        Navigation.NavigateTo(url, replace: true);
+        await JS.InvokeVoidAsync("history.replaceState", null, string.Empty, Navigation.ToAbsoluteUri(url).ToString());
+        await LoadAsync();
     }
 
     private async Task SetWindowAsync(TimeSpan window)

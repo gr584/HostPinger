@@ -1,3 +1,32 @@
+.host-picker {
+    position: relative;
+    display: inline-block;
+}
+
+.picker-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+}
+
+.picker-panel {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 1001;
+    background: #ffffff;
+    border: 1px solid rgba(11, 11, 11, 0.15);
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+    padding: 10px;
+    min-width: 300px;
+}
+
+.picker-list {
+    max-height: 260px;
+    overflow-y: auto;
+}
+
 .swatch {
     display: inline-block;
     width: 12px;
