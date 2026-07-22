@@ -57,7 +57,7 @@ else
                         <input @ref="_searchInput" class="form-control form-control-sm mb-2" type="search"
                                placeholder="Search hosts…" value="@_search"
                                @oninput="e => _search = (string?)e.Value ?? string.Empty"
-                               @onkeydown="OnSearchKeyDown" />
+                               @onkeydown="OnSearchKeyDownAsync" />
                         @{ var filtered = FilteredHosts().ToList(); }
                         <div class="picker-list">
                             @foreach (var (host, index) in filtered)
@@ -157,12 +157,35 @@ else
 
     private void CloseDropdown() => _dropdownOpen = false;
 
-    private void OnSearchKeyDown(KeyboardEventArgs e)
+    private async Task OnSearchKeyDownAsync(KeyboardEventArgs e)
     {
         if (e.Key == "Escape")
         {
             CloseDropdown();
+            return;
         }
+
+        if (e.Key != "Enter")
+        {
+            return;
+        }
+
+        // Enter is a shortcut for the single match: toggle it and close the picker.
+        var matches = FilteredHosts().ToList();
+        if (matches.Count != 1)
+        {
+            return;
+        }
+
+        var hostId = matches[0].Host.Id;
+        var isSelected = _selected.Contains(hostId);
+        if (!isSelected && _selected.Count >= ChartPalette.MaxSeries)
+        {
+            return;
+        }
+
+        await ToggleHostAsync(hostId, !isSelected);
+        CloseDropdown();
     }
 
     private IEnumerable<(MonitoredHost Host, int Index)> FilteredHosts()
