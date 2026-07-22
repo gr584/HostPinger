@@ -19,11 +19,10 @@
 }
 
 /* The time-window button group sizes to its content and drives the column width;
-   the host picker and clear button fill that width without widening the column
-   (width:0 keeps them out of the column's intrinsic-width calculation, min-width
-   stretches them back to the full column width once it is resolved). */
-.host-picker,
-.clear-hosts {
+   the host picker fills that width without widening the column (width:0 keeps it
+   out of the column's intrinsic-width calculation, min-width stretches it back to
+   the full column width once it is resolved). */
+.host-picker {
     width: 0;
     min-width: 100%;
 }
@@ -56,6 +55,10 @@
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
     padding: 10px;
     min-width: 300px;
+}
+
+.clear-hosts {
+    width: 100%;
 }
 
 .picker-list {

@@ -50,6 +50,10 @@ else
                 {
                     <div class="picker-backdrop" @onclick="CloseDropdown"></div>
                     <div class="picker-panel">
+                        <button type="button" class="btn btn-sm btn-outline-secondary clear-hosts mb-2"
+                                disabled="@(_selected.Count == 0)" @onclick="ClearHostsAsync">
+                            Clear selection
+                        </button>
                         <input @ref="_searchInput" class="form-control form-control-sm mb-2" type="search"
                                placeholder="Search hosts…" value="@_search"
                                @oninput="e => _search = (string?)e.Value ?? string.Empty"
@@ -81,11 +85,6 @@ else
                     </div>
                 }
             </div>
-
-            <button type="button" class="btn btn-outline-secondary clear-hosts"
-                    disabled="@(_selected.Count == 0)" @onclick="ClearHostsAsync">
-                Clear selection
-            </button>
         </div>
     </div>
 }
