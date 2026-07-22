@@ -78,6 +78,40 @@ namespace HostPinger.Test
         }
 
         [Test]
+        public void BuildGeometry_SplitsSegmentsWhereGapExceedsMaxGap()
+        {
+            var samples = new[]
+            {
+                new ChartSample(Start.AddMinutes(1), 10),
+                new ChartSample(Start.AddMinutes(2), 20),
+                new ChartSample(Start.AddMinutes(9), 30),
+            };
+
+            var geometry = ChartMath.BuildGeometry(
+                samples, Start, Start.AddMinutes(10), 100, 100, 100, maxGap: TimeSpan.FromMinutes(5));
+
+            Assert.That(geometry.Segments, Has.Count.EqualTo(2));
+            Assert.That(geometry.Segments[0], Has.Count.EqualTo(2));
+            Assert.That(geometry.Segments[1], Has.Count.EqualTo(1));
+            Assert.That(geometry.DownMarkers, Is.Empty);
+        }
+
+        [Test]
+        public void BuildGeometry_WithoutMaxGapConnectsAcrossLargeGaps()
+        {
+            var samples = new[]
+            {
+                new ChartSample(Start.AddMinutes(1), 10),
+                new ChartSample(Start.AddMinutes(9), 30),
+            };
+
+            var geometry = ChartMath.BuildGeometry(samples, Start, Start.AddMinutes(10), 100, 100, 100);
+
+            Assert.That(geometry.Segments, Has.Count.EqualTo(1));
+            Assert.That(geometry.Segments[0], Has.Count.EqualTo(2));
+        }
+
+        [Test]
         public void BuildGeometry_SkipsSamplesOutsideRange()
         {
             var samples = new[]

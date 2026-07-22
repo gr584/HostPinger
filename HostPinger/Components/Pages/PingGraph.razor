@@ -2,9 +2,12 @@
 @page "/graph/{HostIdsSegment}"
 @rendermode InteractiveServer
 @using HostPinger.Components.Charts
+@using HostPinger.Core.Options
+@using Microsoft.Extensions.Options
 @inject IDbContextFactory<HostPingerDbContext> DbFactory
 @inject NavigationManager Navigation
 @inject IJSRuntime JS
+@inject IOptions<PingerOptions> PingerOptions
 @implements IDisposable
 
 <PageTitle>Ping graph</PageTitle>
@@ -72,7 +75,7 @@ else
     }
     else
     {
-        <LineChart Series="_series" RangeStartUtc="_rangeStart" RangeEndUtc="_rangeEnd" />
+        <LineChart Series="_series" RangeStartUtc="_rangeStart" RangeEndUtc="_rangeEnd" UpdateInterval="_updateInterval" />
     }
 }
 
@@ -102,6 +105,7 @@ else
     private bool _focusSearchPending;
     private string _search = string.Empty;
     private ElementReference _searchInput;
+    private TimeSpan _updateInterval;
 
     private string SelectionSummary => _selected.Count switch
     {
@@ -113,6 +117,7 @@ else
     protected override async Task OnParametersSetAsync()
     {
         _selected = ParseIds(HostIdsSegment);
+        _updateInterval = TimeSpan.FromSeconds(Math.Max(1, PingerOptions.Value.IntervalSeconds));
         await LoadAsync();
         if (!_refreshLoopStarted)
         {

@@ -78,7 +78,8 @@ namespace HostPinger.Core.Charting
 
         /// <summary>
         /// Maps time-ordered samples into pixel space: polyline segments split where the host was
-        /// down, plus a baseline marker for every failed ping. Samples outside the range are skipped.
+        /// down or where consecutive samples are further apart than maxGap, plus a baseline marker
+        /// for every failed ping. Samples outside the range are skipped.
         /// </summary>
         public static ChartSeriesGeometry BuildGeometry(
             IEnumerable<ChartSample> samples,
@@ -86,7 +87,8 @@ namespace HostPinger.Core.Charting
             DateTime rangeEndUtc,
             double maxY,
             double width,
-            double height)
+            double height,
+            TimeSpan? maxGap = null)
         {
             if (rangeEndUtc <= rangeStartUtc)
             {
@@ -102,6 +104,7 @@ namespace HostPinger.Core.Charting
             var segments = new List<IReadOnlyList<ChartPoint>>();
             var downMarkers = new List<ChartPoint>();
             var current = new List<ChartPoint>();
+            DateTime? lastTimestampUtc = null;
 
             foreach (var sample in samples)
             {
@@ -113,8 +116,16 @@ namespace HostPinger.Core.Charting
                 var x = (sample.TimestampUtc - rangeStartUtc).Ticks / rangeTicks * width;
                 if (sample.RoundtripMs is int value)
                 {
+                    if (lastTimestampUtc is DateTime previous && maxGap is TimeSpan gap
+                        && sample.TimestampUtc - previous > gap && current.Count > 0)
+                    {
+                        segments.Add(current);
+                        current = [];
+                    }
+
                     var y = height - Math.Min(value, maxY) / maxY * height;
                     current.Add(new ChartPoint(x, y));
+                    lastTimestampUtc = sample.TimestampUtc;
                 }
                 else
                 {
@@ -124,6 +135,8 @@ namespace HostPinger.Core.Charting
                         segments.Add(current);
                         current = [];
                     }
+
+                    lastTimestampUtc = sample.TimestampUtc;
                 }
             }
 

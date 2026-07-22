@@ -109,6 +109,7 @@
     [Parameter] public DateTime RangeEndUtc { get; set; }
     [Parameter] public double Width { get; set; } = 920;
     [Parameter] public double Height { get; set; } = 340;
+    [Parameter] public TimeSpan UpdateInterval { get; set; }
 
     private double _rightPad;
     private double _plotWidth;
@@ -155,10 +156,11 @@
         _yTicks = ChartMath.NiceTicks(maxValue, 6);
         _scaleMax = _yTicks[^1];
         _xTicks = ChartMath.TimeTicks(RangeStartUtc, RangeEndUtc, 7);
+        TimeSpan? maxGap = UpdateInterval > TimeSpan.Zero ? UpdateInterval * 10 : null;
         _rendered = visible
             .Select((s, i) => new RenderedSeries(
                 s,
-                ChartMath.BuildGeometry(s.Samples, RangeStartUtc, RangeEndUtc, _scaleMax, _plotWidth, _plotHeight),
+                ChartMath.BuildGeometry(s.Samples, RangeStartUtc, RangeEndUtc, _scaleMax, _plotWidth, _plotHeight, maxGap),
                 i))
             .ToList();
 
