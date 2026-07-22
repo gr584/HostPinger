@@ -3,14 +3,14 @@
 @inject IJSRuntime JS
 
 <div class="chart-card" @ref="_cardRef">
-    @if (!HasAnyData)
-    {
-        <div class="chart-empty">No ping data in this window yet.</div>
-    }
-    else
-    {
-        <div class="chart-wrap">
-            <svg width="@F(_effectiveWidth)" height="@F(Height)" viewBox="0 0 @F(_effectiveWidth) @F(Height)" role="img"
+    <div class="chart-wrap" @ref="_plotRef">
+        @if (!HasAnyData)
+        {
+            <div class="chart-empty">No ping data in this window yet.</div>
+        }
+        else
+        {
+            <svg width="@F(_effectiveWidth)" height="@F(_effectiveHeight)" viewBox="0 0 @F(_effectiveWidth) @F(_effectiveHeight)" role="img"
                  aria-label="Ping round-trip time over time"
                  @onmousemove="OnMouseMove" @onmouseleave="ClearHover">
                 @foreach (var tick in _yTicks)
@@ -70,8 +70,8 @@
                     }
                 </div>
             }
-        </div>
-    }
+        }
+    </div>
     @if (Series.Count >= 2)
     {
         <div class="legend">
@@ -114,10 +114,12 @@
     [Parameter] public TimeSpan UpdateInterval { get; set; }
 
     private ElementReference _cardRef;
+    private ElementReference _plotRef;
     private IJSObjectReference? _module;
     private IJSObjectReference? _observer;
     private DotNetObjectReference<LineChart>? _selfRef;
     private double _effectiveWidth;
+    private double _effectiveHeight;
     private double _rightPad;
     private double _plotWidth;
     private double _plotHeight;
@@ -144,6 +146,11 @@
             _effectiveWidth = Width;
         }
 
+        if (_effectiveHeight <= 0)
+        {
+            _effectiveHeight = Height;
+        }
+
         Recompute();
     }
 
@@ -156,13 +163,14 @@
 
         _module = await JS.InvokeAsync<IJSObjectReference>("import", "./Components/Charts/LineChart.razor.js");
         _selfRef = DotNetObjectReference.Create(this);
-        _observer = await _module.InvokeAsync<IJSObjectReference>("observeWidth", _cardRef, _selfRef);
+        _observer = await _module.InvokeAsync<IJSObjectReference>("observeSize", _cardRef, _plotRef, _selfRef);
     }
 
     [JSInvokable]
-    public async Task SetWidth(double width)
+    public async Task SetSize(double width, double height)
     {
-        if (width <= 0 || Math.Abs(width - _effectiveWidth) < 1)
+        if (width <= 0 || height <= 0
+            || (Math.Abs(width - _effectiveWidth) < 1 && Math.Abs(height - _effectiveHeight) < 1))
         {
             return;
         }
@@ -170,6 +178,7 @@
         await InvokeAsync(() =>
         {
             _effectiveWidth = width;
+            _effectiveHeight = height;
             Recompute();
             StateHasChanged();
         });
@@ -181,7 +190,7 @@
         var showDirectLabels = Series.Count is >= 2 and <= 4;
         _rightPad = showDirectLabels ? 120 : 20;
         _plotWidth = Math.Max(50, _effectiveWidth - PlotLeft - _rightPad);
-        _plotHeight = Math.Max(50, Height - PlotTop - BottomPad);
+        _plotHeight = Math.Max(50, _effectiveHeight - PlotTop - BottomPad);
 
         double maxValue = 0;
         foreach (var series in visible)

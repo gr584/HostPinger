@@ -4,12 +4,15 @@
     border-radius: 8px;
     padding: 12px;
     max-width: 100%;
-    display: block;
+    display: flex;
+    flex-direction: column;
 }
 
 .chart-wrap {
     position: relative;
-    overflow-x: auto;
+    overflow: hidden;
+    flex: 1 1 auto;
+    min-height: 0;
 }
 
 .chart-empty {

@@ -1,20 +1,60 @@
-// Reports the chart card's content-box width back to the component whenever it changes,
-// so the SVG can be rendered at real pixel width (crisp text/strokes) instead of being
-// scaled by a viewBox. The observer fires once immediately on observe for the initial size.
-export function observeWidth(element, dotNetRef) {
-    if (!element) {
+// Keeps the chart sized to its available space in both dimensions and reports the plot area's
+// real pixel size back to the component, so the SVG is rendered (not viewBox-scaled) and text and
+// stroke widths stay crisp at any size.
+//
+// Width comes for free from the flex layout. For height, the card is stretched to fill from its
+// top down to the bottom of the viewport; the plot area (a flex:1 child) then takes whatever is
+// left after the legend, and its measured size drives the SVG. On narrow layouts, where the
+// settings column wraps below the chart, filling to the viewport bottom would push content off
+// screen, so we fall back to a fixed height instead.
+export function observeSize(cardEl, plotEl, dotNetRef) {
+    if (!cardEl || !plotEl) {
         return null;
     }
 
-    const observer = new ResizeObserver(entries => {
-        for (const entry of entries) {
-            const width = entry.contentRect.width;
-            dotNetRef.invokeMethodAsync("SetWidth", width);
+    const FALLBACK_HEIGHT = 340;
+    const BOTTOM_GAP = 16;
+    const MIN_HEIGHT = 200;
+    const isWide = () => window.matchMedia("(min-width: 900px)").matches;
+
+    // Stretch the card to the viewport bottom (wide layouts only). Never sets a style on the
+    // observed element (plotEl), so this can't feed back into the ResizeObserver below.
+    const applyHeight = () => {
+        if (isWide()) {
+            const top = cardEl.getBoundingClientRect().top;
+            const available = Math.max(MIN_HEIGHT, window.innerHeight - top - BOTTOM_GAP);
+            cardEl.style.height = `${available}px`;
+        } else {
+            cardEl.style.height = "";
         }
-    });
-    observer.observe(element);
+    };
+
+    const report = () => {
+        const width = plotEl.clientWidth;
+        const height = isWide() ? plotEl.clientHeight : FALLBACK_HEIGHT;
+        if (width > 0 && height > 0) {
+            dotNetRef.invokeMethodAsync("SetSize", width, height);
+        }
+    };
+
+    // Fires whenever the plot area changes size — covers width (flex reflow) and the height
+    // change that applyHeight() induces via the flex:1 plot child.
+    const observer = new ResizeObserver(() => report());
+    observer.observe(plotEl);
+
+    const onWindowResize = () => {
+        applyHeight();
+        report();
+    };
+    window.addEventListener("resize", onWindowResize);
+
+    applyHeight();
+    report();
 
     return {
-        dispose: () => observer.disconnect(),
+        dispose: () => {
+            observer.disconnect();
+            window.removeEventListener("resize", onWindowResize);
+        },
     };
 }
