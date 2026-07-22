@@ -81,6 +81,11 @@ else
                     </div>
                 }
             </div>
+
+            <button type="button" class="btn btn-outline-secondary clear-hosts"
+                    disabled="@(_selected.Count == 0)" @onclick="ClearHostsAsync">
+                Clear selection
+            </button>
         </div>
     </div>
 }
@@ -239,6 +244,18 @@ else
             ? "graph"
             : $"graph/{string.Join(',', _allHosts.Where(h => _selected.Contains(h.Id)).Select(h => h.Id))}";
         await JS.InvokeVoidAsync("history.replaceState", null, string.Empty, Navigation.ToAbsoluteUri(url).ToString());
+        await LoadAsync();
+    }
+
+    private async Task ClearHostsAsync()
+    {
+        if (_selected.Count == 0)
+        {
+            return;
+        }
+
+        _selected.Clear();
+        await JS.InvokeVoidAsync("history.replaceState", null, string.Empty, Navigation.ToAbsoluteUri("graph").ToString());
         await LoadAsync();
     }
 
