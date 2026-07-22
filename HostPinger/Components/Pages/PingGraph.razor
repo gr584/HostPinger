@@ -20,63 +20,69 @@
 }
 else
 {
-    <div class="host-picker mb-2">
-        <button type="button" class="btn btn-outline-secondary dropdown-toggle" @onclick="ToggleDropdown">
-            @SelectionSummary
-        </button>
-        @if (_dropdownOpen)
-        {
-            <div class="picker-backdrop" @onclick="CloseDropdown"></div>
-            <div class="picker-panel">
-                <input @ref="_searchInput" class="form-control form-control-sm mb-2" type="search"
-                       placeholder="Search hosts…" value="@_search"
-                       @oninput="e => _search = (string?)e.Value ?? string.Empty"
-                       @onkeydown="OnSearchKeyDown" />
-                @{ var filtered = FilteredHosts().ToList(); }
-                <div class="picker-list">
-                    @foreach (var (host, index) in filtered)
-                    {
-                        <div class="form-check">
-                            <input class="form-check-input" type="checkbox" id="@($"host-{host.Id}")"
-                                   checked="@_selected.Contains(host.Id)"
-                                   disabled="@(!_selected.Contains(host.Id) && _selected.Count >= ChartPalette.MaxSeries)"
-                                   @onchange="e => ToggleHostAsync(host.Id, (bool)e.Value!)" />
-                            <label class="form-check-label" for="@($"host-{host.Id}")">
-                                <span class="swatch" style="background:@ChartPalette.GetColor(index)"></span>@host.Name
-                                <small class="text-muted ms-1">@host.Address</small>
-                            </label>
-                        </div>
-                    }
-                    @if (filtered.Count == 0)
-                    {
-                        <div class="text-muted small">No hosts match "@_search".</div>
-                    }
-                </div>
-                @if (_selected.Count >= ChartPalette.MaxSeries)
+    <div class="graph-layout">
+        <div class="graph-main">
+            @if (_series.Count == 0)
+            {
+                <p class="text-muted">Select at least one host to plot.</p>
+            }
+            else
+            {
+                <LineChart Series="_series" RangeStartUtc="_rangeStart" RangeEndUtc="_rangeEnd" UpdateInterval="_updateInterval" />
+            }
+        </div>
+
+        <div class="graph-settings">
+            <div class="btn-group" role="group" aria-label="Time window">
+                @foreach (var window in Windows)
                 {
-                    <div class="text-muted small mt-1">Up to @ChartPalette.MaxSeries hosts can be plotted at once.</div>
+                    <button type="button"
+                            class="btn btn-sm @(window.Span == _window ? "btn-primary" : "btn-outline-secondary")"
+                            @onclick="() => SetWindowAsync(window.Span)">@window.Label</button>
                 }
             </div>
-        }
-    </div>
 
-    <div class="btn-group mb-3" role="group" aria-label="Time window">
-        @foreach (var window in Windows)
-        {
-            <button type="button"
-                    class="btn btn-sm @(window.Span == _window ? "btn-primary" : "btn-outline-secondary")"
-                    @onclick="() => SetWindowAsync(window.Span)">@window.Label</button>
-        }
+            <div class="host-picker">
+                <button type="button" class="btn btn-outline-secondary dropdown-toggle" @onclick="ToggleDropdown">
+                    @SelectionSummary
+                </button>
+                @if (_dropdownOpen)
+                {
+                    <div class="picker-backdrop" @onclick="CloseDropdown"></div>
+                    <div class="picker-panel">
+                        <input @ref="_searchInput" class="form-control form-control-sm mb-2" type="search"
+                               placeholder="Search hosts…" value="@_search"
+                               @oninput="e => _search = (string?)e.Value ?? string.Empty"
+                               @onkeydown="OnSearchKeyDown" />
+                        @{ var filtered = FilteredHosts().ToList(); }
+                        <div class="picker-list">
+                            @foreach (var (host, index) in filtered)
+                            {
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="@($"host-{host.Id}")"
+                                           checked="@_selected.Contains(host.Id)"
+                                           disabled="@(!_selected.Contains(host.Id) && _selected.Count >= ChartPalette.MaxSeries)"
+                                           @onchange="e => ToggleHostAsync(host.Id, (bool)e.Value!)" />
+                                    <label class="form-check-label" for="@($"host-{host.Id}")">
+                                        <span class="swatch" style="background:@ChartPalette.GetColor(index)"></span>@host.Name
+                                        <small class="text-muted ms-1">@host.Address</small>
+                                    </label>
+                                </div>
+                            }
+                            @if (filtered.Count == 0)
+                            {
+                                <div class="text-muted small">No hosts match "@_search".</div>
+                            }
+                        </div>
+                        @if (_selected.Count >= ChartPalette.MaxSeries)
+                        {
+                            <div class="text-muted small mt-1">Up to @ChartPalette.MaxSeries hosts can be plotted at once.</div>
+                        }
+                    </div>
+                }
+            </div>
+        </div>
     </div>
-
-    @if (_series.Count == 0)
-    {
-        <p class="text-muted">Select at least one host to plot.</p>
-    }
-    else
-    {
-        <LineChart Series="_series" RangeStartUtc="_rangeStart" RangeEndUtc="_rangeEnd" UpdateInterval="_updateInterval" />
-    }
 }
 
 @code {
