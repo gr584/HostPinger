@@ -1,0 +1,19 @@
+<Project>
+
+  <PropertyGroup>
+    <!-- GitVersion already puts the commit sha in InformationalVersion; without this the SDK
+         appends it a second time. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Stamps AssemblyVersion, FileVersion and InformationalVersion on every assembly from the
+         git history. Restricted to .csproj because the WiX project does not consume NuGet
+         packages as libraries; it takes the installer version from the built executable instead. -->
+    <PackageReference Include="GitVersion.MsBuild" Version="6.8.2" Condition="'$(MSBuildProjectExtension)' == '.csproj'">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+</Project>

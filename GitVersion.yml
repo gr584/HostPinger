@@ -1,0 +1,6 @@
+# Single long-lived branch, so GitHubFlow: main produces stable versions and any other branch
+# gets a prerelease label. Releases are cut by tagging, e.g. `git tag v1.1.0`; next-version only
+# supplies a floor until the first tag exists, and is set to 1.0.0 because that is the version
+# the installer already shipped.
+workflow: GitHubFlow/v1
+next-version: 1.0.0

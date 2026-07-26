@@ -6,9 +6,11 @@
     <OutputName>HostPinger</OutputName>
     <OutputType>Package</OutputType>
     <InstallerPlatform>x64</InstallerPlatform>
-    <!-- e_sqlite3.dll carries a version resource but no language resource, which ICE60 flags.
-         That is expected of a native library and harmless here. -->
-    <SuppressIces>ICE60</SuppressIces>
+    <!-- ICE60: e_sqlite3.dll carries a version resource but no language resource, which is
+         expected of a native library and harmless here.
+         ICE61: fires because AllowSameVersionUpgrades lets the upgrade range include the current
+         version, which is deliberate. -->
+    <SuppressIces>ICE60;ICE61</SuppressIces>
   </PropertyGroup>
 
   <!--

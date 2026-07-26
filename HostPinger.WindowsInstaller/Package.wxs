@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
-  <!-- The package version tracks the application's own file version, so bumping the version in
-       HostPinger.csproj is enough to make an upgrade install over an earlier one. -->
+  <!-- The package version is bound to the executable's file version, which GitVersion stamps from
+       the git history. Tagging a release therefore sets the installer version too; MSI keeps only
+       the first three fields, so any prerelease label GitVersion computes is dropped here. -->
   <Package Name="HostPinger"
            Manufacturer="Gleb Romanov"
            Version="!(bind.FileVersion.HostPingerExe)"
@@ -10,7 +11,11 @@
            Scope="perMachine"
            Compressed="yes">
 
-    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <!-- MSI keeps only three version fields, so every commit between two tags builds the same
+         ProductVersion. AllowSameVersionUpgrades lets such a build replace the installed one
+         instead of being treated as a reinstall. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
