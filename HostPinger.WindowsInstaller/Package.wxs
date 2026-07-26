@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <!-- The package version tracks the application's own file version, so bumping the version in
+       HostPinger.csproj is enough to make an upgrade install over an earlier one. -->
+  <Package Name="HostPinger"
+           Manufacturer="Gleb Romanov"
+           Version="!(bind.FileVersion.HostPingerExe)"
+           UpgradeCode="B7B14BB1-86DC-496A-B313-C20758C8CF60"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="HostPinger" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="HostPinger">
+      <ComponentGroupRef Id="ApplicationFiles" />
+      <ComponentRef Id="HostPingerService" />
+    </Feature>
+
+  </Package>
+
+  <Fragment>
+
+    <ComponentGroup Id="ApplicationFiles" Directory="INSTALLFOLDER">
+      <!-- The executable is packaged separately below because it carries the service entries;
+           the development-only settings file has no business on an installed machine. -->
+      <Files Include="$(PublishDir)\**">
+        <Exclude Files="$(PublishDir)\HostPinger.exe" />
+        <Exclude Files="$(PublishDir)\appsettings.Development.json" />
+      </Files>
+    </ComponentGroup>
+
+    <Component Id="HostPingerService" Directory="INSTALLFOLDER">
+      <File Id="HostPingerExe" Source="$(PublishDir)\HostPinger.exe" KeyPath="yes" />
+
+      <!-- Account is left unset, which means LocalSystem. The service writes its database and
+           user settings under %ProgramData%\HostPinger, created on first start. -->
+      <ServiceInstall Id="HostPingerServiceInstall"
+                      Name="HostPinger"
+                      DisplayName="HostPinger"
+                      Description="Pings configured hosts on a schedule and serves the HostPinger web UI."
+                      Type="ownProcess"
+                      Start="auto"
+                      ErrorControl="normal"
+                      Vital="yes" />
+
+      <ServiceControl Id="HostPingerServiceControl"
+                      Name="HostPinger"
+                      Start="install"
+                      Stop="both"
+                      Remove="uninstall"
+                      Wait="yes" />
+    </Component>
+
+  </Fragment>
+
+</Wix>

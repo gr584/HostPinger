@@ -1,0 +1,36 @@
+<!-- WiX 6 is the newest release that builds without an Open Source Maintenance Fee EULA id;
+     v7 fails the build with WIX7015 unless one is supplied. -->
+<Project Sdk="WixToolset.Sdk/6.0.2">
+
+  <PropertyGroup>
+    <OutputName>HostPinger</OutputName>
+    <OutputType>Package</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <!-- e_sqlite3.dll carries a version resource but no language resource, which ICE60 flags.
+         That is expected of a native library and harmless here. -->
+    <SuppressIces>ICE60</SuppressIces>
+  </PropertyGroup>
+
+  <!--
+    The MSI always packages a Release, self-contained publish of the application, whatever
+    configuration this project itself is built in. Self-contained means the target machine
+    needs no .NET runtime installed; the solution excludes this project from Debug builds so
+    the extra publish only runs when an installer is actually wanted.
+  -->
+  <PropertyGroup>
+    <AppProject>$(MSBuildThisFileDirectory)..\HostPinger\HostPinger.csproj</AppProject>
+    <AppRuntimeIdentifier>win-x64</AppRuntimeIdentifier>
+    <!-- No trailing slash: a path ending in "\" would escape the closing quote in Exec. -->
+    <AppPublishDir>$(MSBuildProjectDirectory)\obj\publish\$(AppRuntimeIdentifier)</AppPublishDir>
+    <DefineConstants>$(DefineConstants);PublishDir=$(AppPublishDir)</DefineConstants>
+  </PropertyGroup>
+
+  <!-- CoreCompile is where WiX reads the files it packages; the SDK defines no BeforeBuild hook. -->
+  <Target Name="PublishApplication" BeforeTargets="CoreCompile">
+    <!-- dotnet publish does not clear its output directory, so drop files left by an earlier
+         publish rather than shipping them in the MSI. -->
+    <RemoveDir Directories="$(AppPublishDir)" />
+    <Exec Command="dotnet publish &quot;$(AppProject)&quot; --configuration Release --runtime $(AppRuntimeIdentifier) --self-contained true --output &quot;$(AppPublishDir)&quot;" />
+  </Target>
+
+</Project>

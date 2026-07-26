@@ -2,4 +2,11 @@
   <Project Path="HostPinger.Core/HostPinger.Core.csproj" Id="0dbf38f9-c172-4b28-b447-243a96073f51" />
   <Project Path="HostPinger.Test/HostPinger.Test.csproj" Id="ea209ffd-b509-4d68-9afe-78f77f91c6ce" />
   <Project Path="HostPinger/HostPinger.csproj" />
+  <!-- Building the installer means a full Release publish of the app, so it is Release-only.
+       The Platform mapping is required: without it a .wixproj is never selected for building. -->
+  <Project Path="HostPinger.WindowsInstaller/HostPinger.WindowsInstaller.wixproj">
+    <Platform Solution="*|*" Project="AnyCPU" />
+    <Build Solution="Release|*" Project="true" />
+    <Build Solution="Debug|*" Project="false" />
+  </Project>
 </Solution>

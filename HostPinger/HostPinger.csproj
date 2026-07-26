@@ -5,6 +5,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Data/ is the local development database and settings overlay. Without this it matches the
+         Web SDK's default **/*.json content glob and ships in publish output — and so in the MSI. -->
+    <Content Remove="Data\**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.10" />
   </ItemGroup>
 
