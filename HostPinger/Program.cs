@@ -25,13 +25,20 @@ namespace HostPinger
             builder.Services.AddRazorComponents()
                 .AddInteractiveServerComponents();
 
-            builder.Services.Configure<PingerOptions>(builder.Configuration.GetSection(PingerOptions.SectionName));
-
-            var databasePath = PingerOptions.ResolveDatabasePath(
+            var paths = PingerPaths.Resolve(
                 builder.Configuration[$"{PingerOptions.SectionName}:{nameof(PingerOptions.DatabasePath)}"],
                 builder.Environment.ContentRootPath);
-            Directory.CreateDirectory(Path.GetDirectoryName(databasePath)!);
-            builder.Services.AddDbContextFactory<HostPingerDbContext>(options => options.UseSqlite($"Data Source={databasePath}"));
+            Directory.CreateDirectory(Path.GetDirectoryName(paths.DatabasePath)!);
+
+            // Settings edited on the Configuration page live in an overlay layered on top of
+            // appsettings.json. Registering it last makes it win, and reloadOnChange lets a save
+            // reach IOptionsMonitor without restarting the service.
+            builder.Configuration.AddJsonFile(paths.SettingsPath, optional: true, reloadOnChange: true);
+
+            builder.Services.Configure<PingerOptions>(builder.Configuration.GetSection(PingerOptions.SectionName));
+            builder.Services.AddSingleton(paths);
+            builder.Services.AddSingleton<PingerSettingsStore>();
+            builder.Services.AddDbContextFactory<HostPingerDbContext>(options => options.UseSqlite($"Data Source={paths.DatabasePath}"));
 
             builder.Services.AddSingleton<IPingSender, PingSender>();
             builder.Services.AddSingleton<DatabasePruner>();

@@ -10,9 +10,12 @@ namespace HostPinger.Core.Services
     /// <summary>Periodically pings every enabled host and records the results.</summary>
     public class PingMonitorService : BackgroundService
     {
+        /// <summary>Guards against a nonsensical configured interval; one day is well past useful.</summary>
+        private const int MaxIntervalSeconds = 86_400;
+
         private readonly IDbContextFactory<HostPingerDbContext> _dbFactory;
         private readonly IPingSender _pingSender;
-        private readonly IOptions<PingerOptions> _options;
+        private readonly IOptionsMonitor<PingerOptions> _options;
         private readonly DatabasePruner _pruner;
         private readonly ILogger<PingMonitorService> _logger;
         private readonly TimeProvider _timeProvider;
@@ -20,7 +23,7 @@ namespace HostPinger.Core.Services
         public PingMonitorService(
             IDbContextFactory<HostPingerDbContext> dbFactory,
             IPingSender pingSender,
-            IOptions<PingerOptions> options,
+            IOptionsMonitor<PingerOptions> options,
             DatabasePruner pruner,
             ILogger<PingMonitorService> logger,
             TimeProvider? timeProvider = null)
@@ -35,8 +38,7 @@ namespace HostPinger.Core.Services
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            var interval = TimeSpan.FromSeconds(Math.Max(1, _options.Value.IntervalSeconds));
-            using var timer = new PeriodicTimer(interval, _timeProvider);
+            using var timer = new PeriodicTimer(GetInterval(), _timeProvider);
             try
             {
                 do
@@ -53,6 +55,10 @@ namespace HostPinger.Core.Services
                     {
                         _logger.LogError(ex, "Ping round failed.");
                     }
+
+                    // Picks up an interval changed on the Configuration page; the new period
+                    // applies from the next tick onwards.
+                    timer.Period = GetInterval();
                 }
                 while (await timer.WaitForNextTickAsync(stoppingToken));
             }
@@ -61,13 +67,16 @@ namespace HostPinger.Core.Services
             }
         }
 
+        private TimeSpan GetInterval() =>
+            TimeSpan.FromSeconds(Math.Clamp(_options.CurrentValue.IntervalSeconds, 1, MaxIntervalSeconds));
+
         /// <summary>
         /// Pings all enabled hosts once, stores the attempts, and prunes the database.
         /// Returns the number of attempts recorded.
         /// </summary>
         public async Task<int> RunRoundAsync(CancellationToken cancellationToken = default)
         {
-            var options = _options.Value;
+            var options = _options.CurrentValue;
             await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
 
             var hosts = await db.Hosts.AsNoTracking().Where(h => h.IsEnabled).ToListAsync(cancellationToken);

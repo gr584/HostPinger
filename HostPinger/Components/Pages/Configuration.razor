@@ -1,0 +1,247 @@
+@page "/configuration"
+@rendermode InteractiveServer
+@using System.ComponentModel.DataAnnotations
+@using HostPinger.Core.Options
+@using HostPinger.Core.Services
+@using Microsoft.Extensions.Options
+@inject IDbContextFactory<HostPingerDbContext> DbFactory
+@inject IOptionsMonitor<PingerOptions> PingerOptions
+@inject PingerPaths Paths
+@inject PingerSettingsStore SettingsStore
+@implements IDisposable
+
+<PageTitle>Configuration</PageTitle>
+
+<h1>Configuration</h1>
+
+<div class="card mb-3">
+    <div class="card-body">
+        <h5 class="card-title">Database</h5>
+        <EditForm Model="_databaseForm" OnValidSubmit="SaveDatabaseAsync">
+            <DataAnnotationsValidator />
+            <dl class="config-list">
+                <dt>Path</dt>
+                <dd><code class="config-path">@Paths.DatabasePath</code></dd>
+
+                <dt>Current size</dt>
+                <dd>
+                    <span class="config-value">@SizeText</span>
+                    <span class="text-muted ms-2">@GrowthText</span>
+                </dd>
+
+                <dt><label for="max-db-size">Maximum size</label></dt>
+                <dd>
+                    <div class="input-group input-group-sm config-input">
+                        <InputNumber id="max-db-size" class="form-control" @bind-Value="_databaseForm.MaxDatabaseSizeMb" />
+                        <span class="input-group-text">MB</span>
+                        <button type="submit" class="btn btn-primary">Save</button>
+                    </div>
+                    <ValidationMessage For="() => _databaseForm.MaxDatabaseSizeMb" />
+                    <div class="form-text">
+                        The oldest ping attempts are pruned once the file grows past this. 0 disables pruning.
+                        @if (_databaseStatus is not null)
+                        {
+                            <span class="config-saved">@_databaseStatus</span>
+                        }
+                    </div>
+                </dd>
+
+                <dt>Estimated capacity</dt>
+                <dd>@CapacityText</dd>
+            </dl>
+        </EditForm>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-body">
+        <h5 class="card-title">Pinger config</h5>
+        <EditForm Model="_pingerForm" OnValidSubmit="SavePingerAsync">
+            <DataAnnotationsValidator />
+            <dl class="config-list">
+                <dt><label for="ping-interval">Ping interval</label></dt>
+                <dd>
+                    <div class="input-group input-group-sm config-input">
+                        <InputNumber id="ping-interval" class="form-control" @bind-Value="_pingerForm.IntervalSeconds" />
+                        <span class="input-group-text">seconds</span>
+                        <button type="submit" class="btn btn-primary">Save</button>
+                    </div>
+                    <ValidationMessage For="() => _pingerForm.IntervalSeconds" />
+                    <div class="form-text">
+                        How often every enabled host is pinged.
+                        @if (_pingerStatus is not null)
+                        {
+                            <span class="config-saved">@_pingerStatus</span>
+                        }
+                    </div>
+                </dd>
+            </dl>
+        </EditForm>
+    </div>
+</div>
+
+@code {
+    // Upper bounds the form accepts; the pinger clamps to the same interval ceiling.
+    private const int IntervalUpperBoundSeconds = 86_400;
+    private const int SizeUpperBoundMb = 1_000_000;
+
+    private readonly DatabaseForm _databaseForm = new();
+    private readonly PingerForm _pingerForm = new();
+    private readonly CancellationTokenSource _cts = new();
+
+    private DatabaseStats? _stats;
+    private string? _databaseStatus;
+    private string? _pingerStatus;
+
+    // The settings the running application is using. Kept alongside the form values so an edit
+    // that has not been saved yet cannot skew the size projections below it.
+    private int _effectiveIntervalSeconds;
+    private int _effectiveMaxDatabaseSizeMb;
+
+    protected override async Task OnInitializedAsync()
+    {
+        SyncFromConfiguration();
+        await LoadStatsAsync();
+        _ = AutoRefreshAsync();
+    }
+
+    private async Task AutoRefreshAsync()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
+            while (await timer.WaitForNextTickAsync(_cts.Token))
+            {
+                SyncFromConfiguration();
+                await LoadStatsAsync();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    /// <summary>
+    /// Picks up settings changed elsewhere — another browser tab, or appsettings.json by hand.
+    /// A field the user has started editing is left alone.
+    /// </summary>
+    private void SyncFromConfiguration()
+    {
+        var options = PingerOptions.CurrentValue;
+        if (_databaseForm.MaxDatabaseSizeMb == _effectiveMaxDatabaseSizeMb)
+        {
+            _databaseForm.MaxDatabaseSizeMb = options.MaxDatabaseSizeMb;
+        }
+
+        if (_pingerForm.IntervalSeconds == _effectiveIntervalSeconds)
+        {
+            _pingerForm.IntervalSeconds = options.IntervalSeconds;
+        }
+
+        _effectiveMaxDatabaseSizeMb = options.MaxDatabaseSizeMb;
+        _effectiveIntervalSeconds = options.IntervalSeconds;
+    }
+
+    private async Task LoadStatsAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);
+        _stats = await DatabaseStats.CollectAsync(
+            db,
+            new PingerOptions
+            {
+                IntervalSeconds = _effectiveIntervalSeconds,
+                MaxDatabaseSizeMb = _effectiveMaxDatabaseSizeMb,
+            },
+            _cts.Token);
+    }
+
+    private async Task SaveDatabaseAsync()
+    {
+        await SettingsStore.SaveAsync(
+            new PingerSettingsUpdate { MaxDatabaseSizeMb = _databaseForm.MaxDatabaseSizeMb },
+            _cts.Token);
+
+        // The configuration reload is asynchronous, so project from the saved value right away
+        // rather than waiting for the file watcher to catch up.
+        _effectiveMaxDatabaseSizeMb = _databaseForm.MaxDatabaseSizeMb;
+        _databaseStatus = "Saved — applied after the next ping round.";
+        await LoadStatsAsync();
+    }
+
+    private async Task SavePingerAsync()
+    {
+        await SettingsStore.SaveAsync(
+            new PingerSettingsUpdate { IntervalSeconds = _pingerForm.IntervalSeconds },
+            _cts.Token);
+
+        _effectiveIntervalSeconds = _pingerForm.IntervalSeconds;
+        _pingerStatus = "Saved — applied from the next ping round.";
+        await LoadStatsAsync();
+    }
+
+    private string SizeText => _stats is { } stats ? FormatBytes(stats.SizeBytes) : "—";
+
+    private string GrowthText => _stats?.GrowthBytesPerDay is double growth
+        ? $"growing by ~{FormatBytes(growth)} per day"
+        : "not enough data to estimate growth yet";
+
+    private string CapacityText
+    {
+        get
+        {
+            if (_stats is not { } stats)
+            {
+                return "—";
+            }
+
+            if (stats.MaxSizeBytes <= 0)
+            {
+                return "Unlimited — pruning is disabled.";
+            }
+
+            return stats.CapacityDays is double days
+                ? $"~{FormatDays(days)} of history at the current rate of growth"
+                : "Not enough data to estimate yet.";
+        }
+    }
+
+    private static string FormatBytes(double bytes)
+    {
+        string[] units = ["bytes", "KB", "MB", "GB", "TB"];
+        var unit = 0;
+        while (bytes >= 1024 && unit < units.Length - 1)
+        {
+            bytes /= 1024;
+            unit++;
+        }
+
+        return $"{bytes:0.#} {units[unit]}";
+    }
+
+    private static string FormatDays(double days) => days switch
+    {
+        < 1 => $"{days * 24:0.#} hours",
+        < 10 => $"{days:0.#} days",
+        < 730 => $"{days:0} days",
+        _ => $"{days / 365.25:0.#} years",
+    };
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        _cts.Dispose();
+    }
+
+    private sealed class DatabaseForm
+    {
+        [Range(0, SizeUpperBoundMb, ErrorMessage = "Enter a size between 0 and 1,000,000 MB.")]
+        public int MaxDatabaseSizeMb { get; set; }
+    }
+
+    private sealed class PingerForm
+    {
+        [Range(1, IntervalUpperBoundSeconds, ErrorMessage = "Enter an interval between 1 and 86400 seconds.")]
+        public int IntervalSeconds { get; set; }
+    }
+}

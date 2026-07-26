@@ -76,7 +76,7 @@ namespace HostPinger.Test
             return new PingMonitorService(
                 new TestDb.Factory(_options),
                 sender,
-                Microsoft.Extensions.Options.Options.Create(new PingerOptions()),
+                new TestOptionsMonitor<PingerOptions>(new PingerOptions()),
                 new DatabasePruner(),
                 NullLogger<PingMonitorService>.Instance);
         }

@@ -1,0 +1,44 @@
+.config-list {
+    display: grid;
+    grid-template-columns: 10rem 1fr;
+    gap: 0.75rem 1rem;
+    align-items: baseline;
+    margin-bottom: 0;
+}
+
+.config-list > dt {
+    font-weight: 500;
+}
+
+.config-list > dd {
+    margin-bottom: 0;
+    min-width: 0;
+}
+
+.config-path {
+    word-break: break-all;
+}
+
+.config-input {
+    max-width: 18rem;
+}
+
+.config-value {
+    font-variant-numeric: tabular-nums;
+}
+
+.config-saved {
+    color: #157347;
+    margin-left: 0.35rem;
+}
+
+@media (max-width: 640px) {
+    .config-list {
+        grid-template-columns: 1fr;
+        gap: 0.2rem;
+    }
+
+    .config-list > dt:not(:first-of-type) {
+        margin-top: 0.75rem;
+    }
+}
