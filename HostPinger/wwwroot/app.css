@@ -2,6 +2,11 @@ html, body {
     font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
 }
 
+/* Keep the content width steady when a page grows past one screen. */
+html {
+    scrollbar-gutter: stable;
+}
+
 a, .btn-link {
     color: #006bb7;
 }

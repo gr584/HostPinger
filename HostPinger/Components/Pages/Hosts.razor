@@ -16,90 +16,103 @@
 else
 {
     <p class="text-muted">Click a host to open its ping graph.</p>
-    <table class="table table-hover align-middle">
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th>Address</th>
-                <th>Status</th>
-                <th>Last ping</th>
-                <th>Last downtime</th>
-                <th>Enabled</th>
-                <th style="width: 13rem;"></th>
-            </tr>
-        </thead>
-        <tbody>
-            @foreach (var row in _rows)
-            {
-                <tr class="host-row" @onclick="() => OpenGraph(row.Host.Id)">
-                    <td>@row.Host.Name</td>
-                    <td><code>@row.Host.Address</code></td>
-                    <td>
-                        @if (!row.Host.IsEnabled)
-                        {
-                            <span class="badge text-bg-secondary">Paused</span>
-                        }
-                        else if (row.Last is null)
-                        {
-                            <span class="badge text-bg-light text-muted">Waiting…</span>
-                        }
-                        else if (row.Last.RoundtripMs is null)
-                        {
-                            <span class="badge text-bg-danger">Down</span>
-                        }
-                        else
-                        {
-                            <span class="badge text-bg-success">Up</span>
-                        }
-                    </td>
-                    <td>
-                        @if (row.Last is { } last)
-                        {
-                            <span class="ping-value">@(last.RoundtripMs is int ms ? $"{ms} ms" : "no reply")</span>
-                            <small class="text-muted ms-2">@RelativeTime(last.TimestampUtc)</small>
-                        }
-                        else
-                        {
-                            <span class="text-muted">—</span>
-                        }
-                    </td>
-                    <td>
-                        @if (row.LastDowntime is { } downtime)
-                        {
-                            <span class="ping-value">@downtime.StartedUtc.ToLocalTime().ToString("g")</span>
-                            <small class="ms-2 @(downtime.IsOngoing ? "text-danger" : "text-muted")">
-                                @Downtime.FormatDuration(downtime.DurationAt(DateTime.UtcNow))@(downtime.IsOngoing ? " and counting" : "")
-                            </small>
-                        }
-                        else
-                        {
-                            <span class="text-muted">—</span>
-                        }
-                    </td>
-                    <td @onclick:stopPropagation>
-                        <div class="form-check form-switch">
-                            <input class="form-check-input" type="checkbox" role="switch"
-                                   title="@(row.Host.IsEnabled ? "Pause monitoring" : "Resume monitoring")"
-                                   checked="@row.Host.IsEnabled"
-                                   @onchange="e => SetEnabledAsync(row.Host.Id, (bool)e.Value!)" />
-                        </div>
-                    </td>
-                    <td class="text-end">
-                        @if (_pendingDeleteId == row.Host.Id)
-                        {
-                            <button class="btn btn-sm btn-danger" @onclick="() => DeleteAsync(row.Host.Id)" @onclick:stopPropagation>Confirm delete</button>
-                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => _pendingDeleteId = null" @onclick:stopPropagation>Cancel</button>
-                        }
-                        else
-                        {
-                            <button class="btn btn-sm btn-outline-primary" @onclick="() => BeginEdit(row.Host)" @onclick:stopPropagation>Edit</button>
-                            <button class="btn btn-sm btn-outline-danger" @onclick="() => _pendingDeleteId = row.Host.Id" @onclick:stopPropagation>Delete</button>
-                        }
-                    </td>
+    <div class="table-responsive">
+        <table class="table table-hover align-middle host-table">
+            <colgroup>
+                <col class="name" />
+                <col class="address" />
+                <col class="status" />
+                <col class="last-ping" />
+                <col class="last-downtime" />
+                <col class="enabled" />
+                <col class="actions" />
+            </colgroup>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Address</th>
+                    <th>Status</th>
+                    <th>Last ping</th>
+                    <th>Last downtime</th>
+                    <th><span class="visually-hidden">Enabled</span></th>
+                    <th></th>
                 </tr>
-            }
-        </tbody>
-    </table>
+            </thead>
+            <tbody>
+                @foreach (var row in _rows)
+                {
+                    <tr class="host-row" @onclick="() => OpenGraph(row.Host.Id)">
+                        <td title="@row.Host.Name">@row.Host.Name</td>
+                        <td title="@row.Host.Address"><code>@row.Host.Address</code></td>
+                        <td>
+                            @if (!row.Host.IsEnabled)
+                            {
+                                <span class="badge text-bg-secondary">Paused</span>
+                            }
+                            else if (row.Last is null)
+                            {
+                                <span class="badge text-bg-light text-muted">Waiting…</span>
+                            }
+                            else if (row.Last.RoundtripMs is null)
+                            {
+                                <span class="badge text-bg-danger">Down</span>
+                            }
+                            else
+                            {
+                                <span class="badge text-bg-success">Up</span>
+                            }
+                        </td>
+                        <td>
+                            @if (row.Last is { } last)
+                            {
+                                <span class="ping-value">@(last.RoundtripMs is int ms ? $"{ms} ms" : "no reply")</span>
+                                <small class="text-muted ms-2">@RelativeTime(last.TimestampUtc)</small>
+                            }
+                            else
+                            {
+                                <span class="text-muted">—</span>
+                            }
+                        </td>
+                        <td>
+                            @if (row.LastDowntime is { } downtime)
+                            {
+                                <span class="ping-value">@downtime.StartedUtc.ToLocalTime().ToString("g")</span>
+                                <small class="ms-2 @(downtime.IsOngoing ? "text-danger" : "text-muted")">
+                                    @Downtime.FormatDuration(downtime.DurationAt(DateTime.UtcNow))@(downtime.IsOngoing ? " and counting" : "")
+                                </small>
+                            }
+                            else
+                            {
+                                <span class="text-muted">—</span>
+                            }
+                        </td>
+                        <td @onclick:stopPropagation>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" role="switch"
+                                       title="@(row.Host.IsEnabled ? "Pause monitoring" : "Resume monitoring")"
+                                       checked="@row.Host.IsEnabled"
+                                       @onchange="e => SetEnabledAsync(row.Host.Id, (bool)e.Value!)" />
+                            </div>
+                        </td>
+                        <td class="actions">
+                            <div class="d-flex gap-2">
+                                @if (_pendingDeleteId == row.Host.Id)
+                                {
+                                    <button class="btn btn-sm btn-danger" @onclick="() => DeleteAsync(row.Host.Id)" @onclick:stopPropagation>Confirm delete</button>
+                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => _pendingDeleteId = null" @onclick:stopPropagation>Cancel</button>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-outline-primary" @onclick="() => BeginEdit(row.Host)" @onclick:stopPropagation>Edit</button>
+                                    <button class="btn btn-sm btn-outline-danger" @onclick="() => _pendingDeleteId = row.Host.Id" @onclick:stopPropagation>Delete</button>
+                                }
+                            </div>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
 }
 
 <div class="card" style="max-width: 44rem;">

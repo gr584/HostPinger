@@ -2,6 +2,69 @@
     cursor: pointer;
 }
 
+/* Fixed layout so the refreshing cell values can never resize a column. */
+.host-table {
+    table-layout: fixed;
+    min-width: 68rem;
+}
+
+/*
+ * The badge, the switch and the buttons are the same size at every window size, so those three
+ * columns are absolute and the text columns share what is left. A percentage for any of them
+ * would only leave slack next to the control on a wide window. 6rem holds the widest badge,
+ * "Waiting…", with room to spare.
+ */
+.host-table col.status {
+    width: 6rem;
+}
+
+.host-table col.enabled {
+    width: 3rem;
+}
+
+.host-table col.actions {
+    width: 13rem;
+}
+
+/*
+ * The text columns split whatever the three fixed columns above leave, in the ratio below.
+ * These percentages deliberately sum to 100% on top of those 22rem: over-constraining the
+ * table makes the browser shrink the percentage columns proportionally — preserving the ratio
+ * — while leaving the absolute ones untouched, which is the split we want at every width.
+ * (calc((100% - 22rem) * ratio) expresses this directly but is ignored on a col in a fixed
+ * layout: the column silently falls back to auto and every text column comes out equal.)
+ */
+.host-table col.name {
+    width: 14%;
+}
+
+.host-table col.address {
+    width: 23%;
+}
+
+.host-table col.last-ping {
+    width: 22%;
+}
+
+.host-table col.last-downtime {
+    width: 41%;
+}
+
+.host-table th,
+.host-table td {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/*
+ * Drop the leading cell padding so the first button sits one 0.5rem gap from the switch — the
+ * same gap the flex row puts between the buttons themselves.
+ */
+.host-table td.actions {
+    padding-left: 0;
+}
+
 .ping-value {
     font-variant-numeric: tabular-nums;
 }
