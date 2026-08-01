@@ -11,6 +11,19 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The About page renders the marked section of the README rather than restating it, so the
+         file has to travel with the assembly instead of staying in the checkout. Compiling it in
+         rather than copying it beside the executable means it reaches the RPM and the MSI without
+         either packaging step knowing about it. -->
+    <EmbeddedResource Include="..\README.md" LogicalName="README.md" Visible="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Renders the README section above onto the About page. -->
+    <PackageReference Include="Markdig" Version="1.3.2" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Both are no-ops off their own platform, so the same build hosts itself correctly as a
          Windows service and as a systemd unit. -->
     <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="10.0.10" />

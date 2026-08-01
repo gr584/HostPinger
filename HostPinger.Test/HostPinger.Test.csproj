@@ -25,6 +25,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\HostPinger.Core\HostPinger.Core.csproj" />
+    <!-- For ReadmeSectionTests, which reads the README embedded in the web assembly. -->
+    <ProjectReference Include="..\HostPinger\HostPinger.csproj" />
   </ItemGroup>
 
 </Project>

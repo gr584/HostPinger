@@ -1,0 +1,53 @@
+@page "/about"
+@using System.Reflection
+@using HostPinger.Documentation
+
+<PageTitle>About</PageTitle>
+
+<h1>About HostPinger</h1>
+
+<p class="text-muted version">Version @Version</p>
+
+<div class="readme">
+    @Readme
+</div>
+
+@code {
+    private static readonly MarkupString Readme = new(ReadmeSection.Html);
+
+    private static readonly string Version = FormatVersion(
+        typeof(Program).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+        ?? typeof(Program).Assembly.GetName().Version?.ToString());
+
+    /// <summary>
+    /// Renders the informational version GitVersion stamps on the assembly —
+    /// "1.2.3-4+Branch.main.Sha.abcdef…" — as the version followed by a short commit, dropping the
+    /// branch name and the rest of the build metadata.
+    /// </summary>
+    private static string FormatVersion(string? informationalVersion)
+    {
+        if (string.IsNullOrWhiteSpace(informationalVersion))
+        {
+            return "unknown";
+        }
+
+        var separator = informationalVersion.IndexOf('+');
+        if (separator < 0)
+        {
+            return informationalVersion;
+        }
+
+        var version = informationalVersion[..separator];
+        var metadata = informationalVersion[(separator + 1)..];
+
+        const string shaMarker = "Sha.";
+        var shaIndex = metadata.IndexOf(shaMarker, StringComparison.Ordinal);
+        if (shaIndex < 0)
+        {
+            return version;
+        }
+
+        var sha = metadata[(shaIndex + shaMarker.Length)..].Split('.')[0];
+        return sha.Length >= 7 ? $"{version} ({sha[..7]})" : version;
+    }
+}

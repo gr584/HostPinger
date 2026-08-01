@@ -1,0 +1,57 @@
+.version {
+    font-variant-numeric: tabular-nums;
+    margin-bottom: 1.5rem;
+}
+
+.readme {
+    max-width: 52rem;
+}
+
+/* The README is injected as markup and so carries no scope attribute of its own; ::deep reaches it
+   through the wrapper, which does. */
+.readme ::deep p:first-child {
+    font-size: 1.15rem;
+    color: #454545;
+}
+
+.readme ::deep h2 {
+    font-size: 1.4rem;
+    margin-top: 2.25rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid #e3e3e3;
+}
+
+.readme ::deep h3 {
+    font-size: 1.1rem;
+    margin-top: 1.75rem;
+}
+
+.readme ::deep h3 code {
+    font-size: 0.9em;
+    font-weight: 400;
+}
+
+.readme ::deep p,
+.readme ::deep li {
+    line-height: 1.6;
+}
+
+.readme ::deep ul {
+    padding-left: 1.15rem;
+}
+
+.readme ::deep li + li {
+    margin-top: 0.5rem;
+}
+
+.readme ::deep code {
+    background-color: #f2f2f2;
+    padding: 0.1rem 0.3rem;
+    border-radius: 0.2rem;
+}
+
+/* The status names are bold in the README so that GitHub still sets them apart once it has dropped
+   the badge class. Inside a real badge that weight is too heavy. */
+.readme ::deep .badge strong {
+    font-weight: 600;
+}
