@@ -363,3 +363,6 @@ MigrationBackup/
 FodyWeavers.xsd
 # Local development SQLite database
 HostPinger/Data/
+
+# Output of HostPinger.LinuxInstaller/build-rpm.sh
+HostPinger.LinuxInstaller/build/

@@ -1,0 +1,21 @@
+# Environment for the hostpinger service, read by systemd before it starts. Changes take effect
+# on: systemctl restart hostpinger
+#
+# Settings that belong to the application itself — ping interval, timeout, database size limit —
+# are edited on the Configuration page and stored under /var/lib/hostpinger, not here.
+
+# Address and port the web UI listens on. The default accepts connections from any interface;
+# use http://127.0.0.1:8080 to restrict it to the machine itself. Note that opening the port in
+# firewalld is a separate step the package deliberately does not take:
+#   firewall-cmd --permanent --add-port=8080/tcp && firewall-cmd --reload
+ASPNETCORE_HTTP_PORTS=8080
+
+# The Hosts page and the graph tooltips convert timestamps to local time on the server, so this
+# decides what users see. Unset means the system time zone.
+#TZ=Europe/Berlin
+
+# Overrides for where state is kept. Both default to /var/lib/hostpinger, which is what
+# StateDirectory= in the unit provisions; changing them means granting the service write access
+# to the new location yourself.
+#Pinger__DatabasePath=/var/lib/hostpinger/hostpinger.db
+#Pinger__UserSettingsPath=/var/lib/hostpinger/usersettings.json

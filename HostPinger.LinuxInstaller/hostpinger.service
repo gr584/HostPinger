@@ -1,0 +1,56 @@
+[Unit]
+Description=HostPinger — pings configured hosts on a schedule and serves the HostPinger web UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# notify rather than simple: the application calls AddSystemd(), so it reports READY=1 once the
+# host has started and systemd stops treating the unit as activating before it can serve.
+Type=notify
+ExecStart=/usr/lib/hostpinger/HostPinger
+User=hostpinger
+Group=hostpinger
+
+# systemd creates this owned by hostpinger:hostpinger before the first start and leaves it in
+# place across upgrades and removal. It holds the SQLite database, the settings overlay written
+# by the Configuration page, and the data protection key ring, and it is the only path the
+# service needs to write to. The mode is narrowed from the 0755 default because the key ring
+# protects the Blazor circuits and is nobody else's business.
+StateDirectory=hostpinger
+StateDirectoryMode=0700
+
+# Sending an ICMP echo needs this, and nothing else here does. Granting it ambiently is what lets
+# the service run as an unprivileged account rather than root.
+#
+# Without it every host is recorded as unreachable, because a refused socket and a silent host
+# are indistinguishable by the time the ping has failed — the UI would show an outage that is not
+# real. The service probes ICMP at startup and logs an error to the journal if this is missing.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+
+# Port and time zone live here so they can be changed without editing the unit.
+EnvironmentFile=-/etc/sysconfig/hostpinger
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+# AF_NETLINK is not optional: .NET enumerates network interfaces through it.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+# Deliberately not set: MemoryDenyWriteExecute, which the JIT cannot run under, and
+# SystemCallFilter, which is worth adding only once a filter has been tested against this app.
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
