@@ -6,10 +6,23 @@ namespace HostPinger.Core.Options
         public const string SectionName = "Pinger";
 
         /// <summary>
-        /// Path to the SQLite database file. Environment variables (e.g. %ProgramData%) are
-        /// expanded; relative paths are resolved against the application content root.
+        /// Path to the SQLite database file, or null when the key is absent. Read once at startup
+        /// by <see cref="PingerPaths.Resolve"/>, which expands it and applies the default.
         /// </summary>
-        public string DatabasePath { get; set; } = "hostpinger.db";
+        public string? DatabasePath { get; set; }
+
+        /// <summary>
+        /// Path to the JSON overlay holding the runtime-editable settings, resolved like
+        /// <see cref="DatabasePath"/>. Null means "next to the database".
+        /// </summary>
+        /// <remarks>
+        /// Read before the overlay is registered as a configuration source, so it has to come from
+        /// appsettings.json: setting it inside the overlay would be asking the file to say where it
+        /// lives, and is ignored. It is configurable at all so the overlay can sit outside the
+        /// install folder, which a Windows service cannot write to and which an MSI upgrade
+        /// replaces wholesale.
+        /// </remarks>
+        public string? UserSettingsPath { get; set; }
 
         /// <summary>How often every enabled host is pinged.</summary>
         public int IntervalSeconds { get; set; } = 30;
@@ -24,13 +37,5 @@ namespace HostPinger.Core.Options
         public int MaxDatabaseSizeMb { get; set; } = 100;
 
         public long MaxDatabaseSizeBytes => (long)MaxDatabaseSizeMb * 1024 * 1024;
-
-        public static string ResolveDatabasePath(string? configuredPath, string basePath)
-        {
-            var path = string.IsNullOrWhiteSpace(configuredPath)
-                ? "hostpinger.db"
-                : Environment.ExpandEnvironmentVariables(configuredPath);
-            return Path.GetFullPath(path, basePath);
-        }
     }
 }

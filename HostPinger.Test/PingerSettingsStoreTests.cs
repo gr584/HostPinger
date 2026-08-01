@@ -54,6 +54,27 @@ namespace HostPinger.Test
             });
         }
 
+        /// <summary>
+        /// The Configuration page saves the whole pinger group at once, which must not disturb the
+        /// database group stored alongside it.
+        /// </summary>
+        [Test]
+        public async Task Save_WritesTheWholePingerGroupWithoutDisturbingTheDatabaseGroup()
+        {
+            var store = new PingerSettingsStore(_paths);
+            await store.SaveAsync(new PingerSettingsUpdate { MaxDatabaseSizeMb = 250 });
+
+            await store.SaveAsync(new PingerSettingsUpdate { IntervalSeconds = 90, TimeoutMilliseconds = 2_500 });
+
+            var options = Bind();
+            Assert.Multiple(() =>
+            {
+                Assert.That(options.IntervalSeconds, Is.EqualTo(90));
+                Assert.That(options.TimeoutMilliseconds, Is.EqualTo(2_500));
+                Assert.That(options.MaxDatabaseSizeMb, Is.EqualTo(250));
+            });
+        }
+
         [Test]
         public async Task Save_StartsOverWhenTheFileIsUnreadable()
         {

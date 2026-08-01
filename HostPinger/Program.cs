@@ -25,8 +25,11 @@ namespace HostPinger
             builder.Services.AddRazorComponents()
                 .AddInteractiveServerComponents();
 
+            // Both paths are read straight from appsettings.json, before the overlay below joins the
+            // configuration: the overlay cannot be the place that says where the overlay is.
             var paths = PingerPaths.Resolve(
                 builder.Configuration[$"{PingerOptions.SectionName}:{nameof(PingerOptions.DatabasePath)}"],
+                builder.Configuration[$"{PingerOptions.SectionName}:{nameof(PingerOptions.UserSettingsPath)}"],
                 builder.Environment.ContentRootPath);
             Directory.CreateDirectory(Path.GetDirectoryName(paths.DatabasePath)!);
 

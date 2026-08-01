@@ -13,6 +13,12 @@ namespace HostPinger.Core.Services
         /// <summary>Guards against a nonsensical configured interval; one day is well past useful.</summary>
         private const int MaxIntervalSeconds = 86_400;
 
+        /// <summary>
+        /// Guards against a nonsensical configured timeout; a minute is well past useful, and Ping
+        /// rejects a negative one outright.
+        /// </summary>
+        private const int MaxTimeoutMilliseconds = 60_000;
+
         private readonly IDbContextFactory<HostPingerDbContext> _dbFactory;
         private readonly IPingSender _pingSender;
         private readonly IOptionsMonitor<PingerOptions> _options;
@@ -86,11 +92,12 @@ namespace HostPinger.Core.Services
             }
 
             var timestampUtc = _timeProvider.GetUtcNow().UtcDateTime;
+            var timeoutMilliseconds = Math.Clamp(options.TimeoutMilliseconds, 1, MaxTimeoutMilliseconds);
             var attempts = await Task.WhenAll(hosts.Select(async host => new PingAttempt
             {
                 HostId = host.Id,
                 TimestampUtc = timestampUtc,
-                RoundtripMs = await _pingSender.SendPingAsync(host.Address, options.TimeoutMilliseconds, cancellationToken),
+                RoundtripMs = await _pingSender.SendPingAsync(host.Address, timeoutMilliseconds, cancellationToken),
             }));
 
             db.PingAttempts.AddRange(attempts);

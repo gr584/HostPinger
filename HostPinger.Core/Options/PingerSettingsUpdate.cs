@@ -9,6 +9,8 @@ namespace HostPinger.Core.Options
     {
         public int? IntervalSeconds { get; init; }
 
+        public int? TimeoutMilliseconds { get; init; }
+
         public int? MaxDatabaseSizeMb { get; init; }
     }
 }

@@ -71,12 +71,36 @@ namespace HostPinger.Test
             Assert.That(sender.Calls, Is.Empty);
         }
 
-        private PingMonitorService CreateService(IPingSender sender)
+        /// <summary>
+        /// The timeout reaches the pinger from a file the user can edit, so a value that
+        /// System.Net.NetworkInformation.Ping would reject must be clamped rather than thrown.
+        /// </summary>
+        [TestCase(2_500, 2_500)]
+        [TestCase(0, 1)]
+        [TestCase(-5, 1)]
+        [TestCase(999_999, 60_000)]
+        public async Task RunRound_ClampsTheConfiguredTimeout(int configured, int expected)
+        {
+            await using (var db = new HostPingerDbContext(_options))
+            {
+                db.Hosts.Add(new MonitoredHost { Name = "h", Address = "h.example" });
+                await db.SaveChangesAsync();
+            }
+
+            var sender = new FakePingSender();
+            var service = CreateService(sender, new PingerOptions { TimeoutMilliseconds = configured });
+
+            await service.RunRoundAsync();
+
+            Assert.That(sender.Timeouts, Is.EqualTo(new[] { expected }));
+        }
+
+        private PingMonitorService CreateService(IPingSender sender, PingerOptions? options = null)
         {
             return new PingMonitorService(
                 new TestDb.Factory(_options),
                 sender,
-                new TestOptionsMonitor<PingerOptions>(new PingerOptions()),
+                new TestOptionsMonitor<PingerOptions>(options ?? new PingerOptions()),
                 new DatabasePruner(),
                 NullLogger<PingMonitorService>.Instance);
         }
@@ -87,11 +111,14 @@ namespace HostPinger.Test
 
             public List<string> Calls { get; } = [];
 
+            public List<int> Timeouts { get; } = [];
+
             public Task<int?> SendPingAsync(string address, int timeoutMilliseconds, CancellationToken cancellationToken = default)
             {
                 lock (Calls)
                 {
                     Calls.Add(address);
+                    Timeouts.Add(timeoutMilliseconds);
                 }
 
                 return Task.FromResult(Results.GetValueOrDefault(address));
