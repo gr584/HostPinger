@@ -65,6 +65,20 @@
     padding-left: 0;
 }
 
+/*
+ * Compact rows. A button is the tallest thing in a row at 31px, so halving the cell padding on
+ * its own only gets a third of the way; both it and the button padding come down to take the
+ * row from 48px to 36px.
+ */
+.host-table > :not(caption) > * > * {
+    padding-top: 0.25rem;
+    padding-bottom: 0.25rem;
+}
+
+.host-table .btn {
+    --bs-btn-padding-y: 0.125rem;
+}
+
 .ping-value {
     font-variant-numeric: tabular-nums;
 }
