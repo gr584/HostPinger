@@ -67,6 +67,9 @@
 # platform does. "* text=auto" above hands these CRLF on Windows, which a shell
 # or a container entrypoint reads as part of the command and fails on.
 ###############################################################################
-*.sh    eol=lf
-*.yml   eol=lf
-*.yaml  eol=lf
+*.sh         eol=lf
+*.yml        eol=lf
+*.yaml       eol=lf
+*.service    eol=lf
+*.spec       eol=lf
+*.sysconfig  eol=lf
