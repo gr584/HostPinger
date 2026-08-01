@@ -11,6 +11,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Both are no-ops off their own platform, so the same build hosts itself correctly as a
+         Windows service and as a systemd unit. -->
+    <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="10.0.10" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.10" />
   </ItemGroup>
 
