@@ -18,6 +18,16 @@
                   DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
+    <!-- The application is published framework-dependent, so the ASP.NET Core runtime has to be on
+         the machine already; this is what the spec file states as Requires: aspnetcore-runtime-10.0.
+         Without the check the install runs to the point of starting the service, fails there, and
+         rolls back with a message that says nothing about a missing runtime.
+
+         "Installed OR" so that uninstalling or repairing still works on a machine the runtime has
+         since been removed from. -->
+    <Launch Condition="Installed OR ASPNETCORERUNTIME"
+            Message="[ProductName] requires the ASP.NET Core Runtime 10.0 (x64), which is not installed on this machine. Install it from https://dotnet.microsoft.com/download/dotnet/10.0 and run this installer again." />
+
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="HostPinger" />
     </StandardDirectory>
@@ -26,6 +36,38 @@
       <ComponentGroupRef Id="ApplicationFiles" />
       <ComponentRef Id="HostPingerService" />
     </Feature>
+
+    <!--
+      Detects the runtime the launch condition above insists on.
+
+      Not a registry search for the framework itself. .NET does list the installed shared
+      frameworks under Setup\InstalledVersions\x64\sharedfx, but each one appears as a value named
+      for an exact patch version, so nothing there answers "is any 10.0.x present". The file system
+      does: the framework lives in a version-named directory and the assembly inside carries a file
+      version in the same band, 10.0.10 shipping 10.0.1026.32716. Hence the version range, which
+      also keeps an 8.0 runtime beside it from satisfying the check.
+
+      Rooted at the registered install path rather than a hard-coded Program Files one, so a dotnet
+      installed elsewhere is still found. That registry value has to be read as a directory rather
+      than a raw value for the search below to hang off it, and from the 64-bit view, which is
+      where the x64 shared host records itself.
+
+      Depth crosses the version-named directory. The file search must stay anonymous for it to
+      work: an Id on FileSearch makes WiX emit the depth against the directory locator instead of
+      the file one, and the search then only ever looks in Microsoft.AspNetCore.App itself.
+    -->
+    <Property Id="ASPNETCORERUNTIME">
+      <RegistrySearch Id="DotnetRoot"
+                      Root="HKLM"
+                      Key="SOFTWARE\dotnet\Setup\InstalledVersions\x64\sharedhost"
+                      Name="Path"
+                      Type="directory"
+                      Bitness="always64">
+        <DirectorySearch Id="AspNetCoreSharedFramework" Path="shared\Microsoft.AspNetCore.App" Depth="1">
+          <FileSearch Name="Microsoft.AspNetCore.dll" MinVersion="10.0.0.0" MaxVersion="11.0.0.0" />
+        </DirectorySearch>
+      </RegistrySearch>
+    </Property>
 
   </Package>
 

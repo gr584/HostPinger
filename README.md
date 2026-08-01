@@ -172,11 +172,17 @@ patched with the distribution rather than bundled.
 
 ## Installing on Windows
 
-Build the MSI, which publishes the application self-contained and packages it in one step:
+Build the MSI, which publishes the application and packages it in one step:
 
 ```powershell
 dotnet build HostPinger.WindowsInstaller\HostPinger.WindowsInstaller.wixproj -c Release
 ```
+
+The target machine needs the [ASP.NET Core Runtime 10.0 (x64)](https://dotnet.microsoft.com/download/dotnet/10.0),
+for the same reason the RPM depends on `aspnetcore-runtime-10.0`: the application is published
+framework-dependent, so the runtime is serviced by the machine rather than frozen into the
+installer. The MSI checks for it and stops with a message naming it rather than failing later on,
+when it would otherwise show up only as the service refusing to start.
 
 Installing it registers a `HostPinger` service that starts automatically and runs as LocalSystem.
 Its database and settings live under `%ProgramData%\HostPinger`.

@@ -14,10 +14,18 @@
   </PropertyGroup>
 
   <!--
-    The MSI always packages a Release, self-contained publish of the application, whatever
-    configuration this project itself is built in. Self-contained means the target machine
-    needs no .NET runtime installed; the solution excludes this project from Debug builds so
-    the extra publish only runs when an installer is actually wanted.
+    The MSI always packages a Release publish of the application, whatever configuration this
+    project itself is built in. The solution excludes this project from Debug builds so the extra
+    publish only runs when an installer is actually wanted.
+
+    Framework-dependent, matching the RPM: the ASP.NET Core runtime comes from the machine and is
+    serviced there rather than being frozen into the installer, so a runtime security fix does not
+    need a new HostPinger release to reach an installed copy. Package.wxs refuses to install
+    without it, which is the MSI's equivalent of the spec file's Requires:.
+
+    RID-specific all the same, so the publish carries a Windows launcher and the win-x64 native
+    libraries — the executable is what the installer binds its version to and what the service
+    entry points at.
   -->
   <PropertyGroup>
     <AppProject>$(MSBuildThisFileDirectory)..\HostPinger\HostPinger.csproj</AppProject>
@@ -32,7 +40,7 @@
     <!-- dotnet publish does not clear its output directory, so drop files left by an earlier
          publish rather than shipping them in the MSI. -->
     <RemoveDir Directories="$(AppPublishDir)" />
-    <Exec Command="dotnet publish &quot;$(AppProject)&quot; --configuration Release --runtime $(AppRuntimeIdentifier) --self-contained true --output &quot;$(AppPublishDir)&quot;" />
+    <Exec Command="dotnet publish &quot;$(AppProject)&quot; --configuration Release --runtime $(AppRuntimeIdentifier) --no-self-contained --output &quot;$(AppPublishDir)&quot;" />
   </Target>
 
 </Project>

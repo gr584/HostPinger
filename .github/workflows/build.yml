@@ -103,6 +103,41 @@ jobs:
       - name: Build the MSI
         run: dotnet build HostPinger.WindowsInstaller/HostPinger.WindowsInstaller.wixproj -c Release
 
+      # The counterpart to the RPM job's metadata check, guarding the two halves of being
+      # framework-dependent — the payload carries no runtime, and the installer refuses a machine
+      # that has none. A stray --self-contained would undo both without failing the build.
+      - name: Verify package metadata
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Only a self-contained publish brings the runtime's own assemblies along.
+          if (Test-Path 'HostPinger.WindowsInstaller/obj/publish/win-x64/System.Private.CoreLib.dll') {
+            Write-Output '::error::the publish is self-contained; it carries its own copy of the runtime'
+            exit 1
+          }
+
+          $msi = (Get-ChildItem HostPinger.WindowsInstaller/bin -Recurse -Filter *.msi)[0].FullName
+          Write-Output "checking $msi"
+
+          # The installer database has no command line tool on the runner; this is the COM API that
+          # msiexec itself uses. Late-bound because the interfaces carry no usable type library.
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($msi, 0))
+          $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @('SELECT Condition FROM LaunchCondition'))
+          $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+
+          $conditions = @()
+          while ($record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)) {
+            $conditions += [string]$record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, @(1))
+          }
+          $conditions | ForEach-Object { Write-Output "launch condition: $_" }
+
+          if (-not ($conditions -match 'ASPNETCORERUNTIME')) {
+            Write-Output '::error::the MSI no longer requires the ASP.NET Core runtime to be installed'
+            exit 1
+          }
+
       - uses: actions/upload-artifact@v4
         with:
           name: msi
