@@ -243,11 +243,14 @@
         return $"{bytes:0.#} {units[unit]}";
     }
 
+    // Guards rather than the tidier relational patterns (`< 1 => ...`): inside @code, a line
+    // starting with '<' is read as an HTML tag by the Razor parser shipped in some .NET SDK
+    // feature bands, including the one Fedora packages, and the component fails to compile there.
     private static string FormatDays(double days) => days switch
     {
-        < 1 => $"{days * 24:0.#} hours",
-        < 10 => $"{days:0.#} days",
-        < 730 => $"{days:0} days",
+        _ when days < 1 => $"{days * 24:0.#} hours",
+        _ when days < 10 => $"{days:0.#} days",
+        _ when days < 730 => $"{days:0} days",
         _ => $"{days / 365.25:0.#} years",
     };
 
