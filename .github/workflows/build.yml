@@ -103,9 +103,10 @@ jobs:
       - name: Build the MSI
         run: dotnet build HostPinger.WindowsInstaller/HostPinger.WindowsInstaller.wixproj -c Release
 
-      # The counterpart to the RPM job's metadata check, guarding the two halves of being
+      # The counterpart to the RPM job's metadata check. It guards the two halves of being
       # framework-dependent — the payload carries no runtime, and the installer refuses a machine
-      # that has none. A stray --self-contained would undo both without failing the build.
+      # that has none, which a stray --self-contained would undo without failing the build — and
+      # then the two halves of the UI being reachable at all, the bound port and the firewall rule.
       - name: Verify package metadata
         shell: powershell
         run: |
@@ -135,6 +136,51 @@ jobs:
 
           if (-not ($conditions -match 'ASPNETCORERUNTIME')) {
             Write-Output '::error::the MSI no longer requires the ASP.NET Core runtime to be installed'
+            exit 1
+          }
+
+          # Reaching the UI from another machine takes two rows in two different tables, and losing
+          # either one produces the same silent result: a service that answers only itself, which
+          # nothing about the install or the build would report. Adding the firewall rule is even
+          # authored to fail quietly on the target machine, so a check here is what is left.
+          function Get-Rows($query) {
+            $v = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @($query))
+            # Discarded rather than left to fall out of the function, where it would join the rows.
+            [void]$v.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $v, $null)
+            $rows = @()
+            while ($r = $v.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $v, $null)) {
+              $count = $r.GetType().InvokeMember('FieldCount', 'GetProperty', $null, $r, $null)
+              $fields = @()
+              for ($i = 1; $i -le $count; $i++) {
+                $fields += [string]$r.GetType().InvokeMember('StringData', 'GetProperty', $null, $r, @($i))
+              }
+              $rows += ,$fields
+            }
+            $rows
+          }
+
+          $environment = Get-Rows 'SELECT Name, Value FROM Registry' |
+            Where-Object { $_[0] -eq 'Environment' } | ForEach-Object { $_[1] }
+          $environment | ForEach-Object { Write-Output "service environment: $_" }
+
+          if (-not ($environment -match 'ASPNETCORE_HTTP_PORTS=5000')) {
+            Write-Output '::error::the MSI no longer sets the port on the service, so it would bind localhost only'
+            exit 1
+          }
+
+          # Port and protocol as numbers: 6 is TCP. Profile 1 is domain and 2 is private; the public
+          # profile is deliberately not among them, and finding it here means someone widened the
+          # rule to networks the unauthenticated UI has no business answering on.
+          #
+          # The table name carries the extension's major version, so moving off WiX 6 renames it and
+          # fails this step until the name is updated — which is the point at which to check that
+          # the rule still means what it did.
+          $rules = Get-Rows 'SELECT Name, Port, Protocol, Profile FROM Wix5FirewallException'
+          $rules | ForEach-Object { Write-Output "firewall rule: $($_ -join ' ')" }
+
+          $profiles = $rules | Where-Object { $_[1] -eq '5000' -and $_[2] -eq '6' } | ForEach-Object { $_[3] }
+          if (($profiles | Sort-Object) -join ',' -ne '1,2') {
+            Write-Output '::error::the MSI no longer opens TCP 5000 in exactly the domain and private profiles'
             exit 1
           }
 

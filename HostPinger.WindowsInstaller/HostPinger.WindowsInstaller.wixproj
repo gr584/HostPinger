@@ -2,6 +2,12 @@
      v7 fails the build with WIX7015 unless one is supplied. -->
 <Project Sdk="WixToolset.Sdk/6.0.2">
 
+  <!-- Package.wxs opens the web UI's port in Windows Firewall, which needs this extension; the
+       rule is authored declaratively rather than by shelling out to netsh from a custom action. -->
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Firewall.wixext" Version="6.0.2" />
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputName>HostPinger</OutputName>
     <OutputType>Package</OutputType>

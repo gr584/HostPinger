@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:fw="http://wixtoolset.org/schemas/v4/wxs/firewall">
 
   <!-- The package version is bound to the executable's file version, which GitVersion stamps from
        the git history. Tagging a release therefore sets the installer version too; MSI keeps only
@@ -119,9 +120,7 @@
         control manager's database yet, so CreateService opens this key rather than refusing the
         name, and the values it writes join the one already there.
 
-        Opening the port in Windows Firewall is deliberately left out, as the RPM leaves firewalld
-        alone:
-          New-NetFirewallRule -DisplayName HostPinger -Direction Inbound -Protocol TCP -LocalPort 5000 -Action Allow
+        Binding the port is only half of reaching the UI; the firewall rule below is the other half.
       -->
       <RegistryValue Root="HKLM"
                      Key="SYSTEM\CurrentControlSet\Services\HostPinger"
@@ -129,6 +128,48 @@
                      Type="multiString"
                      Action="write"
                      Value="ASPNETCORE_HTTP_PORTS=5000" />
+
+      <!--
+        Inbound is blocked by default, so binding every interface above achieves nothing on its own
+        — the service would answer only the machine it runs on, which is what listening on
+        localhost would already have done. This is where the Windows packaging departs from the
+        RPM, which leaves firewalld alone and tells the administrator to run firewall-cmd: on
+        Fedora that is the convention, and on Windows an installer that leaves the port shut is
+        simply an installer that does not work.
+
+        Scoped to this executable as well as the port, so opening 5000 opens it for HostPinger and
+        nothing else that might later listen there.
+
+        Domain and private only. The UI has no authentication of any kind — anyone who reaches it
+        can add and delete monitored hosts along with their history — so a public network, which is
+        Windows' name for the untrusted ones, is not somewhere to answer on. A machine that genuinely
+        needs it can add that profile by hand.
+
+        Two elements because @Profile takes one value and each becomes its own rule; they share a
+        name, which is how Windows itself lists a per-profile pair.
+
+        IgnoreFailure because the rule is a convenience and the service is the product: on a machine
+        running a third-party firewall, or with the Windows Firewall service disabled, adding the
+        rule fails, and rolling the whole install back over that would be a poor trade. The README
+        gives the New-NetFirewallRule command for putting it back by hand.
+      -->
+      <fw:FirewallException Id="WebUiDomain"
+                            Name="HostPinger web UI"
+                            Description="Inbound access to the HostPinger web UI."
+                            File="HostPingerExe"
+                            Port="5000"
+                            Protocol="tcp"
+                            Profile="domain"
+                            IgnoreFailure="yes" />
+
+      <fw:FirewallException Id="WebUiPrivate"
+                            Name="HostPinger web UI"
+                            Description="Inbound access to the HostPinger web UI."
+                            File="HostPingerExe"
+                            Port="5000"
+                            Protocol="tcp"
+                            Profile="private"
+                            IgnoreFailure="yes" />
     </Component>
 
   </Fragment>

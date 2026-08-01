@@ -192,10 +192,22 @@ installer sets that through the service's environment rather than leaving Kestre
 default, which would be localhost only — see [Environment configuration](#environment-configuration)
 for changing it.
 
-Windows does not open the port for you:
+The installer also opens the port in Windows Firewall, in the domain and private profiles, for this
+executable only. It leaves the public profile alone: the UI has no authentication, so anyone who
+reaches it can add and delete monitored hosts along with their history, and an untrusted network is
+not somewhere to answer on. Where that is wanted anyway:
 
 ```powershell
-New-NetFirewallRule -DisplayName HostPinger -Direction Inbound -Protocol TCP -LocalPort 5000 -Action Allow
+Set-NetFirewallRule -DisplayName 'HostPinger web UI' -Profile Domain,Private,Public
+```
+
+Adding the rule is the one part of the install allowed to fail quietly, since a machine behind a
+third-party firewall, or with the Windows Firewall service disabled, is not a reason to fail the
+whole install. If the UI answers locally but not from another machine, that is the thing to check:
+
+```powershell
+Get-NetFirewallRule -DisplayName 'HostPinger web UI' | Format-Table DisplayName, Profile, Enabled
+New-NetFirewallRule -DisplayName 'HostPinger web UI' -Direction Inbound -Protocol TCP -LocalPort 5000 -Action Allow -Profile Domain,Private
 ```
 
 ## Environment configuration
@@ -222,6 +234,10 @@ Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Services\HostPinger -Name Enviro
 
 Unlike the sysconfig file, which the RPM leaves alone on upgrade, reinstalling or upgrading the MSI
 writes that value back to the default.
+
+Changing the port on either platform leaves the firewall behind: the RPM never opened one, and the
+rule the MSI adds names port 5000. `Set-NetFirewallRule -DisplayName 'HostPinger web UI' -LocalPort
+<new>` moves it, until the next upgrade puts 5000 back.
 
 ## How ICMP is permitted
 
