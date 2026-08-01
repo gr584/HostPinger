@@ -102,6 +102,33 @@
                       Stop="both"
                       Remove="uninstall"
                       Wait="yes" />
+
+      <!--
+        The service control manager hands this multi-string to the process as environment
+        variables, which is how an ASP.NET Core service is configured on Windows. It is the
+        counterpart of /etc/sysconfig/hostpinger on the Linux side, down to the variable name, and
+        an administrator edits it the same way — change the value, then Restart-Service HostPinger.
+        Unlike the sysconfig file, which the RPM marks noreplace, an upgrade rewrites it.
+
+        Without it Kestrel binds its own default of localhost:5000, which leaves a machine-wide
+        service reachable only from the machine running it. ASPNETCORE_HTTP_PORTS names a port
+        rather than an address and so listens on every interface, matching what the RPM does on
+        8080.
+
+        Written before InstallServices creates the key, which is fine: the service is not in the
+        control manager's database yet, so CreateService opens this key rather than refusing the
+        name, and the values it writes join the one already there.
+
+        Opening the port in Windows Firewall is deliberately left out, as the RPM leaves firewalld
+        alone:
+          New-NetFirewallRule -DisplayName HostPinger -Direction Inbound -Protocol TCP -LocalPort 5000 -Action Allow
+      -->
+      <RegistryValue Root="HKLM"
+                     Key="SYSTEM\CurrentControlSet\Services\HostPinger"
+                     Name="Environment"
+                     Type="multiString"
+                     Action="write"
+                     Value="ASPNETCORE_HTTP_PORTS=5000" />
     </Component>
 
   </Fragment>

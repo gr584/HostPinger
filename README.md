@@ -187,22 +187,41 @@ when it would otherwise show up only as the service refusing to start.
 Installing it registers a `HostPinger` service that starts automatically and runs as LocalSystem.
 Its database and settings live under `%ProgramData%\HostPinger`.
 
-Unlike the Linux package, the Windows service listens on `http://127.0.0.1:5000` — Kestrel's
-default — so the UI is reachable only from the machine itself unless `ASPNETCORE_URLS` is set for
-the service.
+The UI is then on port 5000, on every interface, as the Linux package puts it on 8080. The
+installer sets that through the service's environment rather than leaving Kestrel on its own
+default, which would be localhost only — see [Environment configuration](#environment-configuration)
+for changing it.
+
+Windows does not open the port for you:
+
+```powershell
+New-NetFirewallRule -DisplayName HostPinger -Direction Inbound -Protocol TCP -LocalPort 5000 -Action Allow
+```
 
 ## Environment configuration
 
 Ping interval, timeout and the database size limit belong to the running service and are edited on
-the Configuration page, as described above. Everything else is environment configuration — on
-Linux in `/etc/sysconfig/hostpinger`, applied on `systemctl restart hostpinger`:
+the Configuration page, as described above. Everything else is environment configuration:
 
 | Variable | Purpose |
 | --- | --- |
-| `ASPNETCORE_HTTP_PORTS` | Listening port. 8080 on Linux. |
-| `TZ` | Time zone for displayed timestamps. They are rendered server-side, so this decides what users see. |
+| `ASPNETCORE_HTTP_PORTS` | Listening port, on every interface. 8080 on Linux, 5000 on Windows. |
+| `TZ` | Time zone for displayed timestamps. They are rendered server-side, so this decides what users see. Linux only — Windows takes the system time zone. |
 | `Pinger__DatabasePath` | Database location. Defaults to `/var/lib/hostpinger/hostpinger.db` on Linux and `%ProgramData%\HostPinger\hostpinger.db` on Windows. |
 | `Pinger__UserSettingsPath` | Settings overlay location. Defaults to sitting beside the database. |
+
+On Linux they live in `/etc/sysconfig/hostpinger` and take effect on `systemctl restart
+hostpinger`. On Windows they live in the service's `Environment` value, which the service control
+manager passes to the process, and take effect on `Restart-Service HostPinger`. Setting it replaces
+the whole set, so include the port the installer put there:
+
+```powershell
+Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Services\HostPinger -Name Environment `
+  -Value @('ASPNETCORE_HTTP_PORTS=5000', 'Pinger__DatabasePath=D:\HostPinger\hostpinger.db')
+```
+
+Unlike the sysconfig file, which the RPM leaves alone on upgrade, reinstalling or upgrading the MSI
+writes that value back to the default.
 
 ## How ICMP is permitted
 
