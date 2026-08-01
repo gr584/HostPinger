@@ -23,6 +23,7 @@ else
                 <th>Address</th>
                 <th>Status</th>
                 <th>Last ping</th>
+                <th>Last downtime</th>
                 <th>Enabled</th>
                 <th style="width: 13rem;"></th>
             </tr>
@@ -56,6 +57,19 @@ else
                         {
                             <span class="ping-value">@(last.RoundtripMs is int ms ? $"{ms} ms" : "no reply")</span>
                             <small class="text-muted ms-2">@RelativeTime(last.TimestampUtc)</small>
+                        }
+                        else
+                        {
+                            <span class="text-muted">—</span>
+                        }
+                    </td>
+                    <td>
+                        @if (row.LastDowntime is { } downtime)
+                        {
+                            <span class="ping-value">@downtime.StartedUtc.ToLocalTime().ToString("g")</span>
+                            <small class="ms-2 @(downtime.IsOngoing ? "text-danger" : "text-muted")">
+                                @Downtime.FormatDuration(downtime.DurationAt(DateTime.UtcNow))@(downtime.IsOngoing ? " and counting" : "")
+                            </small>
                         }
                         else
                         {

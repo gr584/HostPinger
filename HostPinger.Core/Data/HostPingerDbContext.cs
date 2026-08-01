@@ -25,6 +25,14 @@ namespace HostPinger.Core.Data
             {
                 attempt.HasIndex(a => new { a.HostId, a.TimestampUtc });
                 attempt.HasIndex(a => a.TimestampUtc);
+
+                // Unanswered pings only. Locating a host's last downtime means finding its most
+                // recent unanswered ping, and the index above cannot seek to it: it would have to
+                // walk back over every successful attempt recorded since, which grows without
+                // bound for a host that stays up. A partial index holds just the failures, so the
+                // seek stays flat no matter how long the host has been healthy.
+                attempt.HasIndex(a => new { a.HostId, a.TimestampUtc }, "IX_PingAttempts_Unanswered")
+                    .HasFilter("\"RoundtripMs\" IS NULL");
             });
         }
     }

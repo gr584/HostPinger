@@ -103,6 +103,143 @@ namespace HostPinger.Test
             });
         }
 
+        [Test]
+        public async Task LoadAsync_ReportsTheLastDowntimeBetweenTheAnsweredPingsAroundIt()
+        {
+            var start = new DateTime(2026, 7, 31, 12, 0, 0, DateTimeKind.Utc);
+            await using var db = new HostPingerDbContext(_options);
+            var host = await AddHostAsync(db, "flaky");
+            // Up, an earlier outage, up, the last outage (unanswered at minutes 4 and 5), up again.
+            await AddAttemptsAsync(db, host, start, [10, null, 20, 30, null, null, 40, 50]);
+
+            var downtime = (await HostSummary.LoadAsync(db)).Single().LastDowntime;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(downtime, Is.Not.Null);
+                Assert.That(downtime!.StartedUtc, Is.EqualTo(start.AddMinutes(3)), "measured from the last answered ping");
+                Assert.That(downtime.EndedUtc, Is.EqualTo(start.AddMinutes(6)));
+                Assert.That(downtime.IsOngoing, Is.False);
+                Assert.That(downtime.DurationAt(start.AddHours(1)), Is.EqualTo(TimeSpan.FromMinutes(3)));
+            });
+        }
+
+        /// <summary>
+        /// A downtime that has not ended yet has no answered ping to measure to, so it stays open
+        /// and the page measures it against the current time instead.
+        /// </summary>
+        [Test]
+        public async Task LoadAsync_LeavesTheDowntimeOpenWhileTheHostIsStillDown()
+        {
+            var start = new DateTime(2026, 7, 31, 12, 0, 0, DateTimeKind.Utc);
+            await using var db = new HostPingerDbContext(_options);
+            var host = await AddHostAsync(db, "down");
+            await AddAttemptsAsync(db, host, start, [10, 20, null, null]);
+
+            var downtime = (await HostSummary.LoadAsync(db)).Single().LastDowntime;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(downtime!.StartedUtc, Is.EqualTo(start.AddMinutes(1)));
+                Assert.That(downtime.EndedUtc, Is.Null);
+                Assert.That(downtime.IsOngoing, Is.True);
+                Assert.That(downtime.DurationAt(start.AddMinutes(5)), Is.EqualTo(TimeSpan.FromMinutes(4)));
+            });
+        }
+
+        /// <summary>
+        /// The bug this replaced: measuring from the first unanswered ping reads a stretch with no
+        /// attempts in it as uptime, so an outage that began while the monitor was stopped was
+        /// reported as starting when the monitor came back — six days late, for the host that
+        /// turned this up. Nothing here says the host answered after 12:01, so nothing may claim it.
+        /// </summary>
+        [Test]
+        public async Task LoadAsync_CountsDowntimeFromTheLastAnsweredPingAcrossAGapInMonitoring()
+        {
+            var start = new DateTime(2026, 7, 31, 12, 0, 0, DateTimeKind.Utc);
+            await using var db = new HostPingerDbContext(_options);
+            var host = await AddHostAsync(db, "unwatched");
+            await AddAttemptsAsync(db, host, start, [10, 20]);
+            // The monitor is stopped for six days, then comes back to an unanswered host.
+            await AddAttemptsAsync(db, host, start.AddDays(6), [null, null]);
+
+            var downtime = (await HostSummary.LoadAsync(db)).Single().LastDowntime;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(downtime!.StartedUtc, Is.EqualTo(start.AddMinutes(1)));
+                Assert.That(downtime.IsOngoing, Is.True);
+                Assert.That(downtime.DurationAt(start.AddDays(6).AddMinutes(1)),
+                    Is.EqualTo(TimeSpan.FromDays(6)));
+            });
+        }
+
+        /// <summary>
+        /// With no answered ping before the failures there is nothing to measure from, so the
+        /// downtime falls back to the host's very first attempt.
+        /// </summary>
+        [Test]
+        public async Task LoadAsync_StartsTheDowntimeAtTheFirstAttemptWhenTheHostNeverAnswered()
+        {
+            var start = new DateTime(2026, 7, 31, 12, 0, 0, DateTimeKind.Utc);
+            await using var db = new HostPingerDbContext(_options);
+            var host = await AddHostAsync(db, "silent");
+            await AddAttemptsAsync(db, host, start, [null, null, null]);
+
+            var downtime = (await HostSummary.LoadAsync(db)).Single().LastDowntime;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(downtime!.StartedUtc, Is.EqualTo(start));
+                Assert.That(downtime.EndedUtc, Is.Null);
+            });
+        }
+
+        [Test]
+        public async Task LoadAsync_LeavesTheDowntimeNullWhenEveryPingWasAnswered()
+        {
+            var start = new DateTime(2026, 7, 31, 12, 0, 0, DateTimeKind.Utc);
+            await using var db = new HostPingerDbContext(_options);
+            var host = await AddHostAsync(db, "healthy");
+            await AddAttemptsAsync(db, host, start, [10, 20, 30]);
+
+            var summaries = await HostSummary.LoadAsync(db);
+
+            Assert.That(summaries.Single().LastDowntime, Is.Null);
+        }
+
+        [Test]
+        public async Task LoadAsync_LeavesTheDowntimeNullForAHostThatWasNeverPinged()
+        {
+            await using var db = new HostPingerDbContext(_options);
+            await AddHostAsync(db, "fresh");
+
+            var summaries = await HostSummary.LoadAsync(db);
+
+            Assert.That(summaries.Single().LastDowntime, Is.Null);
+        }
+
+        /// <summary>Each host's downtime must come from its own attempts, not another host's.</summary>
+        [Test]
+        public async Task LoadAsync_KeepsDowntimesPerHost()
+        {
+            var start = new DateTime(2026, 7, 31, 12, 0, 0, DateTimeKind.Utc);
+            await using var db = new HostPingerDbContext(_options);
+            var first = await AddHostAsync(db, "first");
+            var second = await AddHostAsync(db, "second");
+            await AddAttemptsAsync(db, first, start, [10, null, 20]);
+            await AddAttemptsAsync(db, second, start, [10, 20, 30]);
+
+            var summaries = await HostSummary.LoadAsync(db);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(summaries[0].LastDowntime!.StartedUtc, Is.EqualTo(start));
+                Assert.That(summaries[0].LastDowntime!.EndedUtc, Is.EqualTo(start.AddMinutes(2)));
+                Assert.That(summaries[1].LastDowntime, Is.Null);
+            });
+        }
+
         /// <summary>
         /// Guards the fix for the slow Hosts page. Projecting the last attempt as an entity makes EF
         /// emit ROW_NUMBER() OVER (PARTITION BY ...), which scans the whole PingAttempts table; the
@@ -125,7 +262,10 @@ namespace HostPinger.Test
 
         /// <summary>
         /// The correlated subqueries are only fast because SQLite can walk
-        /// IX_PingAttempts_HostId_TimestampUtc backwards; without the index it scans instead.
+        /// IX_PingAttempts_HostId_TimestampUtc backwards; without the index it scans instead. The
+        /// downtime lookups need IX_PingAttempts_Unanswered on top of it: the most recent
+        /// unanswered ping is otherwise only reachable by walking back over every attempt answered
+        /// since, which is unbounded for a host that stays up.
         /// </summary>
         [Test]
         public async Task BuildQuery_SeeksTheHostTimestampIndex()
@@ -149,9 +289,40 @@ namespace HostPinger.Test
             {
                 Assert.That(detail, Does.Contain("IX_PingAttempts_HostId_TimestampUtc"),
                     $"Plan should seek the host/timestamp index. Plan was: {detail}");
+                Assert.That(detail, Does.Contain("IX_PingAttempts_Unanswered"),
+                    $"Plan should seek the unanswered-ping index. Plan was: {detail}");
                 Assert.That(detail, Does.Not.Contain("SCAN PingAttempts"),
                     $"Plan should not scan the attempts table. Plan was: {detail}");
             });
+        }
+
+        private static async Task<MonitoredHost> AddHostAsync(HostPingerDbContext db, string name)
+        {
+            var host = new MonitoredHost { Name = name, Address = $"{name}.example" };
+            db.Hosts.Add(host);
+            await db.SaveChangesAsync();
+            return host;
+        }
+
+        /// <summary>Records one attempt per minute from startUtc, one per round trip given.</summary>
+        private static async Task AddAttemptsAsync(
+            HostPingerDbContext db,
+            MonitoredHost host,
+            DateTime startUtc,
+            IReadOnlyList<int?> roundtripsMs)
+        {
+            for (var minute = 0; minute < roundtripsMs.Count; minute++)
+            {
+                db.PingAttempts.Add(new PingAttempt
+                {
+                    HostId = host.Id,
+                    TimestampUtc = startUtc.AddMinutes(minute),
+                    RoundtripMs = roundtripsMs[minute],
+                });
+            }
+
+            await db.SaveChangesAsync();
+            db.ChangeTracker.Clear();
         }
     }
 }
