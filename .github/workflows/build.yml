@@ -1,0 +1,154 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # GitVersion derives the version from the commit history and fails outright on the
+          # shallow clone actions/checkout makes by default. Every job here needs this.
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # Running the tests on Linux is not redundant with a developer's Windows run: the path
+      # defaults are per-OS, so the assertions covering /var/lib/hostpinger are skipped on Windows
+      # and only ever execute here.
+      - run: dotnet test HostPinger.Test/HostPinger.Test.csproj -c Release
+
+  rpm:
+    name: rpm (fedora)
+    runs-on: ubuntu-latest
+    # Built inside the distribution it targets, against the .NET SDK that distribution packages.
+    # That is the point of this job rather than a convenience: Fedora ships the 10.0.1xx feature
+    # band while a developer machine typically has 10.0.3xx, and the two disagree about source
+    # they will accept — a Razor component that compiles on one has already failed on the other.
+    # Building on ubuntu-latest with actions/setup-dotnet would not catch that class of break.
+    container: fedora:44
+    steps:
+      # Before the checkout: without git in the container, actions/checkout falls back to
+      # downloading a tarball, which arrives with no .git directory and leaves GitVersion unable
+      # to compute a version.
+      #
+      # systemd-rpm-macros supplies %{_unitdir} and the %systemd_* scriptlet macros. It usually
+      # arrives as a dependency of rpm-build, but an undefined %{_unitdir} fails in a way that
+      # takes a while to recognise, so it is named explicitly.
+      - name: Install build dependencies
+        run: dnf install -y git tar findutils dotnet-sdk-10.0 rpm-build systemd-rpm-macros
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The checkout is owned by a different uid than the one running the build, which git refuses
+      # to operate on until told the directory is trusted.
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build the RPM
+        run: bash HostPinger.LinuxInstaller/build-rpm.sh
+
+      # Guards two properties of the spec that are invisible in the built artefact and easy to
+      # regress: the runtime dependency the package needs to be installable at all, and the
+      # filter that stops a private bundled library being advertised to the whole distribution.
+      - name: Verify package metadata
+        run: |
+          set -euo pipefail
+          rpm_file=$(ls HostPinger.LinuxInstaller/build/rpmbuild/RPMS/x86_64/*.rpm | head -1)
+          echo "checking $rpm_file"
+
+          if ! rpm -qp --requires "$rpm_file" | grep -qx 'aspnetcore-runtime-10.0'; then
+            echo "::error::the package no longer requires aspnetcore-runtime-10.0"
+            exit 1
+          fi
+
+          if rpm -qp --provides "$rpm_file" | grep -q 'libe_sqlite3'; then
+            echo "::error::the bundled SQLite library is leaking into Provides"
+            exit 1
+          fi
+
+          rpm -qpi "$rpm_file"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm
+          path: HostPinger.LinuxInstaller/build/rpmbuild/RPMS/x86_64/*.rpm
+          if-no-files-found: error
+
+  msi:
+    name: msi (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # The WiX project publishes the application itself before packaging it, so this one command
+      # covers the whole Windows path.
+      - name: Build the MSI
+        run: dotnet build HostPinger.WindowsInstaller/HostPinger.WindowsInstaller.wixproj -c Release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msi
+          path: HostPinger.WindowsInstaller/bin/**/*.msi
+          if-no-files-found: error
+
+  release:
+    name: release
+    # The gate sits here rather than between the build jobs. Those three catch disjoint failures —
+    # and since the test project references only HostPinger.Core, the packaging jobs are the sole
+    # compile check for the web project — so making them wait on one another would delay signal
+    # without changing whether the run is red. What actually warrants a gate is publishing, and
+    # this job cannot start unless all three passed.
+    needs: [test, rpm, msi]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      # gh release create writes to the repository.
+      contents: write
+    steps:
+      # No name filter: this collects every artifact the run produced into one directory per job.
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # GitVersion marks anything with a prerelease suffix, and a tag like v1.2.0-rc1 should
+          # not become the release users are offered by default.
+          prerelease=""
+          case "$GITHUB_REF_NAME" in
+            *-*) prerelease="--prerelease" ;;
+          esac
+
+          # Found rather than globbed: upload-artifact decides how deeply it nests each artifact
+          # based on the common prefix of what matched, which differs between the two jobs.
+          mapfile -t files < <(find artifacts -type f \( -name '*.rpm' -o -name '*.msi' \))
+          printf 'attaching: %s\n' "${files[@]}"
+
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            $prerelease \
+            "${files[@]}"
