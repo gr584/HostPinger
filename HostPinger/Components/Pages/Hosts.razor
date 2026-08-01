@@ -129,9 +129,7 @@ else
 </div>
 
 @code {
-    private sealed record HostRow(MonitoredHost Host, PingAttempt? Last);
-
-    private List<HostRow> _rows = [];
+    private List<HostSummary> _rows = [];
     private HostForm _form = new();
     private int? _pendingDeleteId;
     private string? _error;
@@ -162,15 +160,7 @@ else
     private async Task LoadAsync()
     {
         await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);
-        var rows = await db.Hosts.AsNoTracking()
-            .OrderBy(h => h.Name)
-            .Select(h => new
-            {
-                Host = h,
-                Last = h.PingAttempts.OrderByDescending(a => a.TimestampUtc).FirstOrDefault(),
-            })
-            .ToListAsync(_cts.Token);
-        _rows = rows.Select(r => new HostRow(r.Host, r.Last)).ToList();
+        _rows = await HostSummary.LoadAsync(db, _cts.Token);
     }
 
     private async Task SaveAsync()
