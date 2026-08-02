@@ -12,6 +12,7 @@ main {
     background-image: linear-gradient(180deg, rgb(5, 39, 103) 0%, #3a0647 70%);
 }
 
+/* Holds the theme picker, and nothing else — every link that used to live here is in the sidebar. */
 .top-row {
     background-color: var(--bs-tertiary-bg);
     border-bottom: 1px solid var(--bs-border-color);
@@ -21,35 +22,14 @@ main {
     align-items: center;
 }
 
-    .top-row ::deep a, .top-row ::deep .btn-link {
-        white-space: nowrap;
-        margin-left: 1.5rem;
-        text-decoration: none;
-    }
-
-    .top-row ::deep a:hover, .top-row ::deep .btn-link:hover {
-        text-decoration: underline;
-    }
-
-/*
- * The row holds the theme picker and the About link, which belong together at its right end.
- * Only the gap between them comes down on a narrow window — spreading them to opposite edges,
- * which is what this row did when it carried a brand and a sign-in link, reads as two unrelated
- * controls.
- */
-@media (max-width: 640.98px) {
-    .top-row ::deep a, .top-row ::deep .btn-link {
-        margin-left: 1rem;
-    }
-}
-
 @media (min-width: 641px) {
     .page {
         flex-direction: row;
     }
 
     .sidebar {
-        width: 250px;
+        /* Wide enough for the longest label, "Configuration", and its icon — no wider. */
+        width: 200px;
         height: 100vh;
         position: sticky;
         top: 0;
@@ -59,12 +39,6 @@ main {
         position: sticky;
         top: 0;
         z-index: 1;
-    }
-
-    .top-row.auth ::deep a:first-child {
-        flex: 1;
-        text-align: right;
-        width: 0;
     }
 
     .top-row, article {
