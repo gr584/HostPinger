@@ -1,0 +1,7 @@
+/*
+ * The top row is a flex box and a button group is a shrinkable item in one, so without this the
+ * three labels squash — and then wrap — before anything else in the row gives way.
+ */
+.theme-toggle {
+    flex: none;
+}

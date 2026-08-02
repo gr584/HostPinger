@@ -24,6 +24,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- For ChartPaletteTests, which checks that the stylesheet still defines a color for every
+         palette slot. Copied rather than referenced in place so the test does not have to guess
+         where the checkout is from its output directory. -->
+    <Content Include="..\HostPinger\wwwroot\app.css" Link="app.css" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\HostPinger.Core\HostPinger.Core.csproj" />
     <!-- For ReadmeSectionTests, which reads the README embedded in the web assembly. -->
     <ProjectReference Include="..\HostPinger\HostPinger.csproj" />

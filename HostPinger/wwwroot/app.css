@@ -7,8 +7,46 @@ html {
     scrollbar-gutter: stable;
 }
 
-a, .btn-link {
-    color: #006bb7;
+/*
+ * Bootstrap themes links itself, so this is only the shade of blue we prefer over its default,
+ * and only for the light theme — dark keeps Bootstrap's lighter #6ea8fe, which is what a dark
+ * background needs. It has to hang off [data-bs-theme=light] rather than :root: the two carry
+ * the same specificity as Bootstrap's own [data-bs-theme=dark] block, and this file loads after
+ * it, so a :root declaration would win in dark mode as well.
+ */
+[data-bs-theme="light"] {
+    --bs-link-color: #006bb7;
+    --bs-link-color-rgb: 0, 107, 183;
+}
+
+/*
+ * The chart series palette, one custom property per slot. The values live here rather than in
+ * HostPinger.Core because the theme is only known in the browser; ChartPalette.GetColor names
+ * a slot and the pair of blocks below decide what that slot looks like. The slot order is a
+ * CVD-safety mechanism, so the two lists stay in the same order as each other.
+ */
+:root {
+    --chart-series-0: #2a78d6; /* blue */
+    --chart-series-1: #008300; /* green */
+    --chart-series-2: #e87ba4; /* magenta */
+    --chart-series-3: #eda100; /* yellow */
+    --chart-series-4: #1baf7a; /* aqua */
+    --chart-series-5: #eb6834; /* orange */
+    --chart-series-6: #4a3aa7; /* violet */
+    --chart-series-7: #e34948; /* red */
+}
+
+/* The same eight hues lifted clear of the #212529 body — the greens and the violet most, since
+   those are the ones that disappear into it. */
+[data-bs-theme="dark"] {
+    --chart-series-0: #62a8f5;
+    --chart-series-1: #52c452;
+    --chart-series-2: #ee97ba;
+    --chart-series-3: #f2be3c;
+    --chart-series-4: #34d1ab;
+    --chart-series-5: #f5854f;
+    --chart-series-6: #9b8cf0;
+    --chart-series-7: #f0706f;
 }
 
 .btn-primary {
@@ -17,8 +55,9 @@ a, .btn-link {
     border-color: #1861ac;
 }
 
+/* The inner ring is a gap punched in the glow, so it follows the page rather than staying white. */
 .btn:focus, .btn:active:focus, .btn-link.nav-link:focus, .form-control:focus, .form-check-input:focus {
-  box-shadow: 0 0 0 0.1rem white, 0 0 0 0.25rem #258cfb;
+  box-shadow: 0 0 0 0.1rem var(--bs-body-bg), 0 0 0 0.25rem #258cfb;
 }
 
 .content {
@@ -30,15 +69,15 @@ h1:focus {
 }
 
 .valid.modified:not([type=checkbox]) {
-    outline: 1px solid #26b050;
+    outline: 1px solid var(--bs-form-valid-border-color);
 }
 
 .invalid {
-    outline: 1px solid #e50000;
+    outline: 1px solid var(--bs-form-invalid-border-color);
 }
 
 .validation-message {
-    color: #e50000;
+    color: var(--bs-form-invalid-color);
 }
 
 .blazor-error-boundary {

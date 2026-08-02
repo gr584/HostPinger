@@ -49,8 +49,8 @@
     top: calc(100% + 4px);
     right: 0;
     z-index: 1001;
-    background: #ffffff;
-    border: 1px solid rgba(11, 11, 11, 0.15);
+    background: var(--bs-body-bg);
+    border: 1px solid var(--bs-border-color);
     border-radius: 6px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
     padding: 10px;

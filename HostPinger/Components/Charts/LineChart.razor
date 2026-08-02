@@ -17,13 +17,13 @@
                 {
                     var y = YToPixel(tick);
                     <line x1="@F(PlotLeft)" y1="@F(y)" x2="@F(PlotLeft + _plotWidth)" y2="@F(y)" class="grid" />
-                    @SvgText(PlotLeft - 8, y, "end", true, MutedInk, 11, YLabel(tick))
+                    @SvgText(PlotLeft - 8, y, "end", true, "tick-label", 11, YLabel(tick))
                 }
                 @foreach (var tick in _xTicks)
                 {
                     var x = XToPixel(tick);
                     <line x1="@F(x)" y1="@F(PlotTop + _plotHeight)" x2="@F(x)" y2="@F(PlotTop + _plotHeight + 4)" class="axis" />
-                    @SvgText(x, PlotTop + _plotHeight + 17, "middle", false, MutedInk, 11, TimeLabel(tick))
+                    @SvgText(x, PlotTop + _plotHeight + 17, "middle", false, "tick-label", 11, TimeLabel(tick))
                 }
                 <line x1="@F(PlotLeft)" y1="@F(PlotTop + _plotHeight)" x2="@F(PlotLeft + _plotWidth)" y2="@F(PlotTop + _plotHeight)" class="axis" />
 
@@ -31,24 +31,29 @@
                 {
                     @foreach (var segment in item.Geometry.Segments)
                     {
+                        @*
+                            A series colour is a var() naming a palette slot, so it goes in a style
+                            attribute rather than an SVG presentation attribute — var() is only
+                            reliably resolved in the former.
+                        *@
                         @if (segment.Count == 1)
                         {
-                            <circle cx="@F(segment[0].X + PlotLeft)" cy="@F(segment[0].Y + PlotTop)" r="2.5" fill="@item.Series.Color" />
+                            <circle cx="@F(segment[0].X + PlotLeft)" cy="@F(segment[0].Y + PlotTop)" r="2.5" style="fill:@item.Series.Color" />
                         }
                         else
                         {
-                            <polyline points="@PointsAttribute(segment)" fill="none" stroke="@item.Series.Color"
+                            <polyline points="@PointsAttribute(segment)" fill="none" style="stroke:@item.Series.Color"
                                       stroke-width="2" stroke-linejoin="round" stroke-linecap="round" />
                         }
                     }
                     @foreach (var marker in item.Geometry.DownMarkers)
                     {
-                        <path d="@DownMarkerPath(marker, item.Lane)" stroke="@item.Series.Color" stroke-width="1.5" fill="none" />
+                        <path d="@DownMarkerPath(marker, item.Lane)" style="stroke:@item.Series.Color" stroke-width="1.5" fill="none" />
                     }
                     @if (_directLabels.TryGetValue(item.Series.Label, out var label))
                     {
-                        <circle cx="@F(label.CircleX)" cy="@F(label.Y)" r="4" fill="@item.Series.Color" />
-                        @SvgText(label.TextX, label.Y, "start", true, SecondaryInk, 12, item.Series.Label)
+                        <circle cx="@F(label.CircleX)" cy="@F(label.Y)" r="4" style="fill:@item.Series.Color" />
+                        @SvgText(label.TextX, label.Y, "start", true, "series-label", 12, item.Series.Label)
                     }
                 }
                 @if (_hoverX is double crosshairX)
@@ -103,8 +108,6 @@
     private const double PlotTop = 16;
     private const double BottomPad = 34;
     private const double HoverRadiusPx = 24;
-    private const string MutedInk = "#898781";
-    private const string SecondaryInk = "#52514e";
 
     [Parameter, EditorRequired] public IReadOnlyList<ChartSeriesData> Series { get; set; } = [];
     [Parameter] public DateTime RangeStartUtc { get; set; }
@@ -380,13 +383,15 @@
         _selfRef?.Dispose();
     }
 
-    // Razor reserves the <text> tag, so SVG text elements are emitted as raw markup with inline
-    // presentation attributes (scoped CSS would not reach injected markup either).
-    private static MarkupString SvgText(double x, double y, string anchor, bool middleBaseline, string fill, int fontSize, string content)
+    // Razor reserves the <text> tag, so SVG text elements are emitted as raw markup. The fill
+    // comes from a class rather than an attribute so that it can follow the theme: the markup
+    // carries no scope attribute of its own, but the stylesheet reaches it through the wrapper
+    // with ::deep.
+    private static MarkupString SvgText(double x, double y, string anchor, bool middleBaseline, string cssClass, int fontSize, string content)
     {
         var baseline = middleBaseline ? " dominant-baseline=\"middle\"" : string.Empty;
         return new MarkupString(
-            $"<text x=\"{F(x)}\" y=\"{F(y)}\" text-anchor=\"{anchor}\"{baseline} fill=\"{fill}\" " +
+            $"<text x=\"{F(x)}\" y=\"{F(y)}\" text-anchor=\"{anchor}\"{baseline} class=\"{cssClass}\" " +
             $"font-size=\"{fontSize}\" style=\"font-variant-numeric: tabular-nums\">" +
             $"{System.Net.WebUtility.HtmlEncode(content)}</text>");
     }

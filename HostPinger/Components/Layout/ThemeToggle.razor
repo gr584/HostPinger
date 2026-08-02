@@ -1,0 +1,22 @@
+@*
+    The colour theme picker. Deliberately not interactive: wwwroot/theme.js owns the whole
+    behaviour, which keeps the change instant and needs no circuit for a layout that would
+    otherwise be static.
+
+    Auto is checked here because the server cannot know what this browser chose; theme.js puts
+    the stored choice back before the page is painted. autocomplete="off" stops Firefox
+    restoring a stale segment over the top of that on a reload.
+*@
+<div class="btn-group btn-group-sm theme-toggle" role="group" aria-label="Colour theme">
+    <input type="radio" class="btn-check" name="theme-choice" id="theme-auto" value="auto"
+           autocomplete="off" checked />
+    <label class="btn btn-outline-secondary" for="theme-auto">Auto</label>
+
+    <input type="radio" class="btn-check" name="theme-choice" id="theme-light" value="light"
+           autocomplete="off" />
+    <label class="btn btn-outline-secondary" for="theme-light">Light</label>
+
+    <input type="radio" class="btn-check" name="theme-choice" id="theme-dark" value="dark"
+           autocomplete="off" />
+    <label class="btn btn-outline-secondary" for="theme-dark">Dark</label>
+</div>

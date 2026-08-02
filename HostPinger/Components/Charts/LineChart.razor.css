@@ -1,11 +1,41 @@
+/*
+ * The chart's own inks and surfaces, named once here and re-pointed for the dark theme below.
+ * Bootstrap's variables are not enough on their own: the card is deliberately a shade off the
+ * page behind it, and the grid, axis and crosshair are three distinct weights of the same
+ * greying rather than anything Bootstrap has a name for.
+ */
 .chart-card {
-    background: #fcfcfb;
-    border: 1px solid rgba(11, 11, 11, 0.10);
+    --chart-surface: #fcfcfb;
+    --chart-border: rgba(11, 11, 11, 0.10);
+    --chart-grid: #e1e0d9;
+    --chart-axis: #c3c2b7;
+    --chart-ink-muted: #898781;
+    --chart-ink: #52514e;
+    --chart-ink-strong: #0b0b0b;
+    --chart-tooltip-surface: #ffffff;
+    --chart-hover: rgba(11, 11, 11, 0.05);
+
+    background: var(--chart-surface);
+    border: 1px solid var(--chart-border);
     border-radius: 8px;
     padding: 12px;
     max-width: 100%;
     display: flex;
     flex-direction: column;
+}
+
+/* Lifted off the #212529 body by the same amount the light card is set into #fff, so the card
+   keeps reading as a surface rather than a hole. */
+[data-bs-theme="dark"] .chart-card {
+    --chart-surface: #2b3035;
+    --chart-border: rgba(255, 255, 255, 0.12);
+    --chart-grid: #3a4046;
+    --chart-axis: #4f565d;
+    --chart-ink-muted: #9aa1a8;
+    --chart-ink: #c3c8cd;
+    --chart-ink-strong: #f8f9fa;
+    --chart-tooltip-surface: #343a40;
+    --chart-hover: rgba(255, 255, 255, 0.08);
 }
 
 .chart-wrap {
@@ -16,23 +46,36 @@
 }
 
 .chart-empty {
-    color: #898781;
+    color: var(--chart-ink-muted);
     padding: 48px 24px;
     text-align: center;
 }
 
+/*
+ * The axis labels are injected as markup and so carry no scope attribute of their own; ::deep
+ * reaches them through the wrapper, which does. Colouring them here rather than with a fill
+ * attribute on each is what lets them follow the theme.
+ */
+.chart-wrap ::deep text.tick-label {
+    fill: var(--chart-ink-muted);
+}
+
+.chart-wrap ::deep text.series-label {
+    fill: var(--chart-ink);
+}
+
 .grid {
-    stroke: #e1e0d9;
+    stroke: var(--chart-grid);
     stroke-width: 1;
 }
 
 .axis {
-    stroke: #c3c2b7;
+    stroke: var(--chart-axis);
     stroke-width: 1;
 }
 
 .crosshair {
-    stroke: #898781;
+    stroke: var(--chart-ink-muted);
     stroke-width: 1;
     stroke-dasharray: 3 3;
 }
@@ -52,7 +95,7 @@
     background: none;
     padding: 2px 6px;
     font-size: 13px;
-    color: #52514e;
+    color: var(--chart-ink);
     border-radius: 4px;
 }
 
@@ -61,7 +104,7 @@ button.legend-item {
 }
 
 button.legend-item:hover {
-    background: rgba(11, 11, 11, 0.05);
+    background: var(--chart-hover);
 }
 
 .legend-item.is-hidden {
@@ -77,26 +120,26 @@ button.legend-item:hover {
 }
 
 .val {
-    color: #898781;
+    color: var(--chart-ink-muted);
     font-variant-numeric: tabular-nums;
 }
 
 .chart-tooltip {
     position: absolute;
     pointer-events: none;
-    background: #ffffff;
-    border: 1px solid rgba(11, 11, 11, 0.10);
+    background: var(--chart-tooltip-surface);
+    border: 1px solid var(--chart-border);
     border-radius: 6px;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
     padding: 6px 10px;
     font-size: 12px;
-    color: #52514e;
+    color: var(--chart-ink);
     min-width: 150px;
     z-index: 10;
 }
 
 .tooltip-time {
-    color: #0b0b0b;
+    color: var(--chart-ink-strong);
     font-weight: 600;
     margin-bottom: 4px;
     font-variant-numeric: tabular-nums;
@@ -115,5 +158,5 @@ button.legend-item:hover {
 }
 
 .tooltip-row .val {
-    color: #0b0b0b;
+    color: var(--chart-ink-strong);
 }

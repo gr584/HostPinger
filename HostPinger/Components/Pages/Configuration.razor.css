@@ -28,7 +28,7 @@
 }
 
 .config-saved {
-    color: #157347;
+    color: var(--bs-success-text-emphasis);
     margin-left: 0.35rem;
 }
 

@@ -20,12 +20,17 @@ MSI and an RPM respectively.
 
 ## The web UI
 
+Every page carries a theme picker in the top right: **Auto** takes the light or dark setting from
+the browser and follows it as it changes, **Light** and **Dark** pin it. The choice is remembered
+by the browser that made it rather than by the service, so each machine viewing the same
+HostPinger can be set differently.
+
 ### Hosts — `/`
 
 The list of everything being monitored, one row per host, refreshed every five seconds. Clicking a
 row opens that host's ping graph.
 
-- **Status** — <span class="badge text-bg-success">**Up**</span> when the last ping was answered, <span class="badge text-bg-danger">**Down**</span> when it was not, <span class="badge text-bg-light text-muted">**Waiting…**</span> until the first round covers a newly added host, and <span class="badge text-bg-secondary">**Paused**</span> for a host that is not being pinged at all.
+- **Status** — <span class="badge text-bg-success">**Up**</span> when the last ping was answered, <span class="badge text-bg-danger">**Down**</span> when it was not, <span class="badge bg-body-secondary text-body-secondary">**Waiting…**</span> until the first round covers a newly added host, and <span class="badge text-bg-secondary">**Paused**</span> for a host that is not being pinged at all.
 - **Last ping** — the round trip in milliseconds, or *no reply*, with how long ago the attempt was
   made.
 - **Last downtime** — when the host was last seen up before it stopped answering, and how long it
