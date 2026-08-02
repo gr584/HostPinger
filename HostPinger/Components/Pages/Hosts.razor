@@ -9,13 +9,18 @@
 
 <h1>Hosts</h1>
 
-@if (_rows.Count == 0)
+<div class="d-flex align-items-center justify-content-between gap-3 mb-3">
+    <span class="text-muted">
+        @(_rows.Count == 0
+            ? "No hosts yet — add one to start monitoring."
+            : "Click a host to open its ping graph.")
+    </span>
+    @* flex-shrink-0 so a narrow window wraps the hint rather than squashing the button. *@
+    <button class="btn btn-primary btn-sm flex-shrink-0" @onclick="BeginAdd">Add host</button>
+</div>
+
+@if (_rows.Count > 0)
 {
-    <p class="text-muted">No hosts yet — add one below to start monitoring.</p>
-}
-else
-{
-    <p class="text-muted">Click a host to open its ping graph.</p>
     <div class="table-responsive">
         <table class="table table-hover align-middle host-table">
             <colgroup>
@@ -95,18 +100,7 @@ else
                             </div>
                         </td>
                         <td class="actions">
-                            <div class="d-flex gap-2">
-                                @if (_pendingDeleteId == row.Host.Id)
-                                {
-                                    <button class="btn btn-sm btn-danger" @onclick="() => DeleteAsync(row.Host.Id)" @onclick:stopPropagation>Confirm delete</button>
-                                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => _pendingDeleteId = null" @onclick:stopPropagation>Cancel</button>
-                                }
-                                else
-                                {
-                                    <button class="btn btn-sm btn-outline-primary" @onclick="() => BeginEdit(row.Host)" @onclick:stopPropagation>Edit</button>
-                                    <button class="btn btn-sm btn-outline-danger" @onclick="() => _pendingDeleteId = row.Host.Id" @onclick:stopPropagation>Delete</button>
-                                }
-                            </div>
+                            <button class="btn btn-sm btn-outline-primary" @onclick="() => BeginEdit(row.Host)" @onclick:stopPropagation>Edit</button>
                         </td>
                     </tr>
                 }
@@ -115,50 +109,94 @@ else
     </div>
 }
 
-<div class="card" style="max-width: 44rem;">
-    <div class="card-body">
-        <h5 class="card-title">@(_form.Id is null ? "Add host" : "Edit host")</h5>
-        @if (_error is not null)
-        {
-            <div class="alert alert-danger py-2">@_error</div>
-        }
-        <EditForm Model="_form" OnValidSubmit="SaveAsync">
-            <DataAnnotationsValidator />
-            <div class="row g-2">
-                <div class="col-sm-4">
-                    <label class="form-label" for="host-name">Name</label>
-                    <InputText id="host-name" class="form-control" @bind-Value="_form.Name" />
-                    <ValidationMessage For="() => _form.Name" />
-                </div>
-                <div class="col-sm-5">
-                    <label class="form-label" for="host-address">Address</label>
-                    <InputText id="host-address" class="form-control" @bind-Value="_form.Address"
-                               placeholder="e.g. 192.168.1.1 or example.com" />
-                    <ValidationMessage For="() => _form.Address" />
-                </div>
-                <div class="col-sm-3">
-                    <label class="form-label d-block">&nbsp;</label>
-                    <div class="form-check">
-                        <InputCheckbox id="host-enabled" class="form-check-input" @bind-Value="_form.IsEnabled" />
-                        <label class="form-check-label" for="host-enabled">Enabled</label>
+@if (_isFormOpen)
+{
+    @* Bootstrap's modal markup, driven from here: the app does not load Bootstrap's JavaScript. *@
+    <div class="modal d-block" tabindex="-1" aria-modal="true" role="dialog"
+         @onkeydown="OnFormKeyDown" @onclick="OnOverlayClick" @onmousedown="() => _pressedInsideForm = false">
+        <div class="modal-dialog modal-dialog-centered host-form-dialog">
+            @*
+                Cancel on a click outside the dialog. The content box stops both events rather than
+                the dialog box, because modal-dialog-centered stretches that one to the full height
+                of the overlay — a click above or below the form has to reach the overlay to count
+                as a click away.
+            *@
+            <div class="modal-content" @onclick:stopPropagation
+                 @onmousedown="() => _pressedInsideForm = true" @onmousedown:stopPropagation>
+                <EditForm Model="_form" OnValidSubmit="SaveAsync">
+                    <DataAnnotationsValidator />
+                    <div class="modal-header">
+                        <h5 class="modal-title">@(_form.Id is null ? "Add host" : "Edit host")</h5>
+                        <button type="button" class="btn-close" aria-label="Close" @onclick="CloseForm"></button>
                     </div>
-                </div>
+                    <div class="modal-body">
+                        @if (_error is not null)
+                        {
+                            <div class="alert alert-danger py-2">@_error</div>
+                        }
+                        <div class="row g-2">
+                            <div class="col-sm-4">
+                                <label class="form-label" for="host-name">Name</label>
+                                <InputText id="host-name" class="form-control" @bind-Value="_form.Name" @ref="_nameInput" />
+                                <ValidationMessage For="() => _form.Name" />
+                            </div>
+                            <div class="col-sm-5">
+                                <label class="form-label" for="host-address">Address</label>
+                                <InputText id="host-address" class="form-control" @bind-Value="_form.Address"
+                                           placeholder="e.g. 192.168.1.1 or example.com" />
+                                <ValidationMessage For="() => _form.Address" />
+                            </div>
+                            <div class="col-sm-3">
+                                <label class="form-label d-block">&nbsp;</label>
+                                <div class="form-check">
+                                    <InputCheckbox id="host-enabled" class="form-check-input" @bind-Value="_form.IsEnabled" />
+                                    <label class="form-check-label" for="host-enabled">Enabled</label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    @*
+                        Confirming a delete takes over the whole footer rather than sitting next to
+                        the usual buttons, so there is only ever one Cancel to read.
+                    *@
+                    <div class="modal-footer justify-content-between">
+                        @if (_isDeletePending && _form.Id is int deleteId)
+                        {
+                            <span class="text-danger">Delete this host and its ping history?</span>
+                            <div class="d-flex gap-2">
+                                <button type="button" class="btn btn-outline-secondary btn-sm" @onclick="() => _isDeletePending = false">Cancel</button>
+                                <button type="button" class="btn btn-danger btn-sm" @onclick="() => DeleteAsync(deleteId)">Confirm delete</button>
+                            </div>
+                        }
+                        else
+                        {
+                            <div>
+                                @if (_form.Id is not null)
+                                {
+                                    <button type="button" class="btn btn-outline-danger btn-sm" @onclick="() => _isDeletePending = true">Delete</button>
+                                }
+                            </div>
+                            <div class="d-flex gap-2">
+                                <button type="button" class="btn btn-outline-secondary btn-sm" @onclick="CloseForm">Cancel</button>
+                                <button type="submit" class="btn btn-primary btn-sm">@(_form.Id is null ? "Add host" : "Save changes")</button>
+                            </div>
+                        }
+                    </div>
+                </EditForm>
             </div>
-            <div class="mt-3">
-                <button type="submit" class="btn btn-primary btn-sm">@(_form.Id is null ? "Add host" : "Save changes")</button>
-                @if (_form.Id is not null)
-                {
-                    <button type="button" class="btn btn-outline-secondary btn-sm ms-1" @onclick="ResetForm">Cancel</button>
-                }
-            </div>
-        </EditForm>
+        </div>
     </div>
-</div>
+    <div class="modal-backdrop show"></div>
+}
 
 @code {
     private List<HostSummary> _rows = [];
     private HostForm _form = new();
-    private int? _pendingDeleteId;
+    private bool _isFormOpen;
+    private InputText? _nameInput;
+    private bool _focusNameInput;
+    private bool _pressedInsideForm;
+    private bool _isDeletePending;
     private string? _error;
     private readonly CancellationTokenSource _cts = new();
 
@@ -166,6 +204,17 @@ else
     {
         await LoadAsync();
         _ = AutoRefreshAsync();
+    }
+
+    // Focusing the first field also puts the keyboard inside the dialog, which is what lets the
+    // Escape key reach OnFormKeyDown.
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_focusNameInput && _nameInput?.Element is { } element)
+        {
+            _focusNameInput = false;
+            await element.FocusAsync();
+        }
     }
 
     private async Task AutoRefreshAsync()
@@ -229,8 +278,7 @@ else
             return;
         }
 
-        _error = null;
-        ResetForm();
+        CloseForm();
         await LoadAsync();
     }
 
@@ -251,32 +299,57 @@ else
     {
         await using var db = await DbFactory.CreateDbContextAsync();
         await db.Hosts.Where(h => h.Id == id).ExecuteDeleteAsync();
-        _pendingDeleteId = null;
-        if (_form.Id == id)
-        {
-            ResetForm();
-        }
-
+        CloseForm();
         await LoadAsync();
     }
 
-    private void BeginEdit(MonitoredHost host)
+    private void BeginAdd() => OpenForm(new HostForm());
+
+    private void BeginEdit(MonitoredHost host) => OpenForm(new HostForm
     {
-        _form = new HostForm
-        {
-            Id = host.Id,
-            Name = host.Name,
-            Address = host.Address,
-            IsEnabled = host.IsEnabled,
-        };
+        Id = host.Id,
+        Name = host.Name,
+        Address = host.Address,
+        IsEnabled = host.IsEnabled,
+    });
+
+    private void OpenForm(HostForm form)
+    {
+        _form = form;
         _error = null;
-        _pendingDeleteId = null;
+        _pressedInsideForm = false;
+        _isDeletePending = false;
+        _isFormOpen = true;
+        _focusNameInput = true;
     }
 
-    private void ResetForm()
+    private void CloseForm()
     {
         _form = new HostForm();
         _error = null;
+        _isDeletePending = false;
+        _isFormOpen = false;
+    }
+
+    private void OnFormKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape")
+        {
+            CloseForm();
+        }
+    }
+
+    /// <summary>
+    /// Cancels on a click away. Dragging a text selection out of a field also raises a click on
+    /// the overlay, so a press that started inside the dialog is not one — it would throw away
+    /// what the user was in the middle of selecting.
+    /// </summary>
+    private void OnOverlayClick()
+    {
+        if (!_pressedInsideForm)
+        {
+            CloseForm();
+        }
     }
 
     private void OpenGraph(int hostId) => Navigation.NavigateTo($"graph/{hostId}");

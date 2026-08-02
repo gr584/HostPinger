@@ -5,13 +5,13 @@
 /* Fixed layout so the refreshing cell values can never resize a column. */
 .host-table {
     table-layout: fixed;
-    min-width: 68rem;
+    min-width: 59rem;
 }
 
 /*
- * The badge, the switch and the buttons are the same size at every window size, so those three
- * columns are absolute and the text columns share what is left. A percentage for any of them
- * would only leave slack next to the control on a wide window. 6rem holds the widest badge,
+ * The badge, the switch and the Edit button are the same size at every window size, so those
+ * three columns are absolute and the text columns share what is left. A percentage for any of
+ * them would only leave slack next to the control on a wide window. 6rem holds the widest badge,
  * "Waiting…", with room to spare.
  */
 .host-table col.status {
@@ -22,16 +22,17 @@
     width: 3rem;
 }
 
+/* The Edit button, plus the 0.5rem of cell padding that follows it and a little slack. */
 .host-table col.actions {
-    width: 13rem;
+    width: 3.25rem;
 }
 
 /*
  * The text columns split whatever the three fixed columns above leave, in the ratio below.
- * These percentages deliberately sum to 100% on top of those 22rem: over-constraining the
+ * These percentages deliberately sum to 100% on top of those 12.25rem: over-constraining the
  * table makes the browser shrink the percentage columns proportionally — preserving the ratio
  * — while leaving the absolute ones untouched, which is the split we want at every width.
- * (calc((100% - 22rem) * ratio) expresses this directly but is ignored on a col in a fixed
+ * (calc((100% - 12.25rem) * ratio) expresses this directly but is ignored on a col in a fixed
  * layout: the column silently falls back to auto and every text column comes out equal.)
  */
 .host-table col.name {
@@ -58,11 +59,14 @@
 }
 
 /*
- * Drop the leading cell padding so the first button sits one 0.5rem gap from the switch — the
- * same gap the flex row puts between the buttons themselves.
+ * Right-align the button so it ends 0.5rem from the table's right edge — the same 0.5rem of cell
+ * padding that precedes the name at the other end of the row — whatever width the label renders
+ * at. Dropping the leading padding puts the column's slack on the button's left, where a wider
+ * label eats into it rather than being clipped.
  */
 .host-table td.actions {
     padding-left: 0;
+    text-align: right;
 }
 
 /*
@@ -81,4 +85,12 @@
 
 .ping-value {
     font-variant-numeric: tabular-nums;
+}
+
+/*
+ * The dialog holds the same three-across form the page used to show in a card, so it keeps that
+ * card's width rather than Bootstrap's narrower 500px default.
+ */
+.host-form-dialog {
+    max-width: 44rem;
 }
