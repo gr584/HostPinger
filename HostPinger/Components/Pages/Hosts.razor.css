@@ -94,3 +94,27 @@
 .host-form-dialog {
     max-width: 44rem;
 }
+
+/*
+ * The switch carries a label above it rather than beside it, so the flex box drops the room
+ * form-check leaves for an inline one and centres the switch under the label instead. The
+ * min-height is a form-control's, which centres the switch against the text boxes it shares the
+ * row with — the labels above them then sit on one line.
+ */
+.host-enabled-switch {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: calc(1.5rem + 0.75rem + var(--bs-border-width) * 2);
+    padding-left: 0;
+}
+
+/*
+ * Both of form-check-input's margins are for the layout above: the negative left one hangs the
+ * switch into the padding that has just been removed, and the top one offsets it from a label
+ * that is no longer beside it.
+ */
+.host-enabled-switch ::deep .form-check-input {
+    margin-top: 0;
+    margin-left: 0;
+}

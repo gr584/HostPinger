@@ -140,17 +140,18 @@
                                 <InputText id="host-name" class="form-control" @bind-Value="_form.Name" @ref="_nameInput" />
                                 <ValidationMessage For="() => _form.Name" />
                             </div>
-                            <div class="col-sm-5">
+                            @* Address takes whatever the other two leave rather than a share of its own. *@
+                            <div class="col-sm">
                                 <label class="form-label" for="host-address">Address</label>
                                 <InputText id="host-address" class="form-control" @bind-Value="_form.Address"
                                            placeholder="e.g. 192.168.1.1 or example.com" />
                                 <ValidationMessage For="() => _form.Address" />
                             </div>
-                            <div class="col-sm-3">
-                                <label class="form-label d-block">&nbsp;</label>
-                                <div class="form-check">
-                                    <InputCheckbox id="host-enabled" class="form-check-input" @bind-Value="_form.IsEnabled" />
-                                    <label class="form-check-label" for="host-enabled">Enabled</label>
+                            @* The same switch the table shows, under its own label like the fields beside it. *@
+                            <div class="col-sm-auto">
+                                <label class="form-label" for="host-enabled">Enabled</label>
+                                <div class="form-check form-switch host-enabled-switch">
+                                    <InputCheckbox id="host-enabled" class="form-check-input" role="switch" @bind-Value="_form.IsEnabled" />
                                 </div>
                             </div>
                         </div>
