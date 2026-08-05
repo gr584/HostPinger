@@ -282,8 +282,71 @@ problem would otherwise look like every monitored host going down at once. The s
 pings loopback at startup and reports the result, at error level if it cannot.
 
 Some distributions, Fedora among them, already permit unprivileged ICMP through
-`net.ipv4.ping_group_range`, in which case the capability is redundant but harmless. Others,
-including RHEL and Debian, do not, and there it is what makes the service work at all.
+`net.ipv4.ping_group_range`. That does not make the capability redundant, because the sysctl governs
+the *datagram* ICMP socket and .NET's `Ping` asks for a *raw* one, which is `CAP_NET_RAW` or
+nothing. Where the raw socket is refused, .NET falls back to running `/usr/bin/ping` as a subprocess
+and reading back what it prints — so on Fedora the pings usually still work, at the cost of a
+process per host per round. On RHEL and Debian, which do not open the sysctl, the capability is what
+makes the service work at all.
+
+### SELinux denials on /usr/bin/ping
+
+That fallback is the one part of the service SELinux has an opinion about, and on a confined system
+it shows up in `journalctl` as:
+
+```
+SELinux is preventing HostPinger from execute_no_trans access on the file /usr/bin/ping.
+```
+
+`execute_no_trans` is permission to run a binary while staying in the domain you are already in.
+Fedora's policy expects `/usr/bin/ping` to be entered by transitioning into the `ping_t` domain, and
+no transition is available here: the unit sets `NoNewPrivileges=yes`, which suppresses SELinux
+domain transitions, and several of its other hardening settings — `RestrictAddressFamilies=`,
+`SystemCallArchitectures=`, `PrivateDevices=`, `ProtectKernelTunables=` — imply it in any case. So
+the exec is refused outright rather than redirected.
+
+The denial is not cosmetic. A refused exec is reported by .NET as a failure to start a process
+rather than as a failed ping, which is not the shape of failure the ping path expects, so the effect
+is a service that will not stay up rather than one recording hosts as down — check `systemctl status
+hostpinger` alongside the denial.
+
+The message also means the raw socket was refused first, since a service that gets one never reaches
+for the binary. Both denials, and the domain the service is actually running in, are worth reading
+before changing anything:
+
+```bash
+sudo ausearch -m avc -c HostPinger          # the socket denial as well as the exec one
+ps -eo label,comm | grep HostPinger         # the domain
+systemctl show hostpinger -p AmbientCapabilities
+```
+
+A domain of `init_t` is the usual answer. `/usr/lib/hostpinger/HostPinger` is labelled `lib_t`, as
+everything under `/usr/lib` is, and systemd transitions into a service domain only for a binary
+labelled the way an ordinary service binary is — so the unit stays in systemd's own domain, which is
+granted neither the raw socket nor the exec. Labelling the launcher restores the transition:
+
+```bash
+sudo dnf install -y policycoreutils-python-utils
+sudo semanage fcontext -a -t bin_t /usr/lib/hostpinger/HostPinger
+sudo restorecon -v /usr/lib/hostpinger/HostPinger
+sudo systemctl restart hostpinger
+```
+
+The rule is local to the machine and outlives the file, so upgrading or reinstalling the package
+does not undo it. `journalctl -u hostpinger | grep ICMP` then says whether the startup probe is
+satisfied, which is the point of the exercise: with the raw socket available there is no subprocess
+to deny.
+
+Failing that, allow the access as it stands — which is what the denial message itself suggests:
+
+```bash
+sudo dnf install -y policycoreutils-devel
+sudo ausearch -c HostPinger --raw | audit2allow -M hostpinger-local
+sudo semodule -X 300 -i hostpinger-local.pp
+```
+
+Read the generated `hostpinger-local.te` before installing it. audit2allow writes a rule for every
+denial it is handed, so an audit log holding unrelated ones produces a broader module than intended.
 
 ## Development
 
