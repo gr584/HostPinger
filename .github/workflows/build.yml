@@ -190,7 +190,13 @@ jobs:
           # v1.2.0 shipped an MSI reading 1.2.1.0, which nothing about the file gave away.
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
             $expected = $env:GITHUB_REF_NAME -replace '^v', ''
-            $actual = (Get-Rows "SELECT Property, Value FROM Property WHERE Property='ProductVersion'")[0][1]
+            # Filtered here rather than in the query. A single-row result comes back from Get-Rows
+            # unwrapped -- PowerShell flattens the outer array -- so [0] is the first field rather
+            # than the first row, and indexing it again walks into the string a character at a
+            # time. Selecting the whole table keeps it a list of rows, which is why the checks
+            # below have never had to think about it.
+            $actual = Get-Rows 'SELECT Property, Value FROM Property' |
+              Where-Object { $_[0] -eq 'ProductVersion' } | ForEach-Object { $_[1] }
             Write-Output "product version: $actual"
             # Authored as three parts and padded to four by the installer, so compare the prefix.
             if ($actual -ne $expected -and $actual -ne "$expected.0") {
