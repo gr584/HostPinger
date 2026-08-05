@@ -12,13 +12,13 @@ jobs:
     name: test (ubuntu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # GitVersion derives the version from the commit history and fails outright on the
           # shallow clone actions/checkout makes by default. Every job here needs this.
           fetch-depth: 0
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
 
@@ -55,7 +55,7 @@ jobs:
       - name: Install build dependencies
         run: dnf install -y git tar findutils dotnet-sdk-10.0 rpm-build systemd-rpm-macros
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -100,7 +100,7 @@ jobs:
 
           rpm -qpi "$rpm_file"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rpm
           path: HostPinger.LinuxInstaller/build/rpmbuild/RPMS/x86_64/*.rpm
@@ -115,11 +115,11 @@ jobs:
     env:
       GITHUB_REF: ${{ github.ref_type == 'tag' && 'refs/heads/main' || github.ref }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '10.0.x'
 
@@ -224,7 +224,7 @@ jobs:
             exit 1
           }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: msi
           path: HostPinger.WindowsInstaller/bin/**/*.msi
@@ -245,7 +245,7 @@ jobs:
       contents: write
     steps:
       # No name filter: this collects every artifact the run produced into one directory per job.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
