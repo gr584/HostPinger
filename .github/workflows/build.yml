@@ -309,8 +309,10 @@ jobs:
       - uses: actions/configure-pages@v5
         id: pages
         with:
-          # Turns Pages on and points it at Actions if the repository has never had it, rather
-          # than failing the first run on a setting that has to be found in the UI.
+          # Kept for the case where Pages is turned off again later, not because it can bootstrap
+          # this repository: GITHUB_TOKEN is refused when it tries to create the site, so Pages has
+          # to be switched to the Actions source in Settings once, by hand, before any of this
+          # runs. The job fails on this step until that is done.
           enablement: true
 
       - name: Install createrepo_c
