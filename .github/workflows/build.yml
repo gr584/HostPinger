@@ -279,3 +279,125 @@ jobs:
             --generate-notes \
             $prerelease \
             "${files[@]}"
+
+  repo:
+    name: repo (pages)
+    # A release attached to a tag is a file to be found and downloaded; dnf needs an index it can
+    # poll. This publishes one to Pages so an installed machine can upgrade with dnf rather than
+    # by being handed a URL each time.
+    needs: [release]
+    # The content comes from the releases that exist rather than from the run that produced one,
+    # so this is worth running whenever it can: after a release, on a push to main, or by hand to
+    # repair the metadata. always() is required because release is skipped in most of those, and a
+    # skipped dependency would otherwise skip this too.
+    #
+    # Pull requests are the exception. A fork's token cannot deploy, and a branch republishing the
+    # site would be doing it from packages it had no part in building.
+    if: >-
+      always() &&
+      needs.release.result != 'failure' &&
+      github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+        id: pages
+        with:
+          # Turns Pages on and points it at Actions if the repository has never had it, rather
+          # than failing the first run on a setting that has to be found in the UI.
+          enablement: true
+
+      - name: Install createrepo_c
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y createrepo-c
+
+      - name: Collect every published RPM
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p site/fedora/x86_64
+
+          # Every release, not only the one this run produced. A Pages deployment replaces the
+          # whole site, so anything not gathered here disappears from the index — and a package
+          # that vanishes takes the downgrade path and any pinned install with it.
+          #
+          # Releases carrying no RPM are expected rather than exceptional: the tags predating the
+          # packaging workflow have none, so a missing pattern is not a failure.
+          for tag in $(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName -q '.[].tagName'); do
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir site/fedora/x86_64 \
+              --pattern '*.rpm' --skip-existing || echo "no rpm attached to $tag"
+          done
+
+          if ! ls site/fedora/x86_64/*.rpm >/dev/null 2>&1; then
+            echo "::error::no RPMs found across any release; refusing to publish an empty repository"
+            exit 1
+          fi
+          ls -l site/fedora/x86_64
+
+      - name: Build the repository metadata
+        run: createrepo_c site/fedora/x86_64
+
+      - name: Write the repo file and a landing page
+        env:
+          BASE: ${{ steps.pages.outputs.base_url }}
+        run: |
+          set -euo pipefail
+
+          # gpgcheck is off because build-rpm.sh does not sign. Turning it on here without a key
+          # to verify against would only make dnf refuse every package. What is left protecting
+          # the transfer is Pages being HTTPS.
+          cat > site/hostpinger.repo <<EOF
+          [hostpinger]
+          name=HostPinger
+          baseurl=$BASE/fedora/x86_64/
+          enabled=1
+          gpgcheck=0
+          repo_gpgcheck=0
+          metadata_expire=1h
+          EOF
+
+          cat > site/index.html <<EOF
+          <!doctype html>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>HostPinger package repository</title>
+          <style>
+            body { font-family: system-ui, sans-serif; max-width: 46rem; margin: 3rem auto;
+                   padding: 0 1rem; line-height: 1.5; }
+            pre { background: #f4f4f4; padding: .75rem 1rem; overflow-x: auto; border-radius: 4px; }
+            @media (prefers-color-scheme: dark) {
+              body { background: #121212; color: #e0e0e0; }
+              pre { background: #1e1e1e; }
+              a { color: #7db3ff; }
+            }
+          </style>
+          <h1>HostPinger package repository</h1>
+          <p>A dnf repository for <a href="https://github.com/$GITHUB_REPOSITORY">HostPinger</a>,
+             x86_64, framework-dependent against the distribution's aspnetcore-runtime-10.0.</p>
+          <h2>Add it</h2>
+          <pre>sudo dnf config-manager addrepo --from-repofile=$BASE/hostpinger.repo
+          sudo dnf install hostpinger
+          sudo systemctl enable --now hostpinger</pre>
+          <p>On dnf4 the first line is
+             <code>sudo dnf config-manager --add-repo $BASE/hostpinger.repo</code>.</p>
+          <h2>Upgrade</h2>
+          <pre>sudo dnf upgrade hostpinger</pre>
+          <p>The packages are unsigned, so the repository sets <code>gpgcheck=0</code>.</p>
+          EOF
+
+          cat site/hostpinger.repo
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - uses: actions/deploy-pages@v4
+        id: deploy

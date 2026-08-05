@@ -122,6 +122,31 @@ to edit on disk.
 
 ## Installing on Fedora
 
+### From the package repository
+
+Every release is indexed as a dnf repository, which is what makes `dnf upgrade` work afterwards —
+a release attached to a tag is a file to fetch, not something dnf can poll.
+
+```bash
+sudo dnf config-manager addrepo --from-repofile=https://gr584.github.io/HostPinger/hostpinger.repo
+sudo dnf install hostpinger
+sudo systemctl enable --now hostpinger
+```
+
+On dnf4 the first line is `sudo dnf config-manager --add-repo <same url>`. From then on the package
+moves with the rest of the system:
+
+```bash
+sudo dnf upgrade hostpinger
+```
+
+The packages are not signed, so the repository sets `gpgcheck=0` and what protects the download is
+Pages being HTTPS. x86_64 only — the spec sets `ExclusiveArch`, since the tarball holds a linux-x64
+publish.
+
+Then carry on from [Install and run](#install-and-run) for the parts the package deliberately
+leaves to you, the firewall among them.
+
 ### Build the package
 
 Needs the .NET SDK and the RPM build tooling. On the build machine:
