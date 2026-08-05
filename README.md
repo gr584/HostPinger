@@ -1,5 +1,7 @@
 # HostPinger
 
+[![build](https://github.com/gr584/HostPinger/actions/workflows/build.yml/badge.svg)](https://github.com/gr584/HostPinger/actions/workflows/build.yml)
+
 <!--
   The section between the two markers below is also the application's own About page: the file is
   embedded in the assembly and that section is rendered there, so this is the only copy of it.

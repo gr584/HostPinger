@@ -1,0 +1,41 @@
+version: 2
+
+updates:
+  # The action versions pinned in build.yml. Nothing else in the repository updates them, and a
+  # major bump tends to surface only when a runner image finally stops accepting the old one.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # Four actions moving in step; one PR rather than four.
+      actions:
+        patterns: ['*']
+
+  # NuGet has no single entry point here to discover. Directory.Build.props carries GitVersion
+  # for every project and each project carries its own references, so the directories are listed
+  # explicitly: HostPinger.slnx is not a solution format Dependabot reads, which is why leaving
+  # it to find the projects from the root would turn up almost nothing.
+  #
+  # HostPinger.WindowsInstaller is deliberately absent. Dependabot recognises .csproj, .vbproj,
+  # .fsproj and .proj, but not .wixproj, and naming a directory it finds no manifest in fails the
+  # update run. WixToolset.Firewall.wixext is therefore bumped by hand -- as is the vendored
+  # Bootstrap under HostPinger/wwwroot/lib, which is checked in rather than restored.
+  - package-ecosystem: nuget
+    directories:
+      - /
+      - /HostPinger
+      - /HostPinger.Core
+      - /HostPinger.Test
+    schedule:
+      interval: weekly
+    groups:
+      # The EF Core and Microsoft.Extensions packages are serviced as one band alongside the
+      # runtime they target, so a servicing release would otherwise arrive as half a dozen
+      # separate PRs that all have to be merged together anyway. Majors stay on their own,
+      # since those are the ones worth reading.
+      dotnet:
+        patterns:
+          - Microsoft.EntityFrameworkCore.*
+          - Microsoft.Extensions.*
+        update-types: [minor, patch]
