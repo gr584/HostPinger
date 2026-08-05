@@ -30,6 +30,14 @@ jobs:
   rpm:
     name: rpm (fedora)
     runs-on: ubuntu-latest
+    # GitVersion takes the branch from GITHUB_REF when it detects Actions. On a tag push that is
+    # refs/tags/v1.2.0, which is not a branch, so it gives up on finding one and computes the next
+    # patch off the highest tag in the repository rather than honouring the tag being built —
+    # v1.2.0 produced 1.2.1-no-branch.1, and it drifts further as more tags land. Every tag here
+    # is an ancestor of main, so naming main is accurate rather than a convenient fiction, and it
+    # is what the same commit would have built as when it was pushed to the branch.
+    env:
+      GITHUB_REF: ${{ github.ref_type == 'tag' && 'refs/heads/main' || github.ref }}
     # Built inside the distribution it targets, against the .NET SDK that distribution packages.
     # That is the point of this job rather than a convenience: Fedora ships the 10.0.1xx feature
     # band while a developer machine typically has 10.0.3xx, and the two disagree about source
@@ -68,6 +76,18 @@ jobs:
           rpm_file=$(ls HostPinger.LinuxInstaller/build/rpmbuild/RPMS/x86_64/*.rpm | head -1)
           echo "checking $rpm_file"
 
+          # A tag says what version it is, so nothing downstream should have to derive it. This is
+          # the check that would have caught GitVersion answering with the branch it could not find
+          # instead of the tag it was standing on, and it is cheap to keep.
+          if [ "${GITHUB_REF_TYPE:-}" = tag ]; then
+            expected=${GITHUB_REF_NAME#v}
+            actual=$(rpm -qp --queryformat '%{VERSION}' "$rpm_file")
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::building $GITHUB_REF_NAME produced version $actual, expected $expected"
+              exit 1
+            fi
+          fi
+
           if ! rpm -qp --requires "$rpm_file" | grep -qx 'aspnetcore-runtime-10.0'; then
             echo "::error::the package no longer requires aspnetcore-runtime-10.0"
             exit 1
@@ -89,6 +109,11 @@ jobs:
   msi:
     name: msi (windows)
     runs-on: windows-latest
+    # See the rpm job. The MSI hides the fault rather than showing it: ProductVersion has to be
+    # numeric, so the no-branch label is dropped on the way in and a wrong version arrives looking
+    # like a perfectly ordinary one.
+    env:
+      GITHUB_REF: ${{ github.ref_type == 'tag' && 'refs/heads/main' || github.ref }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -157,6 +182,21 @@ jobs:
               $rows += ,$fields
             }
             $rows
+          }
+
+          # The counterpart to the RPM job's version check, and the more necessary of the two.
+          # ProductVersion has to be numeric, so a SemVer prerelease label is dropped on the way in
+          # and a version derived from the wrong place arrives here looking entirely ordinary --
+          # v1.2.0 shipped an MSI reading 1.2.1.0, which nothing about the file gave away.
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $expected = $env:GITHUB_REF_NAME -replace '^v', ''
+            $actual = (Get-Rows "SELECT Property, Value FROM Property WHERE Property='ProductVersion'")[0][1]
+            Write-Output "product version: $actual"
+            # Authored as three parts and padded to four by the installer, so compare the prefix.
+            if ($actual -ne $expected -and $actual -ne "$expected.0") {
+              Write-Output "::error::building $env:GITHUB_REF_NAME produced version $actual, expected $expected"
+              exit 1
+            }
           }
 
           $environment = Get-Rows 'SELECT Name, Value FROM Registry' |
