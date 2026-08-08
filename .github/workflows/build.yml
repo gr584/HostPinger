@@ -285,18 +285,15 @@ jobs:
     # A release attached to a tag is a file to be found and downloaded; dnf needs an index it can
     # poll. This publishes one to Pages so an installed machine can upgrade with dnf rather than
     # by being handed a URL each time.
-    needs: [release]
-    # The content comes from the releases that exist rather than from the run that produced one,
-    # so this is worth running whenever it can: after a release, on a push to main, or by hand to
-    # repair the metadata. always() is required because release is skipped in most of those, and a
-    # skipped dependency would otherwise skip this too.
     #
-    # Pull requests are the exception. A fork's token cannot deploy, and a branch republishing the
-    # site would be doing it from packages it had no part in building.
-    if: >-
-      always() &&
-      needs.release.result != 'failure' &&
-      github.event_name != 'pull_request'
+    # Publishing follows a release and nothing else. The content comes from the releases that
+    # exist rather than from the run that produced one, so republishing on a push to main or by
+    # hand looked free — but the github-pages environment only accepts a deployment from a tag, so
+    # those runs could never do anything except fail on the way out. Gating on release alone is
+    # enough: release runs only on a tag, and a push, a pull request or a manual run skips it and
+    # skips this with it. To repair the metadata by hand, re-run this job on the run of the tag
+    # that last released.
+    needs: [release]
     runs-on: ubuntu-latest
     permissions:
       contents: read
