@@ -19,8 +19,24 @@
     word-break: break-all;
 }
 
+/*
+ * The settings read as three columns down both cards — box, unit, Save — which only lines up if
+ * the first two are sized rather than left to their content: the units are different words, and
+ * the interval row carries no button to be pushed along by them. Sized from the widest thing
+ * each has to hold: 1000000 for the box, "seconds" for the unit.
+ */
 .config-input {
-    max-width: 18rem;
+    width: fit-content;
+    max-width: 100%;
+}
+
+.config-input ::deep .form-control {
+    flex: 0 0 7rem;
+}
+
+.config-input .input-group-text {
+    justify-content: center;
+    min-width: 5.5rem;
 }
 
 .config-value {
