@@ -64,13 +64,19 @@ namespace HostPinger.Test
             var store = new PingerSettingsStore(_paths);
             await store.SaveAsync(new PingerSettingsUpdate { MaxDatabaseSizeMb = 250 });
 
-            await store.SaveAsync(new PingerSettingsUpdate { IntervalSeconds = 90, TimeoutSeconds = 3 });
+            await store.SaveAsync(new PingerSettingsUpdate
+            {
+                IntervalSeconds = 90,
+                TimeoutSeconds = 3,
+                ResolveTimeoutSeconds = 8,
+            });
 
             var options = Bind();
             Assert.Multiple(() =>
             {
                 Assert.That(options.IntervalSeconds, Is.EqualTo(90));
                 Assert.That(options.TimeoutSeconds, Is.EqualTo(3));
+                Assert.That(options.ResolveTimeoutSeconds, Is.EqualTo(8));
                 Assert.That(options.MaxDatabaseSizeMb, Is.EqualTo(250));
             });
         }

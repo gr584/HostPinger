@@ -31,6 +31,14 @@ namespace HostPinger.Core.Options
         public int TimeoutSeconds { get; set; } = 5;
 
         /// <summary>
+        /// How long to wait for a host name to become an IP address. Bounded separately from
+        /// <see cref="TimeoutSeconds"/>, which only covers the wait for a reply and so leaves
+        /// resolution unbounded, and because the outcome differs: a host that does not answer is
+        /// recorded as down, while a name that does not resolve is skipped for that round.
+        /// </summary>
+        public int ResolveTimeoutSeconds { get; set; } = 3;
+
+        /// <summary>
         /// Maximum database file size. The oldest ping attempts are pruned when the file grows
         /// beyond this; zero or negative disables pruning.
         /// </summary>

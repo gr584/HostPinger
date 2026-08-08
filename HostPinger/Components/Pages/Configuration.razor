@@ -74,12 +74,23 @@
                     <div class="input-group input-group-sm config-input">
                         <InputNumber id="ping-timeout" class="form-control" @bind-Value="_pingerForm.TimeoutSeconds" />
                         <span class="input-group-text">seconds</span>
-                        <button type="submit" class="btn btn-primary">Save</button>
                     </div>
                     <ValidationMessage For="() => _pingerForm.TimeoutSeconds" />
+                    <div class="form-text">How long to wait for a reply before recording the host as down.</div>
+                </dd>
+
+                <dt><label for="resolve-timeout">Resolve timeout</label></dt>
+                <dd>
+                    <div class="input-group input-group-sm config-input">
+                        <InputNumber id="resolve-timeout" class="form-control" @bind-Value="_pingerForm.ResolveTimeoutSeconds" />
+                        <span class="input-group-text">seconds</span>
+                        <button type="submit" class="btn btn-primary">Save</button>
+                    </div>
+                    <ValidationMessage For="() => _pingerForm.ResolveTimeoutSeconds" />
                     <div class="form-text">
-                        How long to wait for a reply before recording the host as down. Saving stores
-                        both pinger settings.
+                        How long to wait for a host name to become an address. A name that does not
+                        resolve in time is skipped for that round rather than recorded as down.
+                        Saving stores all three pinger settings.
                         @if (_pingerStatus is not null)
                         {
                             <span class="config-saved">@_pingerStatus</span>
@@ -109,6 +120,7 @@
     // that has not been saved yet cannot skew the size projections below it.
     private int _effectiveIntervalSeconds;
     private int _effectiveTimeoutSeconds;
+    private int _effectiveResolveTimeoutSeconds;
     private int _effectiveMaxDatabaseSizeMb;
 
     protected override async Task OnInitializedAsync()
@@ -157,9 +169,15 @@
             _pingerForm.TimeoutSeconds = options.TimeoutSeconds;
         }
 
+        if (_pingerForm.ResolveTimeoutSeconds == _effectiveResolveTimeoutSeconds)
+        {
+            _pingerForm.ResolveTimeoutSeconds = options.ResolveTimeoutSeconds;
+        }
+
         _effectiveMaxDatabaseSizeMb = options.MaxDatabaseSizeMb;
         _effectiveIntervalSeconds = options.IntervalSeconds;
         _effectiveTimeoutSeconds = options.TimeoutSeconds;
+        _effectiveResolveTimeoutSeconds = options.ResolveTimeoutSeconds;
     }
 
     private async Task LoadStatsAsync()
@@ -195,11 +213,13 @@
             {
                 IntervalSeconds = _pingerForm.IntervalSeconds,
                 TimeoutSeconds = _pingerForm.TimeoutSeconds,
+                ResolveTimeoutSeconds = _pingerForm.ResolveTimeoutSeconds,
             },
             _cts.Token);
 
         _effectiveIntervalSeconds = _pingerForm.IntervalSeconds;
         _effectiveTimeoutSeconds = _pingerForm.TimeoutSeconds;
+        _effectiveResolveTimeoutSeconds = _pingerForm.ResolveTimeoutSeconds;
         _pingerStatus = "Saved — applied from the next ping round.";
         await LoadStatsAsync();
     }
@@ -273,5 +293,8 @@
 
         [Range(1, TimeoutUpperBoundSeconds, ErrorMessage = "Enter a timeout between 1 and 60 seconds.")]
         public int TimeoutSeconds { get; set; }
+
+        [Range(1, TimeoutUpperBoundSeconds, ErrorMessage = "Enter a resolve timeout between 1 and 60 seconds.")]
+        public int ResolveTimeoutSeconds { get; set; }
     }
 }

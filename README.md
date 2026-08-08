@@ -73,6 +73,10 @@ to edit on disk.
 
 - **Ping interval** — how often every enabled host is pinged. Default 30 seconds.
 - **Timeout** — how long to wait for a reply before recording the host as down. Default 5 seconds.
+- **Resolve timeout** — how long to wait for a host name to become an address. Default 3 seconds.
+  Separate from the reply timeout, which does not cover resolution, so a name that hangs cannot
+  set the pace of the round on its own. A name that does not resolve in time is skipped for that
+  round rather than recorded as down.
 - **Maximum database size** — the oldest attempts are pruned once the file grows past this.
   Default 100 MB; 0 disables pruning and lets the file grow without bound.
 - **Capacity estimate** — the current file size, how fast it is growing at the present host count
@@ -82,10 +86,15 @@ to edit on disk.
 
 - Every enabled host is pinged once per interval, all of them in parallel, and each attempt is
   stored with its timestamp and either a round-trip time or nothing at all.
-- A ping that cannot be sent — an address that will not resolve, a socket the operating system
-  refuses — is recorded as unanswered rather than abandoning the round, so one bad host cannot
-  cost every other host its data point. The log entry is repeated at most once every 15 minutes
-  per address.
+- Each address is resolved before it is pinged, under its own timeout, and the ping goes to the
+  resolved address so nothing is looked up twice.
+- A ping that reaches a known address but cannot be completed — a silent host, or a socket the
+  operating system refuses — is recorded as unanswered rather than abandoning the round, so one
+  bad host cannot cost every other host its data point.
+- A name that will not resolve is different, and records nothing at all: nothing was asked of the
+  host, so there is nothing to store about it, and storing a missed ping would show up later as an
+  outage invented out of a name that does not resolve. The host is tried again the next round.
+  Either failure is logged at most once every 15 minutes per address.
 - Downtime is measured between the answered pings on either side of an outage, from the last
   moment the host was known reachable to the moment it answered again. That is deliberately the
   widest window the recorded attempts support: an outage that began while the service itself was
@@ -258,8 +267,8 @@ New-NetFirewallRule -DisplayName 'HostPinger web UI' -Direction Inbound -Protoco
 
 ## Environment configuration
 
-Ping interval, timeout and the database size limit belong to the running service and are edited on
-the Configuration page, as described above. Everything else is environment configuration:
+Ping interval, the two timeouts and the database size limit belong to the running service and are
+edited on the Configuration page, as described above. Everything else is environment configuration:
 
 | Variable | Purpose |
 | --- | --- |

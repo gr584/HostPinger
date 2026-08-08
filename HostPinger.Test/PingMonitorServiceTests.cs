@@ -38,7 +38,7 @@ namespace HostPinger.Test
                 (upId, downId, pausedId) = (up.Id, down.Id, paused.Id);
             }
 
-            var sender = new FakePingSender { Results = { ["up.example"] = 42 } };
+            var sender = new FakePingSender { Results = { ["up.example"] = PingResult.Answered(42) } };
             var service = CreateService(sender);
 
             var recorded = await service.RunRoundAsync();
@@ -95,6 +95,95 @@ namespace HostPinger.Test
             Assert.That(sender.Timeouts, Is.EqualTo(new[] { expectedMilliseconds }));
         }
 
+        /// <summary>The resolve timeout is user-editable too, so it is clamped the same way.</summary>
+        [TestCase(3, 3_000)]
+        [TestCase(0, 1_000)]
+        [TestCase(-5, 1_000)]
+        [TestCase(999_999, 60_000)]
+        public async Task RunRound_ClampsTheConfiguredResolveTimeout(int configuredSeconds, int expectedMilliseconds)
+        {
+            await using (var db = new HostPingerDbContext(_options))
+            {
+                db.Hosts.Add(new MonitoredHost { Name = "h", Address = "h.example" });
+                await db.SaveChangesAsync();
+            }
+
+            var sender = new FakePingSender();
+            var service = CreateService(sender, new PingerOptions { ResolveTimeoutSeconds = configuredSeconds });
+
+            await service.RunRoundAsync();
+
+            Assert.That(sender.ResolveTimeouts, Is.EqualTo(new[] { expectedMilliseconds }));
+        }
+
+        /// <summary>Pins the documented default, which nothing else in the wiring states.</summary>
+        [Test]
+        public async Task RunRound_ResolveTimeoutDefaultsToThreeSeconds()
+        {
+            await using (var db = new HostPingerDbContext(_options))
+            {
+                db.Hosts.Add(new MonitoredHost { Name = "h", Address = "h.example" });
+                await db.SaveChangesAsync();
+            }
+
+            var sender = new FakePingSender();
+            var service = CreateService(sender);
+
+            await service.RunRoundAsync();
+
+            Assert.That(sender.ResolveTimeouts, Is.EqualTo(new[] { 3_000 }));
+        }
+
+        /// <summary>
+        /// An unresolved address means nothing was ever asked of the host, so the round stores
+        /// nothing for it. Storing it as unanswered would be read as downtime later — an outage
+        /// invented out of a name that does not resolve. A host that was asked and stayed silent is
+        /// still a missed ping, and the difference between the two is the point.
+        /// </summary>
+        [Test]
+        public async Task RunRound_StoresNothingForAHostThatDidNotResolve()
+        {
+            int answeredId, silentId, unresolvedId;
+            await using (var db = new HostPingerDbContext(_options))
+            {
+                var answered = new MonitoredHost { Name = "answered", Address = "answered.example" };
+                var silent = new MonitoredHost { Name = "silent", Address = "silent.example" };
+                var unresolved = new MonitoredHost { Name = "unresolved", Address = "unresolved.example" };
+                db.Hosts.AddRange(answered, silent, unresolved);
+                await db.SaveChangesAsync();
+                (answeredId, silentId, unresolvedId) = (answered.Id, silent.Id, unresolved.Id);
+            }
+
+            var sender = new FakePingSender
+            {
+                Results =
+                {
+                    ["answered.example"] = PingResult.Answered(7),
+                    ["silent.example"] = PingResult.Unanswered,
+                    ["unresolved.example"] = PingResult.Unresolved,
+                },
+            };
+            var service = CreateService(sender);
+
+            var recorded = await service.RunRoundAsync();
+
+            Assert.That(recorded, Is.EqualTo(2));
+
+            await using var verify = new HostPingerDbContext(_options);
+            var attempts = await verify.PingAttempts.AsNoTracking().ToListAsync();
+            Assert.Multiple(() =>
+            {
+                Assert.That(attempts.Select(a => a.HostId), Is.EquivalentTo(new[] { answeredId, silentId }));
+                Assert.That(attempts.Single(a => a.HostId == answeredId).RoundtripMs, Is.EqualTo(7));
+                Assert.That(attempts.Single(a => a.HostId == silentId).RoundtripMs, Is.Null,
+                    "a host that was asked and stayed silent is still a missed ping");
+                Assert.That(attempts.All(a => a.HostId != unresolvedId),
+                    "the unresolved host must not appear in the history at all");
+                Assert.That(sender.Calls, Contains.Item("unresolved.example"),
+                    "it should still be tried next round, not dropped from the rotation");
+            });
+        }
+
         /// <summary>
         /// A round that takes time has to be absorbed by the interval, not added to it. Assigning
         /// <c>PeriodicTimer.Period</c> restarts its countdown from that moment, so assigning it
@@ -125,7 +214,7 @@ namespace HostPinger.Test
 
             // One host, so one ping per round, and the ping is what makes the round take time —
             // exactly how a host that answers slowly or times out behaves.
-            var sender = new FakePingSender { Delay = roundDuration, Results = { ["slow.example"] = 1 } };
+            var sender = new FakePingSender { Delay = roundDuration, Results = { ["slow.example"] = PingResult.Answered(1) } };
             var service = CreateService(sender, new PingerOptions { IntervalSeconds = (int)interval.TotalSeconds });
 
             await service.StartAsync(CancellationToken.None);
@@ -175,11 +264,14 @@ namespace HostPinger.Test
 
         private sealed class FakePingSender : IPingSender
         {
-            public Dictionary<string, int?> Results { get; } = [];
+            /// <summary>Outcome per address. An address that is absent goes unanswered.</summary>
+            public Dictionary<string, PingResult> Results { get; } = [];
 
             public List<string> Calls { get; } = [];
 
             public List<int> Timeouts { get; } = [];
+
+            public List<int> ResolveTimeouts { get; } = [];
 
             /// <summary>How long each ping takes, which is what gives a round its duration.</summary>
             public TimeSpan Delay { get; init; }
@@ -196,12 +288,17 @@ namespace HostPinger.Test
                 }
             }
 
-            public async Task<int?> SendPingAsync(string address, int timeoutMilliseconds, CancellationToken cancellationToken = default)
+            public async Task<PingResult> SendPingAsync(
+                string address,
+                int timeoutMilliseconds,
+                int resolveTimeoutMilliseconds,
+                CancellationToken cancellationToken = default)
             {
                 lock (Calls)
                 {
                     Calls.Add(address);
                     Timeouts.Add(timeoutMilliseconds);
+                    ResolveTimeouts.Add(resolveTimeoutMilliseconds);
                 }
 
                 if (Delay > TimeSpan.Zero)
@@ -209,7 +306,7 @@ namespace HostPinger.Test
                     await Task.Delay(Delay, cancellationToken);
                 }
 
-                return Results.GetValueOrDefault(address);
+                return Results.GetValueOrDefault(address, PingResult.Unanswered);
             }
         }
     }

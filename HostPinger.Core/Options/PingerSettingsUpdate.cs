@@ -11,6 +11,8 @@ namespace HostPinger.Core.Options
 
         public int? TimeoutSeconds { get; init; }
 
+        public int? ResolveTimeoutSeconds { get; init; }
+
         public int? MaxDatabaseSizeMb { get; init; }
     }
 }

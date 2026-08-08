@@ -87,8 +87,9 @@ namespace HostPinger.Core.Services
             TimeSpan.FromSeconds(Math.Clamp(_options.CurrentValue.IntervalSeconds, 1, MaxIntervalSeconds));
 
         /// <summary>
-        /// Pings all enabled hosts once, stores the attempts, and prunes the database.
-        /// Returns the number of attempts recorded.
+        /// Pings all enabled hosts once, stores the attempts, and prunes the database. Hosts whose
+        /// address did not resolve are left out rather than stored as unanswered, so the number
+        /// returned can be smaller than the number of enabled hosts.
         /// </summary>
         public async Task<int> RunRoundAsync(CancellationToken cancellationToken = default)
         {
@@ -103,18 +104,34 @@ namespace HostPinger.Core.Services
 
             var timestampUtc = _timeProvider.GetUtcNow().UtcDateTime;
             var timeoutMilliseconds = Math.Clamp(options.TimeoutSeconds, 1, MaxTimeoutSeconds) * 1000;
-            var attempts = await Task.WhenAll(hosts.Select(async host => new PingAttempt
-            {
-                HostId = host.Id,
-                TimestampUtc = timestampUtc,
-                RoundtripMs = await _pingSender.SendPingAsync(host.Address, timeoutMilliseconds, cancellationToken),
-            }));
+            var resolveTimeoutMilliseconds = Math.Clamp(options.ResolveTimeoutSeconds, 1, MaxTimeoutSeconds) * 1000;
+
+            var results = await Task.WhenAll(hosts.Select(async host => (
+                host,
+                result: await _pingSender.SendPingAsync(
+                    host.Address,
+                    timeoutMilliseconds,
+                    resolveTimeoutMilliseconds,
+                    cancellationToken))));
+
+            // A host whose address would not resolve was never asked anything, so the round has
+            // nothing to say about it and records nothing. Storing it as unanswered would show up
+            // as downtime later — an outage invented out of a name that does not resolve.
+            var attempts = results
+                .Where(outcome => outcome.result.IsRecordable)
+                .Select(outcome => new PingAttempt
+                {
+                    HostId = outcome.host.Id,
+                    TimestampUtc = timestampUtc,
+                    RoundtripMs = outcome.result.RoundtripMs,
+                })
+                .ToList();
 
             db.PingAttempts.AddRange(attempts);
             await db.SaveChangesAsync(cancellationToken);
 
             await _pruner.EnforceSizeLimitAsync(db, options.MaxDatabaseSizeBytes, cancellationToken);
-            return attempts.Length;
+            return attempts.Count;
         }
     }
 }

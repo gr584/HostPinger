@@ -38,6 +38,11 @@ namespace HostPinger.Core.Options
                     section[nameof(PingerOptions.TimeoutSeconds)] = timeoutSeconds;
                 }
 
+                if (update.ResolveTimeoutSeconds is int resolveTimeoutSeconds)
+                {
+                    section[nameof(PingerOptions.ResolveTimeoutSeconds)] = resolveTimeoutSeconds;
+                }
+
                 if (update.MaxDatabaseSizeMb is int maxDatabaseSizeMb)
                 {
                     section[nameof(PingerOptions.MaxDatabaseSizeMb)] = maxDatabaseSizeMb;
