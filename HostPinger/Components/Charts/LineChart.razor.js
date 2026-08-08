@@ -33,8 +33,23 @@ export function observeSize(cardEl, plotEl, dotNetRef) {
         const width = plotEl.clientWidth;
         const height = isWide() ? plotEl.clientHeight : FALLBACK_HEIGHT;
         if (width > 0 && height > 0) {
-            dotNetRef.invokeMethodAsync("SetSize", width, height);
+            dotNetRef.invokeMethodAsync("SetSize", width, height, window.devicePixelRatio || 1);
         }
+    };
+
+    // devicePixelRatio has no change event of its own, and a resolution media query is the only
+    // reliable way to hear about a move to a display of a different density: browser zoom also
+    // fires a resize, but moving between monitors need not change the window's CSS size at all.
+    // The query has to be rebuilt on every change, since it is pinned to one ratio.
+    let ratioQuery = null;
+    const onRatioChange = () => {
+        watchRatio();
+        report();
+    };
+    const watchRatio = () => {
+        ratioQuery?.removeEventListener("change", onRatioChange);
+        ratioQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+        ratioQuery.addEventListener("change", onRatioChange);
     };
 
     // Fires whenever the plot area changes size — covers width (flex reflow) and the height
@@ -49,12 +64,14 @@ export function observeSize(cardEl, plotEl, dotNetRef) {
     window.addEventListener("resize", onWindowResize);
 
     applyHeight();
+    watchRatio();
     report();
 
     return {
         dispose: () => {
             observer.disconnect();
             window.removeEventListener("resize", onWindowResize);
+            ratioQuery?.removeEventListener("change", onRatioChange);
         },
     };
 }

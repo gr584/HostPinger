@@ -116,6 +116,19 @@
     [Parameter] public double Height { get; set; } = 340;
     [Parameter] public TimeSpan UpdateInterval { get; set; }
 
+    /// <summary>
+    /// Called with the plot area's width in <em>device</em> pixels (its CSS width scaled by
+    /// devicePixelRatio) once it has been measured, and again whenever it changes, so the caller can
+    /// match how densely it samples to the resolution actually available. The chart's own geometry
+    /// stays in CSS pixels; only the sampling budget cares about the physical device.
+    /// <para>
+    /// A plain delegate rather than an <see cref="EventCallback"/>, and it fires mid-render: the
+    /// handler is expected to record the width for later, not to act on it. An EventCallback would
+    /// re-render the caller on every pixel of a window drag.
+    /// </para>
+    /// </summary>
+    [Parameter] public Action<double>? PlotDeviceWidthChanged { get; set; }
+
     private ElementReference _cardRef;
     private ElementReference _plotRef;
     private IJSObjectReference? _module;
@@ -126,6 +139,9 @@
     private double _rightPad;
     private double _plotWidth;
     private double _plotHeight;
+    private bool _sizeMeasured;
+    private double _pixelRatio = 1;
+    private double _reportedDeviceWidth;
     private double _scaleMax = 1;
     private IReadOnlyList<double> _yTicks = [];
     private IReadOnlyList<DateTime> _xTicks = [];
@@ -170,10 +186,11 @@
     }
 
     [JSInvokable]
-    public async Task SetSize(double width, double height)
+    public async Task SetSize(double width, double height, double pixelRatio)
     {
-        if (width <= 0 || height <= 0
-            || (Math.Abs(width - _effectiveWidth) < 1 && Math.Abs(height - _effectiveHeight) < 1))
+        if (width <= 0 || height <= 0 || pixelRatio <= 0
+            || (Math.Abs(width - _effectiveWidth) < 1 && Math.Abs(height - _effectiveHeight) < 1
+                && pixelRatio == _pixelRatio))
         {
             return;
         }
@@ -182,6 +199,8 @@
         {
             _effectiveWidth = width;
             _effectiveHeight = height;
+            _pixelRatio = pixelRatio;
+            _sizeMeasured = true;
             Recompute();
             StateHasChanged();
         });
@@ -194,6 +213,16 @@
         _rightPad = showDirectLabels ? 120 : 20;
         _plotWidth = Math.Max(50, _effectiveWidth - PlotLeft - _rightPad);
         _plotHeight = Math.Max(50, _effectiveHeight - PlotTop - BottomPad);
+
+        // The plot width is only known once the browser has laid the chart out, so it is pushed to
+        // the caller from here rather than taken as a parameter. Nothing before the first
+        // measurement is worth reporting: it would only describe the fallback size.
+        var deviceWidth = _plotWidth * _pixelRatio;
+        if (_sizeMeasured && Math.Abs(deviceWidth - _reportedDeviceWidth) >= 1)
+        {
+            _reportedDeviceWidth = deviceWidth;
+            PlotDeviceWidthChanged?.Invoke(deviceWidth);
+        }
 
         double maxValue = 0;
         foreach (var series in visible)

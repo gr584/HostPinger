@@ -28,7 +28,8 @@ else
             }
             else
             {
-                <LineChart Series="_series" RangeStartUtc="_rangeStart" RangeEndUtc="_rangeEnd" UpdateInterval="_updateInterval" />
+                <LineChart Series="_series" RangeStartUtc="_rangeStart" RangeEndUtc="_rangeEnd" UpdateInterval="_updateInterval"
+                           PlotDeviceWidthChanged="OnPlotDeviceWidthChanged" />
             }
         </div>
 
@@ -99,7 +100,18 @@ else
         ("7 d", TimeSpan.FromDays(7)),
     ];
 
-    private const int MaxPointsPerSeries = 600;
+    // Each series is downsampled to one point per device pixel of plot width: any denser and points
+    // share a physical pixel column, where the extra detail cannot be seen but still costs query
+    // payload and SVG. Device pixels rather than CSS pixels, so a HiDPI screen gets the resolution
+    // it can actually show — the points then land on sub-CSS-pixel x coordinates, which the SVG
+    // carries fine. The chart reports its width only after the browser has laid it out, and a new
+    // width takes effect on the next refresh rather than immediately, so until the first tick after
+    // layout (and if the measurement never arrives, e.g. with JS disabled) a typical plot width
+    // stands in. The bounds keep a collapsed or very large, dense display from producing a useless
+    // or unreasonable point count.
+    private const int DefaultPointsPerSeries = 600;
+    private const int MinPointsPerSeries = 50;
+    private const int MaxPointsPerSeries = 8000;
 
     [Parameter] public string? HostIdsSegment { get; set; }
 
@@ -116,6 +128,9 @@ else
     private string _search = string.Empty;
     private ElementReference _searchInput;
     private TimeSpan _updateInterval;
+    private int _pointsPerSeries = DefaultPointsPerSeries;
+    private int _loadedPointsPerSeries = DefaultPointsPerSeries;
+    private bool _awaitingFirstMeasurement = true;
 
     private string SelectionSummary => _selected.Count switch
     {
@@ -237,6 +252,10 @@ else
                 g => g.Key,
                 g => (IReadOnlyList<ChartSample>)g.Select(a => new ChartSample(a.TimestampUtc, a.RoundtripMs)).ToList());
 
+        // Read once, so a resize partway through cannot leave series in the same load at different
+        // densities.
+        var points = _pointsPerSeries;
+        _loadedPointsPerSeries = points;
         _series = _allHosts
             .Select((host, index) => (host, index))
             .Where(t => _selected.Contains(t.host.Id))
@@ -245,7 +264,7 @@ else
                 ChartPalette.GetColor(t.index),
                 ChartMath.Downsample(
                     samplesByHost.GetValueOrDefault(t.host.Id) ?? Array.Empty<ChartSample>(),
-                    MaxPointsPerSeries)))
+                    points)))
             .ToList();
     }
 
@@ -279,6 +298,43 @@ else
         _selected.Clear();
         await JS.InvokeVoidAsync("history.replaceState", null, string.Empty, Navigation.ToAbsoluteUri("graph").ToString());
         await LoadAsync();
+    }
+
+    // Recorded for the next refresh rather than acted on: while the window is being dragged, the
+    // chart rescales the samples it already has, and the density catches up on the following tick.
+    // Reloading on the width itself would run a query for every pixel of the drag. The first
+    // measurement is the exception — it replaces a stand-in default that was only ever a guess, so
+    // it is worth showing straight away rather than up to an interval later.
+    private void OnPlotDeviceWidthChanged(double deviceWidth)
+    {
+        _pointsPerSeries = Math.Clamp((int)Math.Round(deviceWidth), MinPointsPerSeries, MaxPointsPerSeries);
+        if (_awaitingFirstMeasurement)
+        {
+            _awaitingFirstMeasurement = false;
+            _ = ApplyFirstMeasurementAsync();
+        }
+    }
+
+    // The chart reports its width from inside its own layout pass, so this cannot be awaited there
+    // and is queued onto the circuit instead. By the time it runs a scheduled refresh may already
+    // have picked the new count up, hence the re-check.
+    private async Task ApplyFirstMeasurementAsync()
+    {
+        try
+        {
+            await InvokeAsync(async () =>
+            {
+                if (_pointsPerSeries != _loadedPointsPerSeries)
+                {
+                    await LoadAsync();
+                    StateHasChanged();
+                }
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            // The page was disposed while the reload was queued.
+        }
     }
 
     private async Task SetWindowAsync(TimeSpan window)
