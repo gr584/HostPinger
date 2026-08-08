@@ -44,7 +44,8 @@ namespace HostPinger.Core.Services
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            using var timer = new PeriodicTimer(GetInterval(), _timeProvider);
+            var period = GetInterval();
+            using var timer = new PeriodicTimer(period, _timeProvider);
             try
             {
                 do
@@ -63,8 +64,17 @@ namespace HostPinger.Core.Services
                     }
 
                     // Picks up an interval changed on the Configuration page; the new period
-                    // applies from the next tick onwards.
-                    timer.Period = GetInterval();
+                    // applies from the next tick onwards. Assigned only when it actually changed,
+                    // because assigning restarts the countdown from this moment: doing it after
+                    // every round would push that round's duration into the gap, so a host slow
+                    // enough to take three seconds would stretch a ten second interval to
+                    // thirteen. Left alone, the period absorbs the round instead.
+                    var configured = GetInterval();
+                    if (configured != period)
+                    {
+                        period = configured;
+                        timer.Period = period;
+                    }
                 }
                 while (await timer.WaitForNextTickAsync(stoppingToken));
             }
