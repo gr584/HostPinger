@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Builds the HostPinger RPM. Run it on a Linux machine with the .NET SDK and rpm-build installed:
+# Builds the HostPinger RPMs — the application and its SELinux policy module. Run it on a Linux
+# machine with the .NET SDK, rpm-build and selinux-policy-devel installed:
 #
 #   ./build-rpm.sh                 version taken from the git history via GitVersion
 #   VERSION=1.4.0 ./build-rpm.sh   version supplied explicitly
@@ -8,7 +9,8 @@
 # The second form is what to use where the git history is not available — a shallow CI checkout,
 # or an unpacked source archive — since GitVersion needs the full history to compute a version.
 #
-# The RPM lands in build/rpmbuild/RPMS/x86_64/.
+# They land in build/rpmbuild/RPMS/x86_64/ and build/rpmbuild/RPMS/noarch/, the policy module
+# being the same file whatever the architecture.
 
 set -euo pipefail
 
@@ -69,7 +71,8 @@ echo "==> staging sources"
 stage="$build_dir/$name-$rpm_version"
 mkdir -p "$stage"
 cp -a "$publish_dir" "$stage/publish"
-cp "$script_dir/hostpinger.service" "$script_dir/hostpinger.sysconfig" "$stage/"
+cp "$script_dir/hostpinger.service" "$script_dir/hostpinger.sysconfig" \
+   "$script_dir/hostpinger.te" "$script_dir/hostpinger.fc" "$stage/"
 cp "$repo_root/LICENSE.txt" "$stage/"
 
 tar -czf "$topdir/SOURCES/$name-$rpm_version.tar.gz" -C "$build_dir" "$name-$rpm_version"

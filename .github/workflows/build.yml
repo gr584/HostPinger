@@ -52,8 +52,16 @@ jobs:
       # systemd-rpm-macros supplies %{_unitdir} and the %systemd_* scriptlet macros. It usually
       # arrives as a dependency of rpm-build, but an undefined %{_unitdir} fails in a way that
       # takes a while to recognise, so it is named explicitly.
+      #
+      # selinux-policy-devel is what builds the policy module, and it brings make, m4 and
+      # checkpolicy with it. systemd is not used by anything in the build: it satisfies the
+      # pkgconfig(systemd) build dependency that %selinux_requires_min declares, and rpmbuild
+      # refuses to start until every BuildRequires is installed. The pkgconfig file lives in the
+      # systemd package rather than systemd-devel, which is not what the name suggests.
       - name: Install build dependencies
-        run: dnf install -y git tar findutils dotnet-sdk-10.0 rpm-build systemd-rpm-macros
+        run: |
+          dnf install -y git tar findutils bzip2 dotnet-sdk-10.0 rpm-build systemd-rpm-macros \
+                         selinux-policy-devel systemd
 
       - uses: actions/checkout@v7
         with:
@@ -100,10 +108,33 @@ jobs:
 
           rpm -qpi "$rpm_file"
 
+          # The policy module is what lets the service run at all on an enforcing machine, and it
+          # fails quietly in both directions: a subpackage that stopped being built takes nothing
+          # with it, and a file context naming a path the application is no longer installed to
+          # still compiles, still loads, and simply labels nothing. Both are checked here because
+          # neither shows up as a failure anywhere else.
+          selinux_rpm=$(ls HostPinger.LinuxInstaller/build/rpmbuild/RPMS/noarch/*-selinux-*.rpm | head -1)
+          echo "checking $selinux_rpm"
+
+          module=/usr/share/selinux/packages/targeted/hostpinger.pp.bz2
+          if ! rpm -qpl "$selinux_rpm" | grep -qx "$module"; then
+            echo "::error::the selinux subpackage no longer ships $module"
+            exit 1
+          fi
+
+          rpm2cpio "$selinux_rpm" | cpio -i --to-stdout ".$module" 2>/dev/null | bunzip2 > module.pp
+          if ! grep -qa '/usr/lib/hostpinger/HostPinger' module.pp; then
+            echo "::error::the policy module carries no file context for the installed launcher"
+            exit 1
+          fi
+
+      # Every architecture directory, not just x86_64: the policy module is noarch and builds into
+      # its own, and an artifact that misses it is a release that ships the application without
+      # the thing that lets it run.
       - uses: actions/upload-artifact@v7
         with:
           name: rpm
-          path: HostPinger.LinuxInstaller/build/rpmbuild/RPMS/x86_64/*.rpm
+          path: HostPinger.LinuxInstaller/build/rpmbuild/RPMS/**/*.rpm
           if-no-files-found: error
 
   msi:

@@ -133,6 +133,12 @@ sudo dnf install hostpinger
 sudo systemctl enable --now hostpinger
 ```
 
+`hostpinger-selinux` comes along with it. It carries a policy module that labels the service
+launcher so that systemd starts it in a service domain, and on an enforcing machine it is what
+makes the service work at all — see [SELinux and the service domain](#selinux-and-the-service-domain).
+It is a weak dependency rather than a hard one, so a machine with SELinux disabled can remove it
+without taking the application with it.
+
 On dnf4 the first line is `sudo dnf config-manager --add-repo <same url>`. From then on the package
 moves with the rest of the system:
 
@@ -149,12 +155,17 @@ leaves to you, the firewall among them.
 
 ### Build the package
 
-Needs the .NET SDK and the RPM build tooling. On the build machine:
+Needs the .NET SDK, the RPM build tooling and the SELinux policy sources. On the build machine:
 
 ```bash
-sudo dnf install -y dotnet-sdk-10.0 rpm-build systemd-rpm-macros
+sudo dnf install -y dotnet-sdk-10.0 rpm-build systemd-rpm-macros selinux-policy-devel systemd
 bash HostPinger.LinuxInstaller/build-rpm.sh
 ```
+
+`selinux-policy-devel` compiles the policy module and brings make, m4 and checkpolicy with it.
+`systemd` is there only to satisfy a build dependency the SELinux macros declare — the pkgconfig
+file they ask for ships in that package rather than in `systemd-devel`, which is not what the name
+suggests.
 
 The version comes from the git history via GitVersion, so the build needs a full clone rather than
 a shallow one. Where that is not available — an unpacked archive, or a CI checkout that has not
@@ -164,12 +175,14 @@ fetched the history — supply it directly:
 VERSION=1.4.0 bash HostPinger.LinuxInstaller/build-rpm.sh
 ```
 
-The package lands in `HostPinger.LinuxInstaller/build/rpmbuild/RPMS/x86_64/`.
+Two packages come out of it: the application in
+`HostPinger.LinuxInstaller/build/rpmbuild/RPMS/x86_64/`, and the policy module beside it in
+`RPMS/noarch/`, the module being the same file whatever the architecture.
 
 ### Install and run
 
 ```bash
-sudo dnf install ./HostPinger.LinuxInstaller/build/rpmbuild/RPMS/x86_64/hostpinger-*.rpm
+sudo dnf install ./HostPinger.LinuxInstaller/build/rpmbuild/RPMS/*/hostpinger*.rpm
 sudo systemctl enable --now hostpinger
 ```
 
@@ -198,6 +211,7 @@ sudo firewall-cmd --permanent --add-port=8080/tcp && sudo firewall-cmd --reload
 | `/var/lib/hostpinger/` | Database, saved settings, data protection keys. Created by systemd; uninstalling never removes it. |
 | `/etc/sysconfig/hostpinger` | Port, time zone, runtime diagnostics switch. Survives upgrades. |
 | `/usr/lib/systemd/system/hostpinger.service` | The unit. |
+| `/usr/share/selinux/packages/targeted/hostpinger.pp.bz2` | The policy module, from `hostpinger-selinux`. Loaded into the policy store on install. |
 
 The package requires `aspnetcore-runtime-10.0` from the Fedora repositories, so the runtime is
 patched with the distribution rather than bundled.
@@ -290,10 +304,28 @@ and reading back what it prints — so on Fedora the pings usually still work, a
 process per host per round. On RHEL and Debian, which do not open the sysctl, the capability is what
 makes the service work at all.
 
-### SELinux denials on /usr/bin/ping
+### SELinux and the service domain
 
-That fallback is the one part of the service SELinux has an opinion about, and on a confined system
-it shows up in `journalctl` as:
+Both halves of that — the raw socket and the fallback — depend on which domain the service runs in,
+and left alone it is the wrong one. `/usr/lib/hostpinger/HostPinger` is labelled `lib_t`, as
+everything under `/usr/lib` is, and systemd transitions into a service domain only for a binary
+labelled the way an ordinary service binary is. An unlabelled launcher leaves the unit in `init_t`,
+systemd's own domain, which is granted neither the raw socket nor the exec of `/usr/bin/ping`.
+
+That is what `hostpinger-selinux` is for. The module it carries holds no rules at all — its entire
+content is one file context:
+
+```
+/usr/lib/hostpinger/HostPinger    --    system_u:object_r:bin_t:s0
+```
+
+The transition follows from the label, and both denials go with it. On a stock policy the service
+then runs as `unconfined_service_t` and is confined by the unit's own hardening rather than by
+policy, which is where a third-party service without a policy of its own normally sits. Only the
+launcher is labelled: the assemblies and web assets beside it are read and never executed, and
+`lib_t` is right for those.
+
+Where the module is missing, the journal says so:
 
 ```
 SELinux is preventing HostPinger from execute_no_trans access on the file /usr/bin/ping.
@@ -301,44 +333,47 @@ SELinux is preventing HostPinger from execute_no_trans access on the file /usr/b
 
 `execute_no_trans` is permission to run a binary while staying in the domain you are already in.
 Fedora's policy expects `/usr/bin/ping` to be entered by transitioning into the `ping_t` domain, and
-no transition is available here: the unit sets `NoNewPrivileges=yes`, which suppresses SELinux
-domain transitions, and several of its other hardening settings — `RestrictAddressFamilies=`,
-`SystemCallArchitectures=`, `PrivateDevices=`, `ProtectKernelTunables=` — imply it in any case. So
-the exec is refused outright rather than redirected.
+that transition is not available to a unit running under `NoNewPrivileges=yes`, so the exec is
+refused outright rather than redirected. The flag does not stop systemd starting the unit in a
+service domain in the first place — plenty of confined services set it — it governs what the service
+may transition into afterwards.
 
 The denial is not cosmetic. A refused exec is reported by .NET as a failure to start a process
 rather than as a failed ping, which is not the shape of failure the ping path expects, so the effect
-is a service that will not stay up rather than one recording hosts as down — check `systemctl status
-hostpinger` alongside the denial.
+is a service that will not stay up rather than one recording hosts as down. It also means the raw
+socket was refused first, since a service that gets one never reaches for the binary.
 
-The message also means the raw socket was refused first, since a service that gets one never reaches
-for the binary. Both denials, and the domain the service is actually running in, are worth reading
-before changing anything:
+What to check, in the order that answers it quickest:
 
 ```bash
-sudo ausearch -m avc -c HostPinger          # the socket denial as well as the exec one
-ps -eo label,comm | grep HostPinger         # the domain
-systemctl show hostpinger -p AmbientCapabilities
+rpm -q hostpinger-selinux                    # installed at all?
+semodule -l | grep hostpinger                # loaded into the policy store?
+matchpathcon /usr/lib/hostpinger/HostPinger  # bin_t, or still lib_t?
+ps -eo label,comm | grep HostPinger          # the domain the service is actually in
 ```
 
-A domain of `init_t` is the usual answer. `/usr/lib/hostpinger/HostPinger` is labelled `lib_t`, as
-everything under `/usr/lib` is, and systemd transitions into a service domain only for a binary
-labelled the way an ordinary service binary is — so the unit stays in systemd's own domain, which is
-granted neither the raw socket nor the exec. Labelling the launcher restores the transition:
+`init_t` in the last of those is the whole problem, and installing the subpackage is the fix:
 
 ```bash
-sudo dnf install -y policycoreutils-python-utils
-sudo semanage fcontext -a -t bin_t /usr/lib/hostpinger/HostPinger
-sudo restorecon -v /usr/lib/hostpinger/HostPinger
+sudo dnf install hostpinger-selinux
 sudo systemctl restart hostpinger
 ```
 
-The rule is local to the machine and outlives the file, so upgrading or reinstalling the package
-does not undo it. `journalctl -u hostpinger | grep ICMP` then says whether the startup probe is
-satisfied, which is the point of the exercise: with the raw socket available there is no subprocess
-to deny.
+The restart is not redundant. Relabelling runs at the end of the transaction, by which point an
+upgrade has already restarted the service — so the process running immediately afterwards is still
+the one that started in the old domain. `journalctl -u hostpinger | grep ICMP` then says whether the
+startup probe is satisfied, which is the point of the exercise: with the raw socket available there
+is no subprocess left to deny.
 
-Failing that, allow the access as it stands — which is what the denial message itself suggests:
+A machine relabelled by hand before this subpackage existed carries a local rule saying the same
+thing. It does no harm, and can be dropped once the module is in place:
+
+```bash
+sudo semanage fcontext -d /usr/lib/hostpinger/HostPinger
+```
+
+Failing all of that, allow the access as it stands — which is what the denial message itself
+suggests:
 
 ```bash
 sudo dnf install -y policycoreutils-devel
@@ -364,8 +399,9 @@ to attach. `init_t` is granted nothing on a `fifo_file`, so the runtime is refus
 created a moment earlier — on the unit's own tmpfs, which is what `PrivateTmp=yes` provides.
 
 Unlike the exec denial this one is cosmetic: the thread is a background listener, and the service
-starts, pings and serves without it. It is worth reading as evidence of the same mislabelled
-launcher, and it recurs on every restart until that is dealt with.
+starts, pings and serves without it. Its value is as evidence — it means the service is running in
+`init_t`, so `hostpinger-selinux` is missing or was never loaded, and it recurs on every restart
+until that is dealt with.
 
 The service has no use for the transport in any case, so `/etc/sysconfig/hostpinger` ships with:
 
@@ -409,6 +445,6 @@ such rather than becoming the current release.
 | `HostPinger.Core/` | Pinging, storage, pruning, settings. |
 | `HostPinger.Test/` | NUnit tests. |
 | `HostPinger.WindowsInstaller/` | WiX project producing the MSI. |
-| `HostPinger.LinuxInstaller/` | Spec file, systemd unit and build script producing the RPM. |
+| `HostPinger.LinuxInstaller/` | Spec file, systemd unit, SELinux policy module and build script producing the RPMs. |
 
 Verified against Fedora 44 and Windows 11.

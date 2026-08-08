@@ -1,0 +1,16 @@
+policy_module(hostpinger, 1.0.0)
+
+# This module carries no rules. Everything it does is the file context in hostpinger.fc, which
+# labels the launcher the way an ordinary service binary is labelled so that systemd transitions
+# out of its own domain when it starts the unit.
+#
+# Without it the service runs as init_t — systemd's domain, entered by default because nothing
+# under /usr/lib is an exec type any transition is defined for. init_t is granted neither the raw
+# ICMP socket the service opens nor the exec of /usr/bin/ping that .NET falls back to, so the
+# denials arrive as hosts that will not ping and a unit that will not stay up.
+#
+# bin_t is required rather than declared: it belongs to the base policy, and this module only
+# hands out a label that already exists.
+require {
+	type bin_t;
+}

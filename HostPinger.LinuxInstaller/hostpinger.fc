@@ -1,0 +1,7 @@
+# The directory below is written in by the spec at build time from the one place it is defined, so
+# that moving the application cannot leave this rule naming a path nothing is installed to — a
+# stale rule installs and loads without complaint and then does nothing at all.
+#
+# The launcher alone. The rest of the directory is assemblies and web assets that are read and
+# never executed, and lib_t is the right label for those.
+@APPDIR@/HostPinger		--	gen_context(system_u:object_r:bin_t,s0)
