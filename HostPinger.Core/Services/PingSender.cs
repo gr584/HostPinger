@@ -25,11 +25,24 @@ namespace HostPinger.Core.Services
 
         private readonly ILogger<PingSender> _logger;
         private readonly TimeProvider _timeProvider;
+        private readonly INameResolver _resolver;
+        private readonly IIcmpEcho _echo;
 
-        public PingSender(ILogger<PingSender> logger, TimeProvider? timeProvider = null)
+        /// <summary>
+        /// The resolver and the echo default to the real ones, so the container builds this from the
+        /// logger alone; they are parameters so the decisions between them can be tested without a
+        /// working network.
+        /// </summary>
+        public PingSender(
+            ILogger<PingSender> logger,
+            TimeProvider? timeProvider = null,
+            INameResolver? resolver = null,
+            IIcmpEcho? echo = null)
         {
             _logger = logger;
             _timeProvider = timeProvider ?? TimeProvider.System;
+            _resolver = resolver ?? new SystemNameResolver();
+            _echo = echo ?? new SystemIcmpEcho();
         }
 
         public async Task<PingResult> SendPingAsync(
@@ -46,17 +59,15 @@ namespace HostPinger.Core.Services
 
             try
             {
-                using var ping = new Ping();
-
-                // Pinged by address rather than by name: the name has already been resolved, and
-                // handing Ping the string would make it resolve a second time, on a wait this
+                // Echoed to the address rather than the name: the name has already been resolved,
+                // and handing Ping the string would make it resolve a second time, on a wait this
                 // timeout does not bound.
-                var reply = await ping.SendPingAsync(
+                var reply = await _echo.SendAsync(
                     destination,
                     TimeSpan.FromMilliseconds(timeoutMilliseconds),
-                    cancellationToken: cancellationToken);
+                    cancellationToken);
                 return reply.Status == IPStatus.Success
-                    ? PingResult.Answered((int)reply.RoundtripTime)
+                    ? PingResult.Answered((int)reply.RoundtripMs)
                     : PingResult.Unanswered;
             }
             catch (Exception ex) when (ex is PingException or SocketException or ArgumentException)
@@ -101,7 +112,7 @@ namespace HostPinger.Core.Services
             {
                 // One address is all a ping needs, and the resolver returns its preferred family
                 // first.
-                var resolved = (await Dns.GetHostAddressesAsync(address, timeout.Token)).FirstOrDefault();
+                var resolved = (await _resolver.ResolveAsync(address, timeout.Token)).FirstOrDefault();
                 if (resolved is null && MayLog(address))
                 {
                     _logger.LogWarning("{Address} resolved to no addresses; skipping it this round.", address);
