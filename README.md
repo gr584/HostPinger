@@ -196,7 +196,7 @@ sudo firewall-cmd --permanent --add-port=8080/tcp && sudo firewall-cmd --reload
 | --- | --- |
 | `/usr/lib/hostpinger/` | The application. Replaced wholesale on upgrade. |
 | `/var/lib/hostpinger/` | Database, saved settings, data protection keys. Created by systemd; uninstalling never removes it. |
-| `/etc/sysconfig/hostpinger` | Port and time zone. Survives upgrades. |
+| `/etc/sysconfig/hostpinger` | Port, time zone, runtime diagnostics switch. Survives upgrades. |
 | `/usr/lib/systemd/system/hostpinger.service` | The unit. |
 
 The package requires `aspnetcore-runtime-10.0` from the Fedora repositories, so the runtime is
@@ -253,6 +253,7 @@ the Configuration page, as described above. Everything else is environment confi
 | `TZ` | Time zone for displayed timestamps. They are rendered server-side, so this decides what users see. Linux only — Windows takes the system time zone. |
 | `Pinger__DatabasePath` | Database location. Defaults to `/var/lib/hostpinger/hostpinger.db` on Linux and `%ProgramData%\HostPinger\hostpinger.db` on Windows. |
 | `Pinger__UserSettingsPath` | Settings overlay location. Defaults to sitting beside the database. |
+| `DOTNET_EnableDiagnostics` | `0` in the shipped Linux sysconfig, which keeps the runtime from opening a debugger transport and a diagnostics socket a service does not need. See below. |
 
 On Linux they live in `/etc/sysconfig/hostpinger` and take effect on `systemctl restart
 hostpinger`. On Windows they live in the service's `Environment` value, which the service control
@@ -347,6 +348,38 @@ sudo semodule -X 300 -i hostpinger-local.pp
 
 Read the generated `hostpinger-local.te` before installing it. audit2allow writes a rule for every
 denial it is handed, so an audit log holding unrelated ones produces a broader module than intended.
+
+## SELinux and the .NET debug pipe
+
+The same domain produces a second denial, unrelated to pinging and stranger-looking than it is:
+
+```
+SELinux is preventing .NET DebugPipe from read access on the fifo_file clr-debug-pipe-217546-26891892-in.
+```
+
+`.NET DebugPipe` is a thread inside the runtime rather than anything HostPinger runs, and the number
+in the pipe's name is the pid of the process being denied. Every .NET process on Linux creates a
+pair of FIFOs and a diagnostics socket as it starts, then waits on one of the FIFOs for a debugger
+to attach. `init_t` is granted nothing on a `fifo_file`, so the runtime is refused the pipe it
+created a moment earlier — on the unit's own tmpfs, which is what `PrivateTmp=yes` provides.
+
+Unlike the exec denial this one is cosmetic: the thread is a background listener, and the service
+starts, pings and serves without it. It is worth reading as evidence of the same mislabelled
+launcher, and it recurs on every restart until that is dealt with.
+
+The service has no use for the transport in any case, so `/etc/sysconfig/hostpinger` ships with:
+
+```
+DOTNET_EnableDiagnostics=0
+```
+
+which stops the debugger transport, the diagnostics socket and the profiler being created at all.
+Nothing is given up by it — `PrivateTmp=yes` already puts the socket beyond the reach of
+`dotnet-counters` and `dotnet-dump` unless they are run inside the service's namespace.
+
+The RPM never overwrites that file, so an installation predating this setting keeps its own copy and
+goes on logging the denial. The new default arrives beside it as `/etc/sysconfig/hostpinger.rpmnew`;
+adding the line by hand and restarting comes to the same thing.
 
 ## Development
 

@@ -10,6 +10,16 @@
 #   firewall-cmd --permanent --add-port=8080/tcp && firewall-cmd --reload
 ASPNETCORE_HTTP_PORTS=8080
 
+# The .NET runtime opens a debugger transport and a diagnostics socket as it starts, neither of
+# which an installed service has any use for: PrivateTmp= in the unit already puts both somewhere
+# dotnet-counters and dotnet-dump cannot reach without entering the service's namespace, and on a
+# confined system the runtime being refused its own debug pipe is logged as an SELinux denial.
+# This stops all three — transport, socket and profiler — being created at all.
+#
+# Comment it out on a machine where you intend to attach something, or set the narrower
+# DOTNET_EnableDiagnostics_Debugger=0, which drops the debugger but keeps the socket.
+DOTNET_EnableDiagnostics=0
+
 # The Hosts page and the graph tooltips convert timestamps to local time on the server, so this
 # decides what users see. Unset means the system time zone.
 #TZ=Europe/Berlin
