@@ -148,48 +148,94 @@ namespace HostPinger.Core.Charting
             return new ChartSeriesGeometry(segments, downMarkers);
         }
 
-        /// <summary>
-        /// Reduces samples to at most maxPoints by averaging equal-size buckets. A bucket with no
-        /// successful pings stays null (down). Samples must be time-ordered.
-        /// </summary>
-        public static IReadOnlyList<ChartSample> Downsample(IReadOnlyList<ChartSample> samples, int maxPoints)
+        /// <summary>The width of one <see cref="Downsample"/> bucket over the given range.</summary>
+        public static TimeSpan BucketDuration(DateTime rangeStartUtc, DateTime rangeEndUtc, int bucketCount)
         {
-            ArgumentOutOfRangeException.ThrowIfLessThan(maxPoints, 1);
-            if (samples.Count <= maxPoints)
+            ArgumentOutOfRangeException.ThrowIfLessThan(bucketCount, 1);
+            return (rangeEndUtc - rangeStartUtc) / bucketCount;
+        }
+
+        /// <summary>
+        /// Reduces samples to at most bucketCount points by averaging them into equal-duration time
+        /// buckets spanning [rangeStartUtc, rangeEndUtc]. A bucket holding only failed pings comes
+        /// back null (down); a bucket holding no samples at all is left out, so a stretch where
+        /// nothing was recorded stays a hole rather than being reported as an outage. Emitted
+        /// samples carry their bucket's midpoint, which puts consecutive points exactly one
+        /// <see cref="BucketDuration"/> apart and lets a caller tell the next bucket from a skipped
+        /// one by time alone. Samples must be time-ordered; any outside the range are skipped.
+        /// </summary>
+        /// <remarks>
+        /// Samples that already fit in bucketCount are handed back untouched, keeping their exact
+        /// timestamps for the hover readout. Their spacing is then the ping cadence rather than the
+        /// bucket width, so a caller splitting on a gap has to allow for both scales.
+        /// </remarks>
+        public static IReadOnlyList<ChartSample> Downsample(
+            IReadOnlyList<ChartSample> samples,
+            DateTime rangeStartUtc,
+            DateTime rangeEndUtc,
+            int bucketCount)
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(bucketCount, 1);
+            if (rangeEndUtc <= rangeStartUtc)
+            {
+                throw new ArgumentException("rangeEndUtc must be after rangeStartUtc.", nameof(rangeEndUtc));
+            }
+
+            if (samples.Count <= bucketCount)
             {
                 return samples;
             }
 
-            var result = new List<ChartSample>(maxPoints);
-            for (var bucket = 0; bucket < maxPoints; bucket++)
+            var bucketTicks = (rangeEndUtc - rangeStartUtc).Ticks / (double)bucketCount;
+            var result = new List<ChartSample>(bucketCount);
+
+            // Time-ordered input means bucket indices only ever climb, so one running bucket is
+            // enough: it is emitted when a sample lands past it, and once more at the end.
+            var openBucket = -1;
+            long valueSum = 0;
+            var valueCount = 0;
+
+            void EmitOpenBucket()
             {
-                var startIndex = (int)((long)bucket * samples.Count / maxPoints);
-                var endIndex = (int)((long)(bucket + 1) * samples.Count / maxPoints);
-                if (endIndex <= startIndex)
+                if (openBucket < 0)
+                {
+                    return;
+                }
+
+                var midpoint = new DateTime(
+                    rangeStartUtc.Ticks + (long)((openBucket + 0.5) * bucketTicks),
+                    DateTimeKind.Utc);
+                result.Add(new ChartSample(midpoint, valueCount > 0 ? (int)(valueSum / valueCount) : null));
+            }
+
+            foreach (var sample in samples)
+            {
+                if (sample.TimestampUtc < rangeStartUtc || sample.TimestampUtc > rangeEndUtc)
                 {
                     continue;
                 }
 
-                long timestampTicksSum = 0;
-                long valueSum = 0;
-                var valueCount = 0;
-                for (var i = startIndex; i < endIndex; i++)
+                // The last bucket owns both its ends, so a sample sitting exactly on rangeEndUtc
+                // joins it instead of opening a bucket past the end of the range.
+                var bucket = Math.Min(
+                    (int)((sample.TimestampUtc - rangeStartUtc).Ticks / bucketTicks),
+                    bucketCount - 1);
+                if (bucket != openBucket)
                 {
-                    timestampTicksSum += samples[i].TimestampUtc.Ticks - samples[startIndex].TimestampUtc.Ticks;
-                    if (samples[i].RoundtripMs is int value)
-                    {
-                        valueSum += value;
-                        valueCount++;
-                    }
+                    EmitOpenBucket();
+                    openBucket = bucket;
+                    valueSum = 0;
+                    valueCount = 0;
                 }
 
-                var timestamp = new DateTime(
-                    samples[startIndex].TimestampUtc.Ticks + timestampTicksSum / (endIndex - startIndex),
-                    DateTimeKind.Utc);
-                int? average = valueCount > 0 ? (int)(valueSum / valueCount) : null;
-                result.Add(new ChartSample(timestamp, average));
+                if (sample.RoundtripMs is int value)
+                {
+                    valueSum += value;
+                    valueCount++;
+                }
             }
 
+            EmitOpenBucket();
             return result;
         }
 

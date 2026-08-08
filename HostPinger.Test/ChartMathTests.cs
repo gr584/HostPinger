@@ -134,7 +134,7 @@ namespace HostPinger.Test
                 .Select(i => new ChartSample(Start.AddSeconds(i), i))
                 .ToList();
 
-            Assert.That(ChartMath.Downsample(samples, 10), Is.SameAs(samples));
+            Assert.That(ChartMath.Downsample(samples, Start, Start.AddSeconds(10), 10), Is.SameAs(samples));
         }
 
         [Test]
@@ -144,7 +144,7 @@ namespace HostPinger.Test
                 .Select(i => new ChartSample(Start.AddSeconds(i), i))
                 .ToList();
 
-            var result = ChartMath.Downsample(samples, 5);
+            var result = ChartMath.Downsample(samples, Start, Start.AddSeconds(10), 5);
 
             Assert.That(result, Has.Count.EqualTo(5));
             Assert.That(result.Select(s => s.RoundtripMs), Is.EqualTo(new int?[] { 0, 2, 4, 6, 8 }));
@@ -161,11 +161,69 @@ namespace HostPinger.Test
                 new ChartSample(Start.AddSeconds(3), null),
             };
 
-            var result = ChartMath.Downsample(samples, 2);
+            var result = ChartMath.Downsample(samples, Start, Start.AddSeconds(4), 2);
 
             Assert.That(result, Has.Count.EqualTo(2));
             Assert.That(result[0].RoundtripMs, Is.EqualTo(11));
             Assert.That(result[1].RoundtripMs, Is.Null);
+        }
+
+        [Test]
+        public void Downsample_TimestampsBucketsAtTheirMidpoints()
+        {
+            var samples = Enumerable.Range(0, 10)
+                .Select(i => new ChartSample(Start.AddSeconds(i), i))
+                .ToList();
+
+            var result = ChartMath.Downsample(samples, Start, Start.AddSeconds(10), 5);
+
+            Assert.That(
+                result.Select(s => s.TimestampUtc),
+                Is.EqualTo(new[] { 1, 3, 5, 7, 9 }.Select(s => Start.AddSeconds(s))));
+        }
+
+        [Test]
+        public void Downsample_OmitsBucketsWithNoSamples()
+        {
+            // Twelve samples clustered into the first and last minute of a ten-bucket range: the
+            // eight empty minutes in between must not come back as down, only as absent.
+            var samples = Enumerable.Range(0, 6)
+                .Select(i => new ChartSample(Start.AddSeconds(i * 5), 10))
+                .Concat(Enumerable.Range(0, 6)
+                    .Select(i => new ChartSample(Start.AddMinutes(9).AddSeconds(i * 5), 20)))
+                .ToList();
+
+            var result = ChartMath.Downsample(samples, Start, Start.AddMinutes(10), 10);
+
+            Assert.That(result, Has.Count.EqualTo(2));
+            Assert.That(result.Select(s => s.RoundtripMs), Is.EqualTo(new int?[] { 10, 20 }));
+            Assert.That(
+                result.Select(s => s.TimestampUtc),
+                Is.EqualTo(new[] { Start.AddSeconds(30), Start.AddMinutes(9).AddSeconds(30) }));
+        }
+
+        [Test]
+        public void Downsample_KeepsAdjacentBucketsInsideTheChartsGapThreshold()
+        {
+            // The regression this guards: consecutive buckets are one bucket apart, so the 1.5
+            // bucket threshold LineChart splits on must join them and break only where the data
+            // itself stops — here a middle stretch with no samples at all.
+            var end = Start.AddMinutes(10);
+            const int bucketCount = 20;
+            var samples = Enumerable.Range(0, 60)
+                .Where(i => i < 20 || i >= 40)
+                .Select(i => new ChartSample(Start.AddSeconds(i * 10), 10))
+                .ToList();
+
+            var reduced = ChartMath.Downsample(samples, Start, end, bucketCount);
+            var maxGap = ChartMath.BucketDuration(Start, end, bucketCount) * 1.5;
+            var geometry = ChartMath.BuildGeometry(reduced, Start, end, 100, 100, 100, maxGap);
+
+            Assert.That(reduced, Has.Count.EqualTo(14));
+            Assert.That(geometry.Segments, Has.Count.EqualTo(2));
+            Assert.That(geometry.Segments[0], Has.Count.EqualTo(7));
+            Assert.That(geometry.Segments[1], Has.Count.EqualTo(7));
+            Assert.That(geometry.DownMarkers, Is.Empty);
         }
 
         [Test]

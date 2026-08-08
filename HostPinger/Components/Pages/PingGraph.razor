@@ -29,7 +29,7 @@ else
             else
             {
                 <LineChart Series="_series" RangeStartUtc="_rangeStart" RangeEndUtc="_rangeEnd" UpdateInterval="_updateInterval"
-                           PlotDeviceWidthChanged="OnPlotDeviceWidthChanged" />
+                           BucketDuration="_bucketDuration" PlotDeviceWidthChanged="OnPlotDeviceWidthChanged" />
             }
         </div>
 
@@ -100,7 +100,7 @@ else
         ("7 d", TimeSpan.FromDays(7)),
     ];
 
-    // Each series is downsampled to one point per device pixel of plot width: any denser and points
+    // Each series is bucketed into one bucket per device pixel of plot width: any denser and points
     // share a physical pixel column, where the extra detail cannot be seen but still costs query
     // payload and SVG. Device pixels rather than CSS pixels, so a HiDPI screen gets the resolution
     // it can actually show — the points then land on sub-CSS-pixel x coordinates, which the SVG
@@ -130,6 +130,7 @@ else
     private TimeSpan _updateInterval;
     private int _pointsPerSeries = DefaultPointsPerSeries;
     private int _loadedPointsPerSeries = DefaultPointsPerSeries;
+    private TimeSpan _bucketDuration;
     private bool _awaitingFirstMeasurement = true;
 
     private string SelectionSummary => _selected.Count switch
@@ -256,6 +257,10 @@ else
         // densities.
         var points = _pointsPerSeries;
         _loadedPointsPerSeries = points;
+
+        // Derived from the very range and count the series below are built with, so the chart can
+        // never be told a bucket width the samples it is holding were not bucketed at.
+        _bucketDuration = ChartMath.BucketDuration(_rangeStart, _rangeEnd, points);
         _series = _allHosts
             .Select((host, index) => (host, index))
             .Where(t => _selected.Contains(t.host.Id))
@@ -264,6 +269,8 @@ else
                 ChartPalette.GetColor(t.index),
                 ChartMath.Downsample(
                     samplesByHost.GetValueOrDefault(t.host.Id) ?? Array.Empty<ChartSample>(),
+                    _rangeStart,
+                    _rangeEnd,
                     points)))
             .ToList();
     }

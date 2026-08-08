@@ -117,6 +117,14 @@
     [Parameter] public TimeSpan UpdateInterval { get; set; }
 
     /// <summary>
+    /// The width of one bucket the samples in <see cref="Series"/> were reduced into, or
+    /// <see cref="TimeSpan.Zero"/> when they are raw pings. Sets the scale at which a hole in a
+    /// downsampled series is real: bucketed points sit exactly one bucket apart, so a wider step
+    /// than that is a bucket that had nothing to average.
+    /// </summary>
+    [Parameter] public TimeSpan BucketDuration { get; set; }
+
+    /// <summary>
     /// Called with the plot area's width in <em>device</em> pixels (its CSS width scaled by
     /// devicePixelRatio) once it has been measured, and again whenever it changes, so the caller can
     /// match how densely it samples to the resolution actually available. The chart's own geometry
@@ -240,7 +248,14 @@
         _yTicks = ChartMath.NiceTicks(maxValue, 6);
         _scaleMax = _yTicks[^1];
         _xTicks = ChartMath.TimeTicks(RangeStartUtc, RangeEndUtc, 7);
-        TimeSpan? maxGap = UpdateInterval > TimeSpan.Zero ? UpdateInterval * 10 : null;
+        // A break in the line has two scales and the wider one wins, because which applies depends
+        // on how the samples arrived. Sparser than the buckets, and they are passed through raw, so
+        // the ping cadence sets it; denser, and they are bucket midpoints exactly one bucket apart,
+        // where 1.5 buckets separates "the next bucket" from "a bucket with no data in it".
+        var intervalGap = UpdateInterval > TimeSpan.Zero ? UpdateInterval * 10 : TimeSpan.Zero;
+        var bucketGap = BucketDuration > TimeSpan.Zero ? BucketDuration * 1.5 : TimeSpan.Zero;
+        var gap = intervalGap > bucketGap ? intervalGap : bucketGap;
+        TimeSpan? maxGap = gap > TimeSpan.Zero ? gap : null;
         _rendered = visible
             .Select((s, i) => new RenderedSeries(
                 s,
