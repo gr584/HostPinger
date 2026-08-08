@@ -17,7 +17,7 @@ namespace HostPinger.Core.Services
         /// Guards against a nonsensical configured timeout; a minute is well past useful, and Ping
         /// rejects a negative one outright.
         /// </summary>
-        private const int MaxTimeoutMilliseconds = 60_000;
+        private const int MaxTimeoutSeconds = 60;
 
         private readonly IDbContextFactory<HostPingerDbContext> _dbFactory;
         private readonly IPingSender _pingSender;
@@ -92,7 +92,7 @@ namespace HostPinger.Core.Services
             }
 
             var timestampUtc = _timeProvider.GetUtcNow().UtcDateTime;
-            var timeoutMilliseconds = Math.Clamp(options.TimeoutMilliseconds, 1, MaxTimeoutMilliseconds);
+            var timeoutMilliseconds = Math.Clamp(options.TimeoutSeconds, 1, MaxTimeoutSeconds) * 1000;
             var attempts = await Task.WhenAll(hosts.Select(async host => new PingAttempt
             {
                 HostId = host.Id,

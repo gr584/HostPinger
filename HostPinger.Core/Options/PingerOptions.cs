@@ -28,7 +28,7 @@ namespace HostPinger.Core.Options
         public int IntervalSeconds { get; set; } = 30;
 
         /// <summary>How long to wait for a reply before recording the host as down.</summary>
-        public int TimeoutMilliseconds { get; set; } = 5000;
+        public int TimeoutSeconds { get; set; } = 5;
 
         /// <summary>
         /// Maximum database file size. The oldest ping attempts are pruned when the file grows

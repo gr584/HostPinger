@@ -72,11 +72,11 @@
                 <dt><label for="ping-timeout">Timeout</label></dt>
                 <dd>
                     <div class="input-group input-group-sm config-input">
-                        <InputNumber id="ping-timeout" class="form-control" @bind-Value="_pingerForm.TimeoutMilliseconds" />
-                        <span class="input-group-text">ms</span>
+                        <InputNumber id="ping-timeout" class="form-control" @bind-Value="_pingerForm.TimeoutSeconds" />
+                        <span class="input-group-text">seconds</span>
                         <button type="submit" class="btn btn-primary">Save</button>
                     </div>
-                    <ValidationMessage For="() => _pingerForm.TimeoutMilliseconds" />
+                    <ValidationMessage For="() => _pingerForm.TimeoutSeconds" />
                     <div class="form-text">
                         How long to wait for a reply before recording the host as down. Saving stores
                         both pinger settings.
@@ -94,7 +94,7 @@
 @code {
     // Upper bounds the form accepts; the pinger clamps to the same interval and timeout ceilings.
     private const int IntervalUpperBoundSeconds = 86_400;
-    private const int TimeoutUpperBoundMilliseconds = 60_000;
+    private const int TimeoutUpperBoundSeconds = 60;
     private const int SizeUpperBoundMb = 1_000_000;
 
     private readonly DatabaseForm _databaseForm = new();
@@ -108,7 +108,7 @@
     // The settings the running application is using. Kept alongside the form values so an edit
     // that has not been saved yet cannot skew the size projections below it.
     private int _effectiveIntervalSeconds;
-    private int _effectiveTimeoutMilliseconds;
+    private int _effectiveTimeoutSeconds;
     private int _effectiveMaxDatabaseSizeMb;
 
     protected override async Task OnInitializedAsync()
@@ -152,14 +152,14 @@
             _pingerForm.IntervalSeconds = options.IntervalSeconds;
         }
 
-        if (_pingerForm.TimeoutMilliseconds == _effectiveTimeoutMilliseconds)
+        if (_pingerForm.TimeoutSeconds == _effectiveTimeoutSeconds)
         {
-            _pingerForm.TimeoutMilliseconds = options.TimeoutMilliseconds;
+            _pingerForm.TimeoutSeconds = options.TimeoutSeconds;
         }
 
         _effectiveMaxDatabaseSizeMb = options.MaxDatabaseSizeMb;
         _effectiveIntervalSeconds = options.IntervalSeconds;
-        _effectiveTimeoutMilliseconds = options.TimeoutMilliseconds;
+        _effectiveTimeoutSeconds = options.TimeoutSeconds;
     }
 
     private async Task LoadStatsAsync()
@@ -194,12 +194,12 @@
             new PingerSettingsUpdate
             {
                 IntervalSeconds = _pingerForm.IntervalSeconds,
-                TimeoutMilliseconds = _pingerForm.TimeoutMilliseconds,
+                TimeoutSeconds = _pingerForm.TimeoutSeconds,
             },
             _cts.Token);
 
         _effectiveIntervalSeconds = _pingerForm.IntervalSeconds;
-        _effectiveTimeoutMilliseconds = _pingerForm.TimeoutMilliseconds;
+        _effectiveTimeoutSeconds = _pingerForm.TimeoutSeconds;
         _pingerStatus = "Saved — applied from the next ping round.";
         await LoadStatsAsync();
     }
@@ -271,7 +271,7 @@
         [Range(1, IntervalUpperBoundSeconds, ErrorMessage = "Enter an interval between 1 and 86400 seconds.")]
         public int IntervalSeconds { get; set; }
 
-        [Range(1, TimeoutUpperBoundMilliseconds, ErrorMessage = "Enter a timeout between 1 and 60000 ms.")]
-        public int TimeoutMilliseconds { get; set; }
+        [Range(1, TimeoutUpperBoundSeconds, ErrorMessage = "Enter a timeout between 1 and 60 seconds.")]
+        public int TimeoutSeconds { get; set; }
     }
 }

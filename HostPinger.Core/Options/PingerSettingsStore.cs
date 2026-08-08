@@ -33,9 +33,9 @@ namespace HostPinger.Core.Options
                     section[nameof(PingerOptions.IntervalSeconds)] = intervalSeconds;
                 }
 
-                if (update.TimeoutMilliseconds is int timeoutMilliseconds)
+                if (update.TimeoutSeconds is int timeoutSeconds)
                 {
-                    section[nameof(PingerOptions.TimeoutMilliseconds)] = timeoutMilliseconds;
+                    section[nameof(PingerOptions.TimeoutSeconds)] = timeoutSeconds;
                 }
 
                 if (update.MaxDatabaseSizeMb is int maxDatabaseSizeMb)

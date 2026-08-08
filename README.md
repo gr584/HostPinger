@@ -72,7 +72,7 @@ file beside the database and they take effect from the next ping round — no re
 to edit on disk.
 
 - **Ping interval** — how often every enabled host is pinged. Default 30 seconds.
-- **Timeout** — how long to wait for a reply before recording the host as down. Default 5000 ms.
+- **Timeout** — how long to wait for a reply before recording the host as down. Default 5 seconds.
 - **Maximum database size** — the oldest attempts are pruned once the file grows past this.
   Default 100 MB; 0 disables pruning and lets the file grow without bound.
 - **Capacity estimate** — the current file size, how fast it is growing at the present host count

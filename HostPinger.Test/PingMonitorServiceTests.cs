@@ -75,11 +75,11 @@ namespace HostPinger.Test
         /// The timeout reaches the pinger from a file the user can edit, so a value that
         /// System.Net.NetworkInformation.Ping would reject must be clamped rather than thrown.
         /// </summary>
-        [TestCase(2_500, 2_500)]
-        [TestCase(0, 1)]
-        [TestCase(-5, 1)]
+        [TestCase(3, 3_000)]
+        [TestCase(0, 1_000)]
+        [TestCase(-5, 1_000)]
         [TestCase(999_999, 60_000)]
-        public async Task RunRound_ClampsTheConfiguredTimeout(int configured, int expected)
+        public async Task RunRound_ClampsTheConfiguredTimeout(int configuredSeconds, int expectedMilliseconds)
         {
             await using (var db = new HostPingerDbContext(_options))
             {
@@ -88,11 +88,11 @@ namespace HostPinger.Test
             }
 
             var sender = new FakePingSender();
-            var service = CreateService(sender, new PingerOptions { TimeoutMilliseconds = configured });
+            var service = CreateService(sender, new PingerOptions { TimeoutSeconds = configuredSeconds });
 
             await service.RunRoundAsync();
 
-            Assert.That(sender.Timeouts, Is.EqualTo(new[] { expected }));
+            Assert.That(sender.Timeouts, Is.EqualTo(new[] { expectedMilliseconds }));
         }
 
         private PingMonitorService CreateService(IPingSender sender, PingerOptions? options = null)
