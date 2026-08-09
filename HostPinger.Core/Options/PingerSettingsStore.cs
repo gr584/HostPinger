@@ -16,12 +16,9 @@ namespace HostPinger.Core.Options
 
         public string FilePath => paths.SettingsPath;
 
-        public async Task SaveAsync(PingerSettingsUpdate update, CancellationToken cancellationToken = default)
-        {
-            await _gate.WaitAsync(cancellationToken);
-            try
+        public Task SaveAsync(PingerSettingsUpdate update, CancellationToken cancellationToken = default) =>
+            UpdateAsync(root =>
             {
-                var root = await ReadRootAsync(cancellationToken);
                 if (root[PingerOptions.SectionName] is not JsonObject section)
                 {
                     section = [];
@@ -52,7 +49,49 @@ namespace HostPinger.Core.Options
                 {
                     section[nameof(PingerOptions.MaxDatabaseSizeMb)] = maxDatabaseSizeMb;
                 }
+            }, cancellationToken);
 
+        /// <summary>
+        /// Stores the hash of the web UI password, or records that there is none when
+        /// <paramref name="hash"/> is null, which leaves every action unlocked again.
+        /// </summary>
+        /// <remarks>
+        /// A method of its own rather than another <see cref="PingerSettingsUpdate"/> property,
+        /// because null there means "leave this setting alone" and removing the password has to be
+        /// sayable.
+        /// <para>
+        /// Removing writes the key as empty rather than deleting it. The overlay is the last
+        /// configuration source, so a written key is what overrides the layers underneath it: a
+        /// password that came from appsettings.json or a <c>Security__PasswordHash</c> environment
+        /// variable is only removed by saying so here. Deleting the key instead would take the
+        /// overlay's own value away and let that one back in — the page would report a removal that
+        /// left the application locked, having just signed the person out of it.
+        /// </para>
+        /// </remarks>
+        public Task SavePasswordHashAsync(string? hash, CancellationToken cancellationToken = default) =>
+            UpdateAsync(root =>
+            {
+                if (root[SecurityOptions.SectionName] is not JsonObject section)
+                {
+                    section = [];
+                    root[SecurityOptions.SectionName] = section;
+                }
+
+                section[nameof(SecurityOptions.PasswordHash)] = hash ?? string.Empty;
+            }, cancellationToken);
+
+        /// <summary>
+        /// Applies <paramref name="edit"/> to the whole overlay and writes it back, one save at a
+        /// time. Every setting the edit does not touch survives, whether it belongs to another
+        /// group on the Configuration page or to nothing this application knows about.
+        /// </summary>
+        private async Task UpdateAsync(Action<JsonObject> edit, CancellationToken cancellationToken)
+        {
+            await _gate.WaitAsync(cancellationToken);
+            try
+            {
+                var root = await ReadRootAsync(cancellationToken);
+                edit(root);
                 Directory.CreateDirectory(Path.GetDirectoryName(paths.SettingsPath)!);
                 await File.WriteAllTextAsync(paths.SettingsPath, root.ToJsonString(WriteOptions), cancellationToken);
             }

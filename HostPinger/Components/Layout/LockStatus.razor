@@ -1,0 +1,238 @@
+@rendermode InteractiveServer
+@using HostPinger.Security
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.AspNetCore.WebUtilities
+@inject PasswordGate Gate
+@inject NavigationManager Navigation
+@inject LockPrompt Prompt
+@implements IDisposable
+
+@*
+    Says whether this browser may change anything, and carries the overlay that changes it. Nothing
+    at all while no password is set: there is no state to report and nothing to unlock.
+
+    Interactive, so the overlay opens, closes, takes Escape and a click away and focuses its field
+    the way the host form does. The form inside it is a plain browser post rather than anything
+    handled here, because unlocking writes a cookie and this component is a circuit with no response
+    left to write one on; it lands on the Unlock and Lock pages, which are rendered statically and
+    can. That also makes the antiforgery token the framework's business rather than ours.
+*@
+
+@if (Gate.IsPasswordSet)
+{
+    <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="Open"
+            title="@(_isUnlocked ? "Lock this browser" : "Unlock to make changes")">
+        @(_isUnlocked ? "Unlocked" : "Locked")
+    </button>
+}
+
+@if (_isOpen)
+{
+    @* Bootstrap's modal markup driven from here, the same way the host form does it. *@
+    <div class="modal d-block" tabindex="-1" aria-modal="true" role="dialog"
+         @onkeydown="OnKeyDown" @onclick="OnOverlayClick" @onmousedown="() => _pressedInside = false">
+        <div class="modal-dialog modal-dialog-centered lock-dialog">
+            @*
+                The content box stops both events rather than the dialog box, because
+                modal-dialog-centered stretches that one to the full height of the overlay — a
+                click above or below the form has to reach the overlay to count as a click away.
+            *@
+            <div class="modal-content" @onclick:stopPropagation
+                 @onmousedown="() => _pressedInside = true" @onmousedown:stopPropagation>
+                @if (_isUnlocked)
+                {
+                    <form method="post" action="@LockAction">
+                        <AntiforgeryToken />
+                        <input type="hidden" name="@LockFormNames.Handler" value="@LockFormNames.LockHandler" />
+                        <div class="modal-header">
+                            <h5 class="modal-title">Lock</h5>
+                            <button type="button" class="btn-close" aria-label="Close" @onclick="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                            Changing hosts or settings from this browser will need the password again.
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-outline-secondary btn-sm" @onclick="Close">Cancel</button>
+                            <button type="submit" class="btn btn-primary btn-sm">Lock</button>
+                        </div>
+                    </form>
+                }
+                else
+                {
+                    <form method="post" action="@UnlockAction">
+                        <AntiforgeryToken />
+                        <input type="hidden" name="@LockFormNames.Handler" value="@LockFormNames.UnlockHandler" />
+                        <input type="hidden" name="@LockFormNames.FromOverlay" value="@CurrentPath" />
+                        <div class="modal-header">
+                            <h5 class="modal-title">Unlock</h5>
+                            <button type="button" class="btn-close" aria-label="Close" @onclick="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                            @if (_error is not null)
+                            {
+                                <div class="alert alert-danger py-2">@_error</div>
+                            }
+                            <label class="form-label" for="unlock-password">Password</label>
+                            <input id="unlock-password" type="password" name="@LockFormNames.Password"
+                                   class="form-control form-control-sm" autocomplete="current-password"
+                                   @ref="_passwordInput" />
+                            <div class="form-text">
+                                Unlocks adding, editing and removing hosts, pausing them, and changing
+                                settings, for this browser until it is closed.
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-outline-secondary btn-sm" @onclick="Close">Cancel</button>
+                            <button type="submit" class="btn btn-primary btn-sm">Unlock</button>
+                        </div>
+                    </form>
+                }
+            </div>
+        </div>
+    </div>
+    <div class="modal-backdrop show"></div>
+}
+
+@code {
+    [CascadingParameter]
+    private Task<AuthenticationState>? AuthenticationState { get; set; }
+
+    private bool _isUnlocked;
+    private bool _isOpen;
+    private string? _destination;
+    private bool _pressedInside;
+    private bool _focusPassword;
+    private bool _shouldClearMarker;
+    private string? _error;
+    private ElementReference _passwordInput;
+
+    protected override void OnInitialized() => Prompt.Requested += OnRequested;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        var user = AuthenticationState is null ? null : (await AuthenticationState).User;
+        _isUnlocked = Gate.IsUnlocked(user);
+
+        // Two ways of arriving with the overlay owed, and both are page loads rather than enhanced
+        // navigations: a wrong password coming back from the Unlock page, and a link from a page
+        // that had no other way to ask. That is what makes this the place to notice them — the
+        // component is being built along with the page, rather than living through a change of
+        // address it would never hear about here.
+        var wasRefused = Marker(LockFormNames.FailedQuery) is not null;
+        if (!wasRefused && Marker(LockFormNames.OpenQuery) is null)
+        {
+            return;
+        }
+
+        _shouldClearMarker = true;
+
+        // A marker that has outlived its errand — a link followed twice, a page reopened from
+        // history, a password since removed — comes off the address without doing anything.
+        if (!_isUnlocked && Gate.IsPasswordSet)
+        {
+            _error = wasRefused ? "That is not the password." : null;
+            _destination = Marker(LockFormNames.NextQuery);
+            OpenNow();
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // Focusing the field also puts the keyboard inside the overlay, which is what lets Escape
+        // reach OnKeyDown.
+        if (_focusPassword)
+        {
+            _focusPassword = false;
+            await _passwordInput.FocusAsync();
+        }
+
+        // Taking the marker off the address is a navigation, so it waits for a render that only
+        // happens once this is running interactively: doing it while the page is being prerendered
+        // would turn it into a redirect, and the overlay it was meant to open would never be drawn.
+        if (_shouldClearMarker)
+        {
+            _shouldClearMarker = false;
+            Navigation.NavigateTo(ClearedUrl, replace: true);
+        }
+    }
+
+    private void OnRequested(string? destination)
+    {
+        _destination = destination;
+        _error = null;
+        OpenNow();
+        StateHasChanged();
+    }
+
+    private void Open()
+    {
+        _destination = null;
+        _error = null;
+        OpenNow();
+    }
+
+    private void OpenNow()
+    {
+        _pressedInside = false;
+        _isOpen = true;
+        _focusPassword = !_isUnlocked;
+    }
+
+    private void Close()
+    {
+        _isOpen = false;
+        _error = null;
+        _destination = null;
+    }
+
+    private void OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape")
+        {
+            Close();
+        }
+    }
+
+    /// <summary>
+    /// Cancels on a click away. Dragging a text selection out of the field also raises a click on
+    /// the overlay, so a press that started inside it is not one.
+    /// </summary>
+    private void OnOverlayClick()
+    {
+        if (!_pressedInside)
+        {
+            Close();
+        }
+    }
+
+    private string? Marker(string name) =>
+        QueryHelpers.ParseQuery(Navigation.ToAbsoluteUri(Navigation.Uri).Query)
+            .TryGetValue(name, out var value) ? value.ToString() : null;
+
+    /// <summary>This page without the markers that may have asked for the overlay.</summary>
+    private string ClearedUrl => Navigation.GetUriWithQueryParameters(
+        new Dictionary<string, object?>
+        {
+            [LockFormNames.FailedQuery] = null,
+            [LockFormNames.OpenQuery] = null,
+            [LockFormNames.NextQuery] = null,
+        });
+
+    /// <summary>The page the overlay is open on, which is where a refusal comes back to.</summary>
+    private string CurrentPath => Navigation.ToAbsoluteUri(ClearedUrl).PathAndQuery;
+
+    /// <summary>
+    /// Where to go once unlocked: wherever the asker wanted, or back to this page. Only ever a path
+    /// within the application, which is also all the receiving page accepts.
+    /// </summary>
+    private string ReturnPath => LocalUrl.OrRoot(_destination ?? CurrentPath);
+
+    private string UnlockAction =>
+        $"/unlock?{LockFormNames.ReturnUrl}={Uri.EscapeDataString(ReturnPath)}";
+
+    // Locking has nowhere else to be: it stays on the page it was done from.
+    private string LockAction =>
+        $"/lock?{LockFormNames.ReturnUrl}={Uri.EscapeDataString(CurrentPath)}";
+
+    public void Dispose() => Prompt.Requested -= OnRequested;
+}

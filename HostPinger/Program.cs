@@ -2,6 +2,8 @@ using HostPinger.Components;
 using HostPinger.Core.Data;
 using HostPinger.Core.Options;
 using HostPinger.Core.Services;
+using HostPinger.Security;
+using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting.Systemd;
@@ -47,13 +49,40 @@ namespace HostPinger
             builder.Configuration.AddJsonFile(paths.SettingsPath, optional: true, reloadOnChange: true);
 
             builder.Services.Configure<PingerOptions>(builder.Configuration.GetSection(PingerOptions.SectionName));
+            builder.Services.Configure<SecurityOptions>(builder.Configuration.GetSection(SecurityOptions.SectionName));
             builder.Services.AddSingleton(paths);
             builder.Services.AddSingleton<PingerSettingsStore>();
             builder.Services.AddDbContextFactory<HostPingerDbContext>(options => options.UseSqlite($"Data Source={paths.DatabasePath}"));
 
+            // Unlocking the actions that change hosts and settings. There are no accounts: signing
+            // in means holding the one password, and the cookie says nothing but that. It is
+            // deliberately not persistent, so closing the browser locks it again, and SameAsRequest
+            // rather than Always because the service is normally reached over plain HTTP — a
+            // cookie marked secure there would never come back.
+            builder.Services.AddSingleton<PasswordGate>();
+            builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+                .AddCookie(options =>
+                {
+                    options.Cookie.Name = "hostpinger-unlock";
+                    options.Cookie.HttpOnly = true;
+                    options.Cookie.SameSite = SameSiteMode.Lax;
+                    options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+                    options.LoginPath = "/unlock";
+                    options.ReturnUrlParameter = "returnUrl";
+                });
+
+            // Puts the signed-in principal where the components can see it, which is what the pages
+            // pass to PasswordGate.
+            builder.Services.AddCascadingAuthenticationState();
+
+            // How a page asks the layout for the unlock overlay. Scoped: one per rendered page,
+            // shared by the component asking and the overlay listening.
+            builder.Services.AddScoped<LockPrompt>();
+
             // Off Windows the key ring defaults to the user profile, which a container throws away
-            // on every restart; the Blazor circuits of any open browser then fail to reconnect.
-            // Windows keeps its DPAPI-backed default, which the installed service already persists.
+            // on every restart; the Blazor circuits of any open browser then fail to reconnect, and
+            // the unlock cookie, which the same keys protect, stops being readable. Windows keeps
+            // its DPAPI-backed default, which the installed service already persists.
             if (!OperatingSystem.IsWindows())
             {
                 builder.Services.AddDataProtection()
@@ -85,6 +114,10 @@ namespace HostPinger
             }
 
             app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
+
+            // Ahead of the antiforgery middleware, so the unlock and password forms are validated
+            // against the browser they were served to and the pages below know who is asking.
+            app.UseAuthentication();
             app.UseAntiforgery();
 
             // Liveness probe for container orchestration. It deliberately touches nothing: a

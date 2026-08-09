@@ -93,11 +93,79 @@ namespace HostPinger.Test
             Assert.That(Bind().IntervalSeconds, Is.EqualTo(45));
         }
 
+        /// <summary>
+        /// The password lives in a section of its own in the same file, so neither group of
+        /// settings can be saved over the other.
+        /// </summary>
+        [Test]
+        public async Task SavePasswordHash_AndSave_LeaveEachOtherAlone()
+        {
+            var store = new PingerSettingsStore(_paths);
+            var hash = PasswordHash.Hash("correct horse battery staple");
+
+            await store.SavePasswordHashAsync(hash);
+            await store.SaveAsync(new PingerSettingsUpdate { IntervalSeconds = 90 });
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(BindSecurity().PasswordHash, Is.EqualTo(hash));
+                Assert.That(Bind().IntervalSeconds, Is.EqualTo(90));
+            });
+        }
+
+        [Test]
+        public async Task SavePasswordHash_LeavesNoPasswordInForceWhenGivenNull()
+        {
+            var store = new PingerSettingsStore(_paths);
+            await store.SavePasswordHashAsync(PasswordHash.Hash("correct horse battery staple"));
+            await store.SaveAsync(new PingerSettingsUpdate { IntervalSeconds = 90 });
+
+            await store.SavePasswordHashAsync(null);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(BindSecurity().PasswordHash, Is.Empty);
+                Assert.That(Bind().IntervalSeconds, Is.EqualTo(90), "the pinger settings must survive it");
+            });
+        }
+
+        /// <summary>
+        /// The overlay is the last configuration source, so removing the password has to write the
+        /// key rather than delete it: deleting would uncover a hash configured in appsettings.json
+        /// or the environment and leave the application locked by a password the page has just
+        /// said was removed.
+        /// </summary>
+        [Test]
+        public async Task SavePasswordHash_OverridesAPasswordConfiguredUnderneathTheOverlay()
+        {
+            var appSettingsPath = Path.Combine(_directory, "appsettings.json");
+            await File.WriteAllTextAsync(
+                appSettingsPath,
+                $$$"""{"{{{SecurityOptions.SectionName}}}": {"PasswordHash": "configured-elsewhere"}}""");
+
+            await new PingerSettingsStore(_paths).SavePasswordHashAsync(null);
+
+            // Layered the way Program.cs layers them: the overlay is added last and so wins.
+            var configuration = new ConfigurationBuilder()
+                .AddJsonFile(appSettingsPath)
+                .AddJsonFile(_paths.SettingsPath)
+                .Build();
+            var options = configuration.GetSection(SecurityOptions.SectionName).Get<SecurityOptions>();
+
+            Assert.That(options?.PasswordHash, Is.Empty);
+        }
+
         /// <summary>Reads the overlay the way the application does, proving the JSON shape matches.</summary>
         private PingerOptions Bind()
         {
             var configuration = new ConfigurationBuilder().AddJsonFile(_paths.SettingsPath).Build();
             return configuration.GetSection(PingerOptions.SectionName).Get<PingerOptions>() ?? new PingerOptions();
+        }
+
+        private SecurityOptions BindSecurity()
+        {
+            var configuration = new ConfigurationBuilder().AddJsonFile(_paths.SettingsPath).Build();
+            return configuration.GetSection(SecurityOptions.SectionName).Get<SecurityOptions>() ?? new SecurityOptions();
         }
     }
 }

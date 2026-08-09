@@ -1,0 +1,65 @@
+@page "/lock"
+@using HostPinger.Security
+@using Microsoft.AspNetCore.Authentication
+@using Microsoft.AspNetCore.Authentication.Cookies
+@inject PasswordGate Gate
+@inject NavigationManager Navigation
+
+@* Where the lock overlay posts, and a page in its own right; see the note on Unlock. *@
+
+<PageTitle>HostPinger - Lock</PageTitle>
+
+<h1>Lock</h1>
+
+<div class="row">
+    <div class="col-12 col-md-8 col-xl-5">
+        <div class="card">
+            <div class="card-body">
+                @if (!Gate.IsPasswordSet)
+                {
+                    <p>No password is set, so there is nothing to lock.</p>
+                    <a class="btn btn-primary btn-sm" href="password">Set a password</a>
+                }
+                else if (!Gate.IsUnlocked(HttpContext?.User))
+                {
+                    <p>This browser is already locked.</p>
+                    <a class="btn btn-primary btn-sm" href="/">Back to hosts</a>
+                }
+                else
+                {
+                    @*
+                        A button rather than a link: a plain link that locked on the way through
+                        would fire for anything that follows links on its own, and a browser that
+                        prefetches would lock itself.
+                    *@
+                    <form method="post" @formname="@LockFormNames.LockHandler" @onsubmit="SubmitAsync">
+                        <AntiforgeryToken />
+                        <p>Changing hosts or settings from this browser will need the password again.</p>
+                        <button type="submit" class="btn btn-primary btn-sm">Lock</button>
+                        <a class="btn btn-outline-secondary btn-sm" href="/">Cancel</a>
+                    </form>
+                }
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
+
+    [SupplyParameterFromQuery(Name = LockFormNames.ReturnUrl)]
+    private string? ReturnUrl { get; set; }
+
+    /// <summary>Where to go once locked, which is the page the overlay was opened on.</summary>
+    private string ReturnHref => LocalUrl.OrRoot(ReturnUrl);
+
+    private async Task SubmitAsync()
+    {
+        await HttpContext!.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+
+        // BlazorDisableThrowNavigationException is set for this project, so the call returns
+        // instead of unwinding the handler.
+        Navigation.NavigateTo(ReturnHref);
+    }
+}

@@ -27,6 +27,10 @@ the browser and follows it as it changes, **Light** and **Dark** pin it. The cho
 by the browser that made it rather than by the service, so each machine viewing the same
 HostPinger can be set differently.
 
+Beside it, once a password has been set, is whether this browser is **Locked** or **Unlocked**, and
+clicking it opens the overlay that changes that — see *Locking* below. Everything described here
+can be read either way; the password only decides who can change something.
+
 ### Hosts — `/`
 
 The list of everything being monitored, one row per host, refreshed every five seconds. Clicking a
@@ -41,7 +45,7 @@ row opens that host's ping graph.
   retrying goes on showing whatever outage it last had.
 - **Add, edit and delete** — a host is a name and an address, either an IP address or a name to
   resolve. Addresses are unique, and a delete asks for confirmation because it takes the host's
-  recorded history with it.
+  recorded history with it. Offered only while the browser is unlocked, as below.
 - **Pause and resume** — the toggle stops a host being pinged without deleting it, so its history
   survives planned maintenance.
 
@@ -82,7 +86,8 @@ and resizes with the window.
 
 The settings that can be changed while the service is running. Saving writes them to an overlay
 file beside the database and they take effect from the next ping round — no restart, and nothing
-to edit on disk.
+to edit on disk. They can be read whether or not the browser is unlocked, and saved only when it
+is.
 
 - **Ping interval** — how often every enabled host is pinged. Default 30 seconds.
 - **Timeout** — how long to wait for a reply before recording the host as down. Default 5 seconds.
@@ -101,6 +106,43 @@ to edit on disk.
   Default 100 MB; 0 disables pruning and lets the file grow without bound.
 - **Capacity estimate** — the current file size, how fast it is growing at the present host count
   and interval, and roughly how much history fits inside the limit at that rate.
+- **Security** — whether a password is set, and the way to `/password` to set, change or remove
+  one.
+
+### Locking
+
+A single password, and no accounts. It covers everything that changes something: adding, editing,
+deleting, pausing and resuming hosts, and saving any setting. Everything else — the host list, the
+graph, the settings as they stand, this page, `/health` — is readable by anyone who can reach the
+service, locked or not.
+
+- **Unlocking happens in an overlay**, over whatever page is open, the way adding or editing a host
+  does. The **Locked** button in the top right opens it, as does the *Unlock* offered wherever a
+  page has had to disable something; **Unlocked** opens the same overlay to lock again. Escape or a
+  click outside closes it without doing anything.
+- **No password is set by default**, and nothing is locked until one is. A HostPinger that nobody
+  has given a password behaves exactly as it did before the feature existed, and says so on the
+  Configuration page.
+- **Unlocking is per browser and lasts until that browser is closed.** It is not remembered any
+  longer than that, and nothing is remembered about who unlocked it — there is nobody to remember.
+  Locking applies from the next page each open window loads, so a window left sitting on the host
+  list keeps what it had until it is used again.
+- **Changing the password locks every browser again**, including the one that changed it, which is
+  signed straight back in under the new one. Removing it unlocks everything for everyone.
+- **Every attempt is logged.** A wrong password — on the unlock page, or as the current password
+  when changing or removing one — is a warning naming the address it came from, and unlocking,
+  setting, changing and removing are recorded beside them, so a run of failures can be read
+  against whether any of them worked. Nothing throttles the unlock page, so the log is where a
+  run of guesses shows up. The address is the one the connection was opened from, which behind a
+  reverse proxy is the proxy: no forwarded headers are trusted. Passwords themselves are never
+  written to the log.
+- **The password is stored hashed** — PBKDF2 over a random salt — in the settings overlay beside
+  the database, and only ever compared against. There is nothing to read back out of it, which
+  also means a forgotten one cannot be recovered: delete the `Security` section from
+  `usersettings.json` and the service unlocks itself within seconds, without a restart.
+- **It travels in the clear over plain HTTP**, which is how the service is normally reached. On a
+  network where that matters, put something that terminates TLS in front of it. The password stops
+  a passer-by changing the monitoring; it is not a defence against someone watching the wire.
 
 ## How the monitoring works
 
@@ -133,6 +175,9 @@ to edit on disk.
 
 - One SQLite file holds the hosts and every ping attempt. Its schema is migrated automatically at
   startup, so an upgrade needs no separate step.
+- The settings edited on the Configuration page, and the hashed password if one is set, live in a
+  small JSON file beside the database rather than inside it. It holds only what has been changed
+  from the defaults, and can be read or repaired with a text editor.
 - Pruning deletes the oldest attempts in batches until the file is back under the limit, and the
   file is vacuumed incrementally as it goes so the space is actually returned rather than left as
   free pages.
@@ -145,7 +190,8 @@ to edit on disk.
   `hostpinger`, and starts with the machine either way.
 - The database, the settings overlay and the data protection keys live under
   `%ProgramData%\HostPinger` on Windows and `/var/lib/hostpinger` on Linux. Both survive an
-  upgrade or an uninstall.
+  upgrade or an uninstall. The keys are what let an unlocked browser stay unlocked across a
+  restart of the service, as well as reconnecting a page that was open when it went down.
 - `/health` answers for liveness probes. It deliberately touches nothing, so a pruning pass
   holding the database busy is not read as an unhealthy service.
 - Timestamps are rendered on the server, so the time zone the service runs in is what everyone

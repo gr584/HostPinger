@@ -1,0 +1,142 @@
+@page "/unlock"
+@using HostPinger.Security
+@using Microsoft.AspNetCore.Authentication
+@using Microsoft.AspNetCore.Authentication.Cookies
+@using Microsoft.AspNetCore.WebUtilities
+@inject PasswordGate Gate
+@inject NavigationManager Navigation
+@inject ILogger<Unlock> Logger
+
+@*
+    Where the unlock overlay posts, and a page in its own right for anyone who arrives at the
+    address directly.
+
+    Deliberately without a render mode. Signing a browser in writes a cookie, which can only happen
+    while a request is still being answered — an interactive component talks over a circuit that has
+    no response left to add a header to, which is why the overlay cannot do this itself. The same
+    goes for Lock.
+*@
+
+<PageTitle>HostPinger - Unlock</PageTitle>
+
+<h1>Unlock</h1>
+
+<div class="row">
+    <div class="col-12 col-md-8 col-xl-5">
+        <div class="card">
+            <div class="card-body">
+                @if (!Gate.IsPasswordSet)
+                {
+                    <p>No password is set, so nothing is locked: anyone who can reach HostPinger can
+                       add, edit and remove hosts and change every setting.</p>
+                    <a class="btn btn-primary btn-sm" href="password">Set a password</a>
+                }
+                else if (Gate.IsUnlocked(HttpContext?.User))
+                {
+                    <p>This browser is already unlocked.</p>
+                    <a class="btn btn-primary btn-sm" href="@ReturnHref">Continue</a>
+                }
+                else
+                {
+                    <form method="post" @formname="@LockFormNames.UnlockHandler" @onsubmit="SubmitAsync">
+                        <AntiforgeryToken />
+                        @if (_error is not null)
+                        {
+                            <div class="alert alert-danger py-2">@_error</div>
+                        }
+                        <label class="form-label" for="password">Password</label>
+                        <div class="input-group input-group-sm">
+                            @*
+                                A plain input rather than an InputText: InputText renders the value
+                                it is bound to back into the markup, which for a password field
+                                means the one just submitted is written into the HTML of the page
+                                that says it was wrong.
+                            *@
+                            <input id="password" type="password" name="@LockFormNames.Password"
+                                   class="form-control" autocomplete="current-password" />
+                            <button type="submit" class="btn btn-primary">Unlock</button>
+                        </div>
+                        <div class="form-text">
+                            Unlocks adding, editing and removing hosts, pausing them, and changing
+                            settings, for this browser until it is closed. Everything else is
+                            readable without it.
+                        </div>
+                    </form>
+                }
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
+
+    /// <summary>
+    /// The posted password. Bound by the name the overlay and the form above both post it under,
+    /// rather than by this property's own name, so that renaming anything here cannot quietly stop
+    /// the overlay's posts from binding.
+    /// </summary>
+    [SupplyParameterFromForm(Name = LockFormNames.Password)]
+    private string? Password { get; set; }
+
+    [SupplyParameterFromQuery(Name = LockFormNames.ReturnUrl)]
+    private string? ReturnUrl { get; set; }
+
+    private string? _error;
+
+    /// <summary>Where to send the browser once it is unlocked.</summary>
+    private string ReturnHref => LocalUrl.OrRoot(ReturnUrl);
+
+    /// <summary>
+    /// The page the overlay was open on, when that is where the post came from. A refusal goes back
+    /// there rather than to <see cref="ReturnHref"/>, which is where it was heading afterwards: the
+    /// overlay has to reopen where it was, carrying the destination for the next attempt.
+    /// </summary>
+    private string? OverlayPath =>
+        HttpContext?.Request.HasFormContentType == true
+        && HttpContext.Request.Form.TryGetValue(LockFormNames.FromOverlay, out var path)
+            ? LocalUrl.OrRoot(path.ToString())
+            : null;
+
+    private async Task SubmitAsync()
+    {
+        // Every attempt is logged, right and wrong. Nothing rate-limits this page, so the log is
+        // the only place a run of guesses shows up at all — and a run of failures is worth much
+        // less without the line saying whether one of them eventually worked.
+        if (string.IsNullOrEmpty(Password) || !Gate.Verify(Password))
+        {
+            Logger.LogWarning("Failed unlock attempt from {Address}.", RequestOrigin.Describe(HttpContext));
+
+            if (OverlayPath is { } overlayPath)
+            {
+                // Back to the page it was typed on, which reopens the overlay and says so there.
+                // The destination goes along when it is somewhere else, so that getting the
+                // password wrong once does not quietly change where the unlock was heading.
+                var markers = new Dictionary<string, string?> { [LockFormNames.FailedQuery] = "1" };
+                if (ReturnHref != overlayPath)
+                {
+                    markers[LockFormNames.NextQuery] = ReturnHref;
+                }
+
+                Navigation.NavigateTo(QueryHelpers.AddQueryString(overlayPath, markers));
+                return;
+            }
+
+            _error = string.IsNullOrEmpty(Password) ? "Enter the password." : "That is not the password.";
+            return;
+        }
+
+        Logger.LogInformation("Unlocked from {Address}.", RequestOrigin.Describe(HttpContext));
+
+        // Not persistent: the unlock lasts until this browser is closed.
+        await HttpContext!.SignInAsync(
+            CookieAuthenticationDefaults.AuthenticationScheme,
+            Gate.CreatePrincipal(),
+            new AuthenticationProperties { IsPersistent = false });
+
+        // BlazorDisableThrowNavigationException is set for this project, so the call returns
+        // instead of unwinding the handler; the return is what stops the page carrying on.
+        Navigation.NavigateTo(ReturnHref);
+    }
+}

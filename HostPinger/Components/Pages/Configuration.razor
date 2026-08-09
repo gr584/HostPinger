@@ -3,16 +3,29 @@
 @using System.ComponentModel.DataAnnotations
 @using HostPinger.Core.Options
 @using HostPinger.Core.Services
+@using HostPinger.Security
+@using Microsoft.AspNetCore.Components.Authorization
 @using Microsoft.Extensions.Options
 @inject IDbContextFactory<HostPingerDbContext> DbFactory
 @inject IOptionsMonitor<PingerOptions> PingerOptions
 @inject PingerPaths Paths
 @inject PingerSettingsStore SettingsStore
+@inject PasswordGate Gate
+@inject LockPrompt Prompt
 @implements IDisposable
 
 <PageTitle>HostPinger - Configuration</PageTitle>
 
 <h1>Configuration</h1>
+
+@if (!_isUnlocked)
+{
+    <p class="text-muted">
+        HostPinger is locked, so the settings below can be read but not changed.
+        <button type="button" class="btn btn-link btn-sm p-0 align-baseline"
+                @onclick="() => Prompt.Request()">Unlock</button> to edit them.
+    </p>
+}
 
 <div class="card mb-3">
     <div class="card-body">
@@ -32,16 +45,17 @@
                 <dt><label for="max-db-size">Maximum size</label></dt>
                 <dd>
                     <div class="input-group input-group-sm config-input">
-                        <InputNumber id="max-db-size" class="form-control" @bind-Value="_databaseForm.MaxDatabaseSizeMb" />
+                        <InputNumber id="max-db-size" class="form-control" disabled="@(!_isUnlocked)"
+                                     @bind-Value="_databaseForm.MaxDatabaseSizeMb" />
                         <span class="input-group-text">MB</span>
-                        <button type="submit" class="btn btn-primary">Save</button>
+                        <button type="submit" class="btn btn-primary" disabled="@(!_isUnlocked)">Save</button>
                     </div>
                     <ValidationMessage For="() => _databaseForm.MaxDatabaseSizeMb" />
                     <div class="form-text">
                         The oldest ping attempts are pruned once the file grows past this. 0 disables pruning.
                         @if (_databaseStatus is not null)
                         {
-                            <span class="config-saved">@_databaseStatus</span>
+                            <span class="@StatusClass(_isDatabaseSaveRefused)">@_databaseStatus</span>
                         }
                     </div>
                 </dd>
@@ -65,14 +79,15 @@
                 <h5 class="card-title">Pinger config</h5>
                 <div class="config-actions">
                     <button type="button" class="btn btn-outline-danger btn-sm" disabled="@(!HasPingerChanges)" @onclick="RevertPinger">Cancel</button>
-                    <button type="submit" class="btn btn-primary btn-sm" disabled="@(!HasPingerChanges)">Save</button>
+                    <button type="submit" class="btn btn-primary btn-sm" disabled="@(!_isUnlocked || !HasPingerChanges)">Save</button>
                 </div>
             </div>
             <dl class="config-list">
                 <dt><label for="ping-interval">Ping interval</label></dt>
                 <dd>
                     <div class="input-group input-group-sm config-input">
-                        <InputNumber id="ping-interval" class="form-control" @bind-Value="_pingerForm.IntervalSeconds" />
+                        <InputNumber id="ping-interval" class="form-control" disabled="@(!_isUnlocked)"
+                                     @bind-Value="_pingerForm.IntervalSeconds" />
                         <span class="input-group-text">seconds</span>
                     </div>
                     <ValidationMessage For="() => _pingerForm.IntervalSeconds" />
@@ -82,7 +97,8 @@
                 <dt><label for="ping-timeout">Timeout</label></dt>
                 <dd>
                     <div class="input-group input-group-sm config-input">
-                        <InputNumber id="ping-timeout" class="form-control" @bind-Value="_pingerForm.TimeoutSeconds" />
+                        <InputNumber id="ping-timeout" class="form-control" disabled="@(!_isUnlocked)"
+                                     @bind-Value="_pingerForm.TimeoutSeconds" />
                         <span class="input-group-text">seconds</span>
                     </div>
                     <ValidationMessage For="() => _pingerForm.TimeoutSeconds" />
@@ -92,7 +108,8 @@
                 <dt><label for="resolve-timeout">Resolve timeout</label></dt>
                 <dd>
                     <div class="input-group input-group-sm config-input">
-                        <InputNumber id="resolve-timeout" class="form-control" @bind-Value="_pingerForm.ResolveTimeoutSeconds" />
+                        <InputNumber id="resolve-timeout" class="form-control" disabled="@(!_isUnlocked)"
+                                     @bind-Value="_pingerForm.ResolveTimeoutSeconds" />
                         <span class="input-group-text">seconds</span>
                     </div>
                     <ValidationMessage For="() => _pingerForm.ResolveTimeoutSeconds" />
@@ -105,7 +122,8 @@
                 <dt><label for="retry-attempts">Retry attempts</label></dt>
                 <dd>
                     <div class="input-group input-group-sm config-input">
-                        <InputNumber id="retry-attempts" class="form-control" @bind-Value="_pingerForm.RetryAttempts" />
+                        <InputNumber id="retry-attempts" class="form-control" disabled="@(!_isUnlocked)"
+                                     @bind-Value="_pingerForm.RetryAttempts" />
                         <span class="input-group-text">attempts</span>
                     </div>
                     <ValidationMessage For="() => _pingerForm.RetryAttempts" />
@@ -116,12 +134,46 @@
                         missed ping count.
                         @if (_pingerStatus is not null)
                         {
-                            <span class="config-saved">@_pingerStatus</span>
+                            <span class="@StatusClass(_isPingerSaveRefused)">@_pingerStatus</span>
                         }
                     </div>
                 </dd>
             </dl>
         </EditForm>
+    </div>
+</div>
+
+@*
+    The password itself is set on its own page rather than here: signing this browser in afterwards
+    writes a cookie, and this page is a circuit with no request left to write one on.
+*@
+<div class="card mt-3">
+    <div class="card-body">
+        <h5 class="card-title">Security</h5>
+        @if (Gate.IsPasswordSet)
+        {
+            <p class="mb-2">
+                A password is needed to add, edit, remove and pause hosts and to change these
+                settings. Everything else stays readable without it.
+            </p>
+            @if (_isUnlocked)
+            {
+                <a class="btn btn-outline-primary btn-sm" href="password">Change or remove password</a>
+            }
+            else
+            {
+                <button type="button" class="btn btn-outline-primary btn-sm"
+                        @onclick="@(() => Prompt.Request("/password"))">Unlock to change it</button>
+            }
+        }
+        else
+        {
+            <p class="mb-2">
+                No password is set: anyone who can reach HostPinger can add, edit, remove and pause
+                hosts and change every setting on this page.
+            </p>
+            <a class="btn btn-primary btn-sm" href="password">Set a password</a>
+        }
     </div>
 </div>
 
@@ -135,6 +187,9 @@
     // which is well past useful.
     private const int RetryAttemptsUpperBound = 1_000;
 
+    [CascadingParameter]
+    private Task<AuthenticationState>? AuthenticationState { get; set; }
+
     private readonly DatabaseForm _databaseForm = new();
     private readonly PingerForm _pingerForm = new();
     private readonly CancellationTokenSource _cts = new();
@@ -142,6 +197,16 @@
     private DatabaseStats? _stats;
     private string? _databaseStatus;
     private string? _pingerStatus;
+
+    // Whether the message beside each Save is a refusal rather than a confirmation, which is only
+    // the locked case: the buttons are disabled then, so it takes a lock arriving between the last
+    // render and the click.
+    private bool _isDatabaseSaveRefused;
+    private bool _isPingerSaveRefused;
+
+    // Whether this browser may save anything, re-read on the same timer as the settings themselves
+    // so a password set or removed elsewhere reaches the controls on the next refresh.
+    private bool _isUnlocked;
 
     // The settings the running application is using. Kept alongside the form values so an edit
     // that has not been saved yet cannot skew the size projections below it.
@@ -154,8 +219,20 @@
     protected override async Task OnInitializedAsync()
     {
         SyncFromConfiguration();
+        _isUnlocked = await IsUnlockedAsync();
         await LoadStatsAsync();
         _ = AutoRefreshAsync();
+    }
+
+    /// <summary>
+    /// Whether this browser may change settings. Asked again inside both save handlers rather than
+    /// trusted from the last render: disabling a button is a courtesy to the reader, and this is
+    /// the answer that decides whether anything is written.
+    /// </summary>
+    private async Task<bool> IsUnlockedAsync()
+    {
+        var user = AuthenticationState is null ? null : (await AuthenticationState).User;
+        return Gate.IsUnlocked(user);
     }
 
     private async Task AutoRefreshAsync()
@@ -166,6 +243,7 @@
             while (await timer.WaitForNextTickAsync(_cts.Token))
             {
                 SyncFromConfiguration();
+                _isUnlocked = await IsUnlockedAsync();
                 await LoadStatsAsync();
                 await InvokeAsync(StateHasChanged);
             }
@@ -229,6 +307,14 @@
 
     private async Task SaveDatabaseAsync()
     {
+        if (!await IsUnlockedAsync())
+        {
+            _databaseStatus = "HostPinger is locked — unlock it to change this.";
+            _isDatabaseSaveRefused = true;
+            _isUnlocked = false;
+            return;
+        }
+
         await SettingsStore.SaveAsync(
             new PingerSettingsUpdate { MaxDatabaseSizeMb = _databaseForm.MaxDatabaseSizeMb },
             _cts.Token);
@@ -237,6 +323,7 @@
         // rather than waiting for the file watcher to catch up.
         _effectiveMaxDatabaseSizeMb = _databaseForm.MaxDatabaseSizeMb;
         _databaseStatus = "Saved — applied after the next ping round.";
+        _isDatabaseSaveRefused = false;
         await LoadStatsAsync();
     }
 
@@ -261,6 +348,14 @@
 
     private async Task SavePingerAsync()
     {
+        if (!await IsUnlockedAsync())
+        {
+            _pingerStatus = "HostPinger is locked — unlock it to change these.";
+            _isPingerSaveRefused = true;
+            _isUnlocked = false;
+            return;
+        }
+
         await SettingsStore.SaveAsync(
             new PingerSettingsUpdate
             {
@@ -276,8 +371,11 @@
         _effectiveResolveTimeoutSeconds = _pingerForm.ResolveTimeoutSeconds;
         _effectiveRetryAttempts = _pingerForm.RetryAttempts;
         _pingerStatus = "Saved — applied from the next ping round.";
+        _isPingerSaveRefused = false;
         await LoadStatsAsync();
     }
+
+    private static string StatusClass(bool isRefused) => isRefused ? "config-refused" : "config-saved";
 
     private string SizeText => _stats is { } stats ? FormatBytes(stats.SizeBytes) : "—";
 

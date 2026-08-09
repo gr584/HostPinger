@@ -2,10 +2,14 @@
 @rendermode InteractiveServer
 @using System.ComponentModel.DataAnnotations
 @using HostPinger.Core.Options
+@using HostPinger.Security
+@using Microsoft.AspNetCore.Components.Authorization
 @using Microsoft.Extensions.Options
 @inject IDbContextFactory<HostPingerDbContext> DbFactory
 @inject IOptionsMonitor<PingerOptions> PingerOptions
 @inject NavigationManager Navigation
+@inject PasswordGate Gate
+@inject LockPrompt Prompt
 @implements IDisposable
 
 @* The landing page, so the bare product name rather than "HostPinger - Hosts". *@
@@ -15,12 +19,26 @@
 
 <div class="d-flex align-items-center justify-content-between gap-3 mb-3">
     <span class="text-muted">
-        @(_rows.Count == 0
-            ? "No hosts yet — add one to start monitoring."
-            : "Click a host to open its ping graph.")
+        @if (_rows.Count == 0)
+        {
+            @(_isUnlocked ? "No hosts yet — add one to start monitoring." : "No hosts yet.")
+        }
+        else
+        {
+            @("Click a host to open its ping graph.")
+        }
+        @if (!_isUnlocked)
+        {
+            @* A button rather than a link: the overlay belongs to the layout, and this asks for it. *@
+            <text> <button type="button" class="btn btn-link btn-sm p-0 align-baseline"
+                          @onclick="() => Prompt.Request()">Unlock</button> to add, edit or pause hosts.</text>
+        }
     </span>
     @* flex-shrink-0 so a narrow window wraps the hint rather than squashing the button. *@
-    <button class="btn btn-primary btn-sm flex-shrink-0" @onclick="BeginAdd">Add host</button>
+    @if (_isUnlocked)
+    {
+        <button class="btn btn-primary btn-sm flex-shrink-0" @onclick="BeginAdd">Add host</button>
+    }
 </div>
 
 @if (_rows.Count > 0)
@@ -50,7 +68,13 @@
             <tbody>
                 @foreach (var row in _rows)
                 {
-                    <tr class="host-row" @onclick="() => OpenGraph(row.Host.Id)">
+                    @*
+                        Keyed on the generation as well as the host so that a refused pause can put
+                        the switch back. The browser has already moved it, and the value it is
+                        bound to has not changed, so the diff has nothing to say about it and the
+                        DOM keeps the movement; a new key builds the row again instead.
+                    *@
+                    <tr class="host-row" @key="(row.Host.Id, _rowGeneration)" @onclick="() => OpenGraph(row.Host.Id)">
                         <td title="@row.Host.Name">@row.Host.Name</td>
                         <td title="@row.Host.Address"><code>@row.Host.Address</code></td>
                         <td>
@@ -106,15 +130,20 @@
                             }
                         </td>
                         <td @onclick:stopPropagation>
+                            @* Shown either way, so a locked reader can still see what is paused. *@
                             <div class="form-check form-switch">
                                 <input class="form-check-input" type="checkbox" role="switch"
-                                       title="@(row.Host.IsEnabled ? "Pause monitoring" : "Resume monitoring")"
+                                       disabled="@(!_isUnlocked)"
+                                       title="@PauseTitle(row.Host.IsEnabled)"
                                        checked="@row.Host.IsEnabled"
                                        @onchange="e => SetEnabledAsync(row.Host.Id, (bool)e.Value!)" />
                             </div>
                         </td>
                         <td class="actions">
-                            <button class="btn btn-sm btn-outline-primary" @onclick="() => BeginEdit(row.Host)" @onclick:stopPropagation>Edit</button>
+                            @if (_isUnlocked)
+                            {
+                                <button class="btn btn-sm btn-outline-primary" @onclick="() => BeginEdit(row.Host)" @onclick:stopPropagation>Edit</button>
+                            }
                         </td>
                     </tr>
                 }
@@ -205,11 +234,21 @@
 }
 
 @code {
+    [CascadingParameter]
+    private Task<AuthenticationState>? AuthenticationState { get; set; }
+
     private List<HostSummary> _rows = [];
 
     // How many missed pings make a host down, read with each load rather than once so a retry
     // count changed on the Configuration page reaches the badges on the next refresh.
     private int _missesToDown = 1;
+
+    // Whether this browser may change anything, re-read with each load like the setting above, so
+    // that a password set or removed elsewhere reaches the controls on the next refresh.
+    private bool _isUnlocked;
+
+    // Bumped to have the rows rebuilt rather than diffed; see the key on the row.
+    private int _rowGeneration;
 
     private HostForm _form = new();
     private bool _isFormOpen;
@@ -257,12 +296,30 @@
     {
         var retryAttempts = PingerOptions.CurrentValue.RetryAttempts;
         _missesToDown = Math.Max(0, retryAttempts) + 1;
+        _isUnlocked = await IsUnlockedAsync();
         await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);
         _rows = await HostSummary.LoadAsync(db, retryAttempts, _cts.Token);
     }
 
+    /// <summary>
+    /// Whether this browser may change hosts. Asked again inside every handler below rather than
+    /// trusted from the last render: hiding a button is a courtesy to the reader, and this is the
+    /// answer that decides whether anything is written.
+    /// </summary>
+    private async Task<bool> IsUnlockedAsync()
+    {
+        var user = AuthenticationState is null ? null : (await AuthenticationState).User;
+        return Gate.IsUnlocked(user);
+    }
+
     private async Task SaveAsync()
     {
+        if (!await IsUnlockedAsync())
+        {
+            _error = "HostPinger is locked. Unlock it to change hosts.";
+            return;
+        }
+
         var name = _form.Name.Trim();
         var address = _form.Address.Trim();
         await using var db = await DbFactory.CreateDbContextAsync();
@@ -306,6 +363,14 @@
 
     private async Task SetEnabledAsync(int id, bool isEnabled)
     {
+        if (!await IsUnlockedAsync())
+        {
+            // The switch has already moved in the browser, so rebuild the rows to put it back.
+            _rowGeneration++;
+            await LoadAsync();
+            return;
+        }
+
         await using var db = await DbFactory.CreateDbContextAsync();
         await db.Hosts.Where(h => h.Id == id)
             .ExecuteUpdateAsync(s => s.SetProperty(h => h.IsEnabled, isEnabled));
@@ -319,6 +384,13 @@
 
     private async Task DeleteAsync(int id)
     {
+        if (!await IsUnlockedAsync())
+        {
+            _isDeletePending = false;
+            _error = "HostPinger is locked. Unlock it to change hosts.";
+            return;
+        }
+
         await using var db = await DbFactory.CreateDbContextAsync();
         await db.Hosts.Where(h => h.Id == id).ExecuteDeleteAsync();
         CloseForm();
@@ -375,6 +447,10 @@
     }
 
     private void OpenGraph(int hostId) => Navigation.NavigateTo($"graph/{hostId}");
+
+    private string PauseTitle(bool isEnabled) => _isUnlocked
+        ? isEnabled ? "Pause monitoring" : "Resume monitoring"
+        : "Unlock to pause or resume monitoring";
 
     private static string RelativeTime(DateTime timestampUtc)
     {

@@ -90,6 +90,12 @@
     margin-left: 0.35rem;
 }
 
+/* The same slot as .config-saved, for the times a save is refused rather than made. */
+.config-refused {
+    color: var(--bs-danger-text-emphasis);
+    margin-left: 0.35rem;
+}
+
 @media (max-width: 640px) {
     .config-list {
         grid-template-columns: 1fr;
