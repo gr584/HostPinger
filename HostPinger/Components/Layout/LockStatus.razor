@@ -68,9 +68,9 @@
                             <button type="button" class="btn-close" aria-label="Close" @onclick="Close"></button>
                         </div>
                         <div class="modal-body">
-                            @if (_error is not null)
+                            @if (Notice is not null)
                             {
-                                <div class="alert alert-danger py-2">@_error</div>
+                                <div class="alert alert-danger py-2">@Notice</div>
                             }
                             <label class="form-label" for="unlock-password">Password</label>
                             <input id="unlock-password" type="password" name="@LockFormNames.Password"
@@ -83,7 +83,13 @@
                         </div>
                         <div class="modal-footer">
                             <button type="button" class="btn btn-outline-secondary btn-sm" @onclick="Close">Cancel</button>
-                            <button type="submit" class="btn btn-primary btn-sm">Unlock</button>
+                            @*
+                                Nothing typed while a wait stands would be looked at, so the button
+                                that would send it is out of reach until the countdown above reaches
+                                the end. Disabling it also stops Enter submitting the form, which is
+                                what makes the two agree.
+                            *@
+                            <button type="submit" class="btn btn-primary btn-sm" disabled="@IsWaiting">Unlock</button>
                         </div>
                     </form>
                 }
@@ -105,6 +111,17 @@
     private bool _shouldClearMarker;
     private string? _error;
     private ElementReference _passwordInput;
+
+    /// <summary>
+    /// When the wait a run of wrong passwords has earned runs out, and null while none stands. A
+    /// moment rather than a length, so that what is left of it is worked out afresh at every render
+    /// and a tick that arrives late shortens the next second rather than the whole countdown.
+    /// </summary>
+    private DateTimeOffset? _waitUntil;
+
+    private bool _isCountingDown;
+
+    private readonly CancellationTokenSource _cts = new();
 
     protected override void OnInitialized() => Prompt.Requested += OnRequested;
 
@@ -130,9 +147,12 @@
         // history, a password since removed — comes off the address without doing anything.
         if (!_isUnlocked && Gate.IsPasswordSet)
         {
-            // A wait outranks the refusal that came with it: being told the password was wrong is
-            // no use to somebody whose next few attempts will not be looked at either.
-            _error = WaitMessage ?? (wasRefused ? "That is not the password." : null);
+            // Anchored to a moment now, on the way in, because the seconds on the address were
+            // counted from when the guess was refused and the page has been on its way here since.
+            // Erring towards saying the wait is longer than it is, which is the harmless direction:
+            // the alternative invites a click that is a fraction too early to be looked at.
+            _waitUntil = WaitFromMarker is { } wait ? DateTimeOffset.UtcNow + wait : null;
+            _error = wasRefused ? "That is not the password." : null;
             _destination = Marker(LockFormNames.NextQuery);
             OpenNow();
         }
@@ -155,6 +175,54 @@
         {
             _shouldClearMarker = false;
             Navigation.NavigateTo(ClearedUrl, replace: true);
+        }
+
+        // Started from here rather than from where the wait is read, because this is a render that
+        // has actually happened in a browser: a countdown started while the page was being
+        // prerendered would be ticking over a component that is about to be thrown away.
+        if (IsWaiting && !_isCountingDown)
+        {
+            _isCountingDown = true;
+            _ = CountDownAsync();
+        }
+    }
+
+    /// <summary>
+    /// Redraws the overlay once a second for as long as a wait stands, which is what turns the
+    /// sentence saying when to try again into one that says something different each second — and
+    /// what hands the Unlock button back at the end of it.
+    /// </summary>
+    /// <remarks>
+    /// It runs for the whole wait rather than for as long as the overlay is open, drawing only when
+    /// there is something to draw on. Stopping it at a close and starting it again at an open would
+    /// be the same work with a gap in it: closing cannot interrupt the second this is already
+    /// inside, so an overlay closed and reopened within that second would find the countdown still
+    /// marked as running, about to stop, and with no render left to start it again.
+    /// </remarks>
+    private async Task CountDownAsync()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+            while (IsWaiting && await timer.WaitForNextTickAsync(_cts.Token))
+            {
+                if (_isOpen)
+                {
+                    await InvokeAsync(StateHasChanged);
+                }
+            }
+
+            // Once more for the render that has nothing left to count, which is the one that says
+            // to go ahead. The loop above has already left by the time it is owed.
+            _cts.Token.ThrowIfCancellationRequested();
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            _isCountingDown = false;
         }
     }
 
@@ -208,14 +276,42 @@
     }
 
     /// <summary>
-    /// What to say about the wait a run of wrong passwords has earned, and null while there is
-    /// none. The seconds are carried back on the address rather than the sentence itself, so a
-    /// marker somebody has typed can only ever change the number in it.
+    /// The wait a run of wrong passwords has earned, as the address it came back on reports it, and
+    /// null while there is none. Seconds rather than the sentence itself, so a marker somebody has
+    /// typed can only ever change a number the page then counts down.
     /// </summary>
-    private string? WaitMessage =>
+    private TimeSpan? WaitFromMarker =>
         int.TryParse(Marker(LockFormNames.WaitQuery), out var seconds) && seconds > 0
-            ? PasswordAttempt.Waiting(TimeSpan.FromSeconds(seconds))
+            ? TimeSpan.FromSeconds(Math.Min(seconds, (int)TimeSpan.FromHours(1).TotalSeconds))
             : null;
+
+    /// <summary>
+    /// What is left of the wait, zero once it has run out, and null while none stands at all — a
+    /// distinction the two below are built out of.
+    /// </summary>
+    private TimeSpan? Remaining
+    {
+        get
+        {
+            if (_waitUntil is not { } until)
+            {
+                return null;
+            }
+
+            var left = until - DateTimeOffset.UtcNow;
+            return left > TimeSpan.Zero ? left : TimeSpan.Zero;
+        }
+    }
+
+    /// <summary>Whether a guess sent now would be turned away without being looked at.</summary>
+    private bool IsWaiting => Remaining > TimeSpan.Zero;
+
+    /// <summary>
+    /// What the overlay says above the password box. A wait outranks the refusal that came with it:
+    /// being told the password was wrong is no use to somebody whose next guess would not be looked
+    /// at either, and what they need to know is how long that lasts.
+    /// </summary>
+    private string? Notice => Remaining is { } left ? PasswordAttempt.Waiting(left) : _error;
 
     private string? Marker(string name) =>
         QueryHelpers.ParseQuery(Navigation.ToAbsoluteUri(Navigation.Uri).Query)
@@ -247,5 +343,13 @@
     private string LockAction =>
         $"/lock?{LockFormNames.ReturnUrl}={Uri.EscapeDataString(CurrentPath)}";
 
-    public void Dispose() => Prompt.Requested -= OnRequested;
+    public void Dispose()
+    {
+        Prompt.Requested -= OnRequested;
+
+        // Which is what stops the countdown, if one is running: it is drawing a component that is
+        // going away, and nothing here waits for it to notice on its own.
+        _cts.Cancel();
+        _cts.Dispose();
+    }
 }

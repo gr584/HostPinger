@@ -379,11 +379,19 @@ namespace HostPinger.Test
             Assert.That(_attempts.Verify(null, Password).Result, Is.EqualTo(PasswordAttemptResult.Refused));
         }
 
+        /// <summary>
+        /// The overlay says this again every second as it counts a wait down, so the reading it
+        /// ends on has to be the one that says to go ahead — and every reading before it has to be
+        /// a time to wait rather than a rounded-away nothing.
+        /// </summary>
         [Test]
-        public void Waiting_ReadsAsATimeToWaitRatherThanNoneAtAll()
+        public void Waiting_ReadsAsATimeToWaitUntilThereIsNoneLeft()
         {
             Assert.Multiple(() =>
             {
+                Assert.That(
+                    PasswordAttempt.Waiting(TimeSpan.Zero),
+                    Is.EqualTo("Too many wrong passwords. You can try again now."));
                 Assert.That(
                     PasswordAttempt.Waiting(TimeSpan.FromMilliseconds(120)),
                     Is.EqualTo("Too many wrong passwords. Try again in 1s."));

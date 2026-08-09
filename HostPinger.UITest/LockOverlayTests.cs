@@ -147,23 +147,30 @@ namespace HostPinger.UITest
                 await Assertions.Expect(Page).ToHaveURLAsync($"{BaseUrl}/");
             }
 
-            // The right password is turned away too while the wait stands, which is what makes it a
-            // wait rather than a hint.
-            await SubmitPasswordAsync(WebApp.Password);
-            await Assertions.Expect(refused).ToBeVisibleAsync();
-            await Assertions.Expect(Button("Locked")).ToBeVisibleAsync();
+            // Nothing typed now would be looked at, so there is nothing to send it with.
+            var unlock = Button(Dialog, "Unlock");
+            await Assertions.Expect(unlock).ToBeDisabledAsync();
 
-            // Sitting it out is the only way through, and it is also the tidying up: getting it
-            // right leaves nothing owed against the address the rest of the run shares.
-            var unlocked = Button("Unlocked");
-            var deadline = DateTime.UtcNow + TimeSpan.FromMinutes(2);
-            while (!await unlocked.IsVisibleAsync())
-            {
-                Assert.That(DateTime.UtcNow, Is.LessThan(deadline), "the wait never ran out");
-                await Task.Delay(500);
-                await SubmitPasswordAsync(WebApp.Password);
-                await Page.WaitForLoadStateAsync();
-            }
+            // Counting down rather than merely saying a number: what it said a second ago is not
+            // what it says now. Read twice rather than waited for, because what it starts at
+            // depends on where in the schedule this run has landed, and an assertion that waits for
+            // a particular reading would pass without ever having compared two.
+            var notice = Dialog.Locator(".alert");
+            var atFirst = await notice.InnerTextAsync();
+            await Task.Delay(1_500);
+            Assert.That(await notice.InnerTextAsync(), Is.Not.EqualTo(atFirst), "it is not counting down");
+
+            // And the end of it is an invitation rather than something to keep trying at. Given
+            // longer than the first wait in the schedule, so that a run which somehow arrived here
+            // further along it reports what it found rather than how long it was given.
+            var timeout = new LocatorAssertionsToBeVisibleOptions { Timeout = 90_000 };
+            await Assertions.Expect(Page.GetByText("You can try again now.")).ToBeVisibleAsync(timeout);
+            await Assertions.Expect(unlock).ToBeEnabledAsync();
+
+            // Which it is: the same password that was turned away a moment ago now works. That also
+            // leaves nothing owed against the address the rest of the run shares.
+            await SubmitPasswordAsync(WebApp.Password);
+            await Assertions.Expect(Button("Unlocked")).ToBeVisibleAsync();
         }
 
         /// <summary>

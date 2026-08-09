@@ -138,6 +138,11 @@ service, locked or not.
   change and removal forms count against the same tally, so neither is a way round it, and an empty
   box is never counted as a guess. Nothing is written to disk, so restarting the service forgets
   every tally.
+- **The overlay counts the wait down**, second by second, and holds its **Unlock** button back until
+  it has run out — so a wait is something to watch rather than something to keep trying at. Closing
+  the overlay and opening it again during one picks the countdown up where it is. The `/unlock` page
+  reached directly gives the same wait as a number, but does not count it down: it has no live
+  connection to the service, which is what lets it write the cookie an unlock is made of.
 - **The wait is per address**, so that somebody guessing cannot shut everybody else out of their own
   monitoring. Behind a reverse proxy every visitor arrives from the same address, and there it is in
   practice one wait for the whole service. A whole IPv6 /64 counts as one address, since a single

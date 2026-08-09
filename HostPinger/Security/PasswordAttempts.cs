@@ -39,17 +39,20 @@ namespace HostPinger.Security
         public string? WaitMessage => Wait > TimeSpan.Zero ? Waiting(Wait) : null;
 
         /// <summary>
-        /// The sentence a wait is reported with. In one place because four forms say it, and one of
-        /// them — the overlay — is rebuilding it from a number carried back on the address rather
-        /// than from an attempt of its own.
+        /// The sentence a wait is reported with, with <paramref name="wait"/> being what is left of
+        /// it — so nothing left says to go ahead.
         /// </summary>
         /// <remarks>
-        /// Rounded up, so that the last fraction of a second left of a wait reads as a second to
-        /// wait rather than as no wait at all.
+        /// In one place because four forms say it, and because the overlay says it again every
+        /// second as it counts a wait down, from what is left rather than from an attempt of its
+        /// own. Rounded up, so that the last fraction of a second reads as a second to wait rather
+        /// than as no wait at all — nothing but a wait that has genuinely run out reads that way.
         /// </remarks>
         public static string Waiting(TimeSpan wait) =>
-            $"Too many wrong passwords. Try again in "
-            + $"{Downtime.FormatDuration(TimeSpan.FromSeconds(Math.Ceiling(wait.TotalSeconds)))}.";
+            wait > TimeSpan.Zero
+                ? "Too many wrong passwords. Try again in "
+                    + $"{Downtime.FormatDuration(TimeSpan.FromSeconds(Math.Ceiling(wait.TotalSeconds)))}."
+                : "Too many wrong passwords. You can try again now.";
     }
 
     /// <summary>
