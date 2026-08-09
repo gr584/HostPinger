@@ -68,10 +68,12 @@ h1:focus {
     outline: none;
 }
 
-.valid.modified:not([type=checkbox]) {
-    outline: 1px solid var(--bs-form-valid-border-color);
-}
-
+/*
+ * The template's companion rule for .valid.modified is deliberately absent. Blazor keeps that
+ * class on a field for the life of the EditContext, so the outline lingered long after the focus
+ * ring had moved on, and every form here already says the same thing with its Save button.
+ * An invalid field is worth outlining unfocused: it is asking to be gone back to.
+ */
 .invalid {
     outline: 1px solid var(--bs-form-invalid-border-color);
 }
