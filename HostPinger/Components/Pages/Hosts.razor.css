@@ -11,8 +11,8 @@
 /*
  * The badge, the switch and the Edit button are the same size at every window size, so those
  * three columns are absolute and the text columns share what is left. A percentage for any of
- * them would only leave slack next to the control on a wide window. 6rem holds the widest badge,
- * "Waiting…", with room to spare.
+ * them would only leave slack next to the control on a wide window. 6rem holds the widest badges,
+ * "Waiting…" and "Retrying", with room to spare.
  */
 .host-table col.status {
     width: 6rem;

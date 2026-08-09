@@ -32,11 +32,13 @@ HostPinger can be set differently.
 The list of everything being monitored, one row per host, refreshed every five seconds. Clicking a
 row opens that host's ping graph.
 
-- **Status** — <span class="badge text-bg-success">**Up**</span> when the last ping was answered, <span class="badge text-bg-danger">**Down**</span> when it was not, <span class="badge bg-body-secondary text-body-secondary">**Waiting…**</span> until the first round covers a newly added host, and <span class="badge text-bg-secondary">**Paused**</span> for a host that is not being pinged at all.
+- **Status** — <span class="badge text-bg-success">**Up**</span> when the last ping was answered, <span class="badge text-bg-warning">**Retrying**</span> once pings start going unanswered, <span class="badge text-bg-danger">**Down**</span> once it has used up the *Retry attempts* it is allowed, <span class="badge bg-body-secondary text-body-secondary">**Waiting…**</span> until the first round covers a newly added host, and <span class="badge text-bg-secondary">**Paused**</span> for a host that is not being pinged at all. Hovering **Retrying** says how many pings it has missed so far, and how many make it down.
 - **Last ping** — the round trip in milliseconds, or *no reply*, with how long ago the attempt was
   made.
 - **Last downtime** — when the host was last seen up before it stopped answering, and how long it
-  stayed unanswered. An ongoing outage keeps counting.
+  stayed unanswered. An ongoing outage keeps counting. A run of missed pings the host recovered
+  from inside its *Retry attempts* is not an outage and is not reported, so a host that is
+  retrying goes on showing whatever outage it last had.
 - **Add, edit and delete** — a host is a name and an address, either an IP address or a name to
   resolve. Addresses are unique, and a delete asks for confirmation because it takes the host's
   recorded history with it.
@@ -88,6 +90,13 @@ to edit on disk.
   Separate from the reply timeout, which does not cover resolution, so a name that hangs cannot
   set the pace of the round on its own. A name that does not resolve in time is skipped for that
   round rather than recorded as down.
+- **Retry attempts** — how many times a host that misses a ping is retried before it counts as
+  down. Default 3, and never less than 0. A host reads as *Retrying* rather than *Down* while it
+  has attempts left, and a run of misses it recovers from inside them is not reported as downtime
+  at all, so a dropped packet or a moment of congestion does not read as an outage; 0 allows no
+  retries and makes the first missed ping count, as it did before this setting existed. It
+  changes what is reported rather than what is recorded — every attempt is stored either way, and
+  changing it re-reads the whole history rather than only applying from here on.
 - **Maximum database size** — the oldest attempts are pruned once the file grows past this.
   Default 100 MB; 0 disables pruning and lets the file grow without bound.
 - **Capacity estimate** — the current file size, how fast it is growing at the present host count
@@ -111,6 +120,10 @@ to edit on disk.
   widest window the recorded attempts support: an outage that began while the service itself was
   stopped is reported from when the host was last seen up, rather than from when monitoring
   resumed.
+- An outage is a run of missed pings that outlasted the *Retry attempts* allowed; shorter runs are
+  passed over, back to the last run that did. The retries are inside the outage once one is
+  reported, because they are time the host was not answering — the setting decides whether an
+  outage is reported, not when it started.
 - Sending an ICMP echo is privileged, and a refused socket looks exactly like an unreachable host
   once the ping has failed. The service therefore pings loopback at startup and reports in the log
   whether ICMP is usable at all, so a permissions problem is not mistaken for every host going

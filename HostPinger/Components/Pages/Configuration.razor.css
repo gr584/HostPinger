@@ -2,7 +2,7 @@
  * The settings read as columns down each card — label, box, unit — which only lines up if all
  * three are sized rather than left to their content: the units are different words, and the rows
  * that carry no button have nothing to be pushed along by them. Sized from the widest thing each
- * has to hold: 1000000 for the box, "seconds" for the unit. The pinger card's header row is built
+ * has to hold: 1000000 for the box, "attempts" for the unit. The pinger card's header row is built
  * from the same three widths, so its buttons take the shape of the row below them.
  */
 .config-header,

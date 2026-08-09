@@ -1,7 +1,10 @@
 @page "/"
 @rendermode InteractiveServer
 @using System.ComponentModel.DataAnnotations
+@using HostPinger.Core.Options
+@using Microsoft.Extensions.Options
 @inject IDbContextFactory<HostPingerDbContext> DbFactory
+@inject IOptionsMonitor<PingerOptions> PingerOptions
 @inject NavigationManager Navigation
 @implements IDisposable
 
@@ -51,15 +54,25 @@
                         <td title="@row.Host.Name">@row.Host.Name</td>
                         <td title="@row.Host.Address"><code>@row.Host.Address</code></td>
                         <td>
-                            @if (!row.Host.IsEnabled)
+                            @if (row.Status is HostStatus.Paused)
                             {
                                 <span class="badge text-bg-secondary">Paused</span>
                             }
-                            else if (row.Last is null)
+                            else if (row.Status is HostStatus.Waiting)
                             {
                                 <span class="badge bg-body-secondary text-body-secondary">Waiting…</span>
                             }
-                            else if (row.Last.RoundtripMs is null)
+                            else if (row.Status is HostStatus.Retrying)
+                            {
+                                @*
+                                    How far along the retries are is a tooltip rather than part of
+                                    the badge: the count changes every round, and a badge that
+                                    changes width with it would drag the column about.
+                                *@
+                                <span class="badge text-bg-warning"
+                                      title="@($"{row.MissedPings} of {_missesToDown} pings missed")">Retrying</span>
+                            }
+                            else if (row.Status is HostStatus.Down)
                             {
                                 <span class="badge text-bg-danger">Down</span>
                             }
@@ -193,6 +206,11 @@
 
 @code {
     private List<HostSummary> _rows = [];
+
+    // How many missed pings make a host down, read with each load rather than once so a retry
+    // count changed on the Configuration page reaches the badges on the next refresh.
+    private int _missesToDown = 1;
+
     private HostForm _form = new();
     private bool _isFormOpen;
     private InputText? _nameInput;
@@ -237,8 +255,10 @@
 
     private async Task LoadAsync()
     {
+        var retryAttempts = PingerOptions.CurrentValue.RetryAttempts;
+        _missesToDown = Math.Max(0, retryAttempts) + 1;
         await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);
-        _rows = await HostSummary.LoadAsync(db, _cts.Token);
+        _rows = await HostSummary.LoadAsync(db, retryAttempts, _cts.Token);
     }
 
     private async Task SaveAsync()

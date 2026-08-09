@@ -69,6 +69,7 @@ namespace HostPinger.Test
                 IntervalSeconds = 90,
                 TimeoutSeconds = 3,
                 ResolveTimeoutSeconds = 8,
+                RetryAttempts = 4,
             });
 
             var options = Bind();
@@ -77,6 +78,7 @@ namespace HostPinger.Test
                 Assert.That(options.IntervalSeconds, Is.EqualTo(90));
                 Assert.That(options.TimeoutSeconds, Is.EqualTo(3));
                 Assert.That(options.ResolveTimeoutSeconds, Is.EqualTo(8));
+                Assert.That(options.RetryAttempts, Is.EqualTo(4));
                 Assert.That(options.MaxDatabaseSizeMb, Is.EqualTo(250));
             });
         }

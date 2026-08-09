@@ -58,7 +58,7 @@
         <EditForm Model="_pingerForm" OnValidSubmit="SavePingerAsync">
             <DataAnnotationsValidator />
             @*
-                The buttons act on all three settings at once, so they sit on the title row rather
+                The buttons act on all four settings at once, so they sit on the title row rather
                 than against any one of them.
             *@
             <div class="config-header">
@@ -99,6 +99,21 @@
                     <div class="form-text">
                         How long to wait for a host name to become an address. A name that does not
                         resolve in time is skipped for that round rather than recorded as down.
+                    </div>
+                </dd>
+
+                <dt><label for="retry-attempts">Retry attempts</label></dt>
+                <dd>
+                    <div class="input-group input-group-sm config-input">
+                        <InputNumber id="retry-attempts" class="form-control" @bind-Value="_pingerForm.RetryAttempts" />
+                        <span class="input-group-text">attempts</span>
+                    </div>
+                    <ValidationMessage For="() => _pingerForm.RetryAttempts" />
+                    <div class="form-text">
+                        How many times a host that misses a ping is retried before it counts as
+                        down. It shows as retrying while it has attempts left, and a run of misses
+                        that never uses them up is not reported as downtime; 0 makes the first
+                        missed ping count.
                         @if (_pingerStatus is not null)
                         {
                             <span class="config-saved">@_pingerStatus</span>
@@ -116,6 +131,10 @@
     private const int TimeoutUpperBoundSeconds = 60;
     private const int SizeUpperBoundMb = 1_000_000;
 
+    // A thousand retries is over eight hours before a host counts as down at the default interval,
+    // which is well past useful.
+    private const int RetryAttemptsUpperBound = 1_000;
+
     private readonly DatabaseForm _databaseForm = new();
     private readonly PingerForm _pingerForm = new();
     private readonly CancellationTokenSource _cts = new();
@@ -129,6 +148,7 @@
     private int _effectiveIntervalSeconds;
     private int _effectiveTimeoutSeconds;
     private int _effectiveResolveTimeoutSeconds;
+    private int _effectiveRetryAttempts;
     private int _effectiveMaxDatabaseSizeMb;
 
     protected override async Task OnInitializedAsync()
@@ -182,10 +202,16 @@
             _pingerForm.ResolveTimeoutSeconds = options.ResolveTimeoutSeconds;
         }
 
+        if (_pingerForm.RetryAttempts == _effectiveRetryAttempts)
+        {
+            _pingerForm.RetryAttempts = options.RetryAttempts;
+        }
+
         _effectiveMaxDatabaseSizeMb = options.MaxDatabaseSizeMb;
         _effectiveIntervalSeconds = options.IntervalSeconds;
         _effectiveTimeoutSeconds = options.TimeoutSeconds;
         _effectiveResolveTimeoutSeconds = options.ResolveTimeoutSeconds;
+        _effectiveRetryAttempts = options.RetryAttempts;
     }
 
     private async Task LoadStatsAsync()
@@ -222,13 +248,15 @@
     private bool HasPingerChanges =>
         _pingerForm.IntervalSeconds != _effectiveIntervalSeconds
         || _pingerForm.TimeoutSeconds != _effectiveTimeoutSeconds
-        || _pingerForm.ResolveTimeoutSeconds != _effectiveResolveTimeoutSeconds;
+        || _pingerForm.ResolveTimeoutSeconds != _effectiveResolveTimeoutSeconds
+        || _pingerForm.RetryAttempts != _effectiveRetryAttempts;
 
     private void RevertPinger()
     {
         _pingerForm.IntervalSeconds = _effectiveIntervalSeconds;
         _pingerForm.TimeoutSeconds = _effectiveTimeoutSeconds;
         _pingerForm.ResolveTimeoutSeconds = _effectiveResolveTimeoutSeconds;
+        _pingerForm.RetryAttempts = _effectiveRetryAttempts;
     }
 
     private async Task SavePingerAsync()
@@ -239,12 +267,14 @@
                 IntervalSeconds = _pingerForm.IntervalSeconds,
                 TimeoutSeconds = _pingerForm.TimeoutSeconds,
                 ResolveTimeoutSeconds = _pingerForm.ResolveTimeoutSeconds,
+                RetryAttempts = _pingerForm.RetryAttempts,
             },
             _cts.Token);
 
         _effectiveIntervalSeconds = _pingerForm.IntervalSeconds;
         _effectiveTimeoutSeconds = _pingerForm.TimeoutSeconds;
         _effectiveResolveTimeoutSeconds = _pingerForm.ResolveTimeoutSeconds;
+        _effectiveRetryAttempts = _pingerForm.RetryAttempts;
         _pingerStatus = "Saved — applied from the next ping round.";
         await LoadStatsAsync();
     }
@@ -321,5 +351,8 @@
 
         [Range(1, TimeoutUpperBoundSeconds, ErrorMessage = "Enter a resolve timeout between 1 and 60 seconds.")]
         public int ResolveTimeoutSeconds { get; set; }
+
+        [Range(0, RetryAttemptsUpperBound, ErrorMessage = "Enter between 0 and 1000 attempts.")]
+        public int RetryAttempts { get; set; }
     }
 }

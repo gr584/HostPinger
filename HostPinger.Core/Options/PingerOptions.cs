@@ -39,6 +39,14 @@ namespace HostPinger.Core.Options
         public int ResolveTimeoutSeconds { get; set; } = 3;
 
         /// <summary>
+        /// How many times a host that misses a ping is retried before it counts as down. It is
+        /// retrying while it has those attempts left, so a single dropped packet does not read as
+        /// an outage. Zero allows no retries and makes the first missed ping count, which is what
+        /// the application did before this setting existed. Negative values are read as zero.
+        /// </summary>
+        public int RetryAttempts { get; set; } = 3;
+
+        /// <summary>
         /// Maximum database file size. The oldest ping attempts are pruned when the file grows
         /// beyond this; zero or negative disables pruning.
         /// </summary>
