@@ -55,9 +55,19 @@
 
 <div class="card">
     <div class="card-body">
-        <h5 class="card-title">Pinger config</h5>
         <EditForm Model="_pingerForm" OnValidSubmit="SavePingerAsync">
             <DataAnnotationsValidator />
+            @*
+                The buttons act on all three settings at once, so they sit on the title row rather
+                than against any one of them.
+            *@
+            <div class="config-header">
+                <h5 class="card-title">Pinger config</h5>
+                <div class="config-actions">
+                    <button type="button" class="btn btn-outline-danger btn-sm" disabled="@(!HasPingerChanges)" @onclick="RevertPinger">Cancel</button>
+                    <button type="submit" class="btn btn-primary btn-sm" disabled="@(!HasPingerChanges)">Save</button>
+                </div>
+            </div>
             <dl class="config-list">
                 <dt><label for="ping-interval">Ping interval</label></dt>
                 <dd>
@@ -84,7 +94,6 @@
                     <div class="input-group input-group-sm config-input">
                         <InputNumber id="resolve-timeout" class="form-control" @bind-Value="_pingerForm.ResolveTimeoutSeconds" />
                         <span class="input-group-text">seconds</span>
-                        <button type="submit" class="btn btn-primary">Save</button>
                     </div>
                     <ValidationMessage For="() => _pingerForm.ResolveTimeoutSeconds" />
                     <div class="form-text">
@@ -204,6 +213,23 @@
         _effectiveMaxDatabaseSizeMb = _databaseForm.MaxDatabaseSizeMb;
         _databaseStatus = "Saved — applied after the next ping round.";
         await LoadStatsAsync();
+    }
+
+    /// <summary>
+    /// Whether the pinger form holds an edit that has not been saved, which is what the Save and
+    /// Cancel buttons key off. The comparison is the one <see cref="SyncFromConfiguration" /> makes
+    /// per field: a value that still matches the running configuration is not an edit.
+    /// </summary>
+    private bool HasPingerChanges =>
+        _pingerForm.IntervalSeconds != _effectiveIntervalSeconds
+        || _pingerForm.TimeoutSeconds != _effectiveTimeoutSeconds
+        || _pingerForm.ResolveTimeoutSeconds != _effectiveResolveTimeoutSeconds;
+
+    private void RevertPinger()
+    {
+        _pingerForm.IntervalSeconds = _effectiveIntervalSeconds;
+        _pingerForm.TimeoutSeconds = _effectiveTimeoutSeconds;
+        _pingerForm.ResolveTimeoutSeconds = _effectiveResolveTimeoutSeconds;
     }
 
     private async Task SavePingerAsync()
