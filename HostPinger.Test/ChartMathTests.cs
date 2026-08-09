@@ -261,5 +261,100 @@ namespace HostPinger.Test
 
             Assert.That(result, Is.EqualTo(new[] { 90d, 100 }));
         }
+
+        [Test]
+        public void SelectionFromPixels_MapsThePlotOntoTheRange()
+        {
+            var selection = ChartMath.SelectionFromPixels(25, 50, 100, Start, Start.AddMinutes(60), 8, 6);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(selection!.StartUtc, Is.EqualTo(Start.AddMinutes(15)));
+                Assert.That(selection.EndUtc, Is.EqualTo(Start.AddMinutes(30)));
+                Assert.That(selection.StartUtc.Kind, Is.EqualTo(DateTimeKind.Utc));
+            });
+        }
+
+        /// <summary>Dragging right to left picks out the same stretch of time as dragging left to right.</summary>
+        [Test]
+        public void SelectionFromPixels_OrdersTheEndsOfTheDrag()
+        {
+            var forwards = ChartMath.SelectionFromPixels(25, 50, 100, Start, Start.AddMinutes(60), 8, 6);
+            var backwards = ChartMath.SelectionFromPixels(50, 25, 100, Start, Start.AddMinutes(60), 8, 6);
+
+            Assert.That(backwards, Is.EqualTo(forwards));
+        }
+
+        [Test]
+        public void SelectionFromPixels_ClampsADragThatRanOffThePlot()
+        {
+            var selection = ChartMath.SelectionFromPixels(-40, 160, 100, Start, Start.AddMinutes(60), 8, 6);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(selection!.StartUtc, Is.EqualTo(Start));
+                Assert.That(selection.EndUtc, Is.EqualTo(Start.AddMinutes(60)));
+            });
+        }
+
+        /// <summary>
+        /// Ending at the right-hand edge is what tells a width ending "now" apart from a fixed slice
+        /// of the past, and it only has to be hit within a tolerance because it is aimed at by eye.
+        /// </summary>
+        [Test]
+        public void SelectionFromPixels_FlagsADragThatReachesTheEnd()
+        {
+            var end = Start.AddMinutes(60);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(ChartMath.SelectionFromPixels(20, 100, 100, Start, end, 8, 6)!.ReachesRangeEnd, Is.True);
+                Assert.That(ChartMath.SelectionFromPixels(20, 96, 100, Start, end, 8, 6)!.ReachesRangeEnd, Is.True,
+                    "a drag landing inside the tolerance should still count as reaching the end");
+                Assert.That(ChartMath.SelectionFromPixels(20, 90, 100, Start, end, 8, 6)!.ReachesRangeEnd, Is.False);
+            });
+        }
+
+        [Test]
+        public void SelectionFromPixels_IgnoresADragTooShortToBeOne()
+        {
+            var end = Start.AddMinutes(60);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(ChartMath.SelectionFromPixels(50, 50, 100, Start, end, 8, 6), Is.Null,
+                    "a click selects nothing");
+                Assert.That(ChartMath.SelectionFromPixels(50, 55, 100, Start, end, 8, 6), Is.Null);
+                Assert.That(ChartMath.SelectionFromPixels(50, 58, 100, Start, end, 8, 6), Is.Not.Null);
+            });
+        }
+
+        [Test]
+        public void SelectionFromPixels_RefusesADegenerateRangeOrPlot()
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(ChartMath.SelectionFromPixels(10, 90, 0, Start, Start.AddMinutes(60), 8, 6), Is.Null,
+                    "an unmeasured plot has no pixels to map");
+                Assert.That(ChartMath.SelectionFromPixels(10, 90, 100, Start, Start, 8, 6), Is.Null);
+                Assert.That(ChartMath.SelectionFromPixels(10, 90, 100, Start, Start.AddMinutes(-1), 8, 6), Is.Null);
+            });
+        }
+
+        /// <summary>
+        /// The selected range has to be something the chart can draw. A slice of a range already so
+        /// short that both ends of the drag land on the same tick is not: every scale built from it
+        /// would divide by a zero-width range.
+        /// </summary>
+        [Test]
+        public void SelectionFromPixels_RefusesARangeThatRoundsToNothing()
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(ChartMath.SelectionFromPixels(0, 10, 100, Start, Start.AddTicks(5), 8, 6), Is.Null);
+                Assert.That(ChartMath.SelectionFromPixels(0, 100, 100, Start, Start.AddTicks(5), 8, 6), Is.Not.Null,
+                    "a short range is still drawable as long as the drag covers more than none of it");
+            });
+        }
     }
 }

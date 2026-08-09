@@ -10,9 +10,11 @@
         }
         else
         {
-            <svg width="@F(_effectiveWidth)" height="@F(_effectiveHeight)" viewBox="0 0 @F(_effectiveWidth) @F(_effectiveHeight)" role="img"
+            <svg @ref="_svgRef" width="@F(_effectiveWidth)" height="@F(_effectiveHeight)" viewBox="0 0 @F(_effectiveWidth) @F(_effectiveHeight)" role="img"
                  aria-label="Ping round-trip time over time"
-                 @onmousemove="OnMouseMove" @onmouseleave="ClearHover">
+                 @onpointerdown="OnPointerDownAsync" @onpointermove="OnPointerMove"
+                 @onpointerup="OnPointerUpAsync" @onpointercancel="CancelDrag"
+                 @onmouseleave="ClearHover">
                 @foreach (var tick in _yTicks)
                 {
                     var y = YToPixel(tick);
@@ -59,6 +61,13 @@
                 @if (_hoverX is double crosshairX)
                 {
                     <line x1="@F(crosshairX)" y1="@F(PlotTop)" x2="@F(crosshairX)" y2="@F(PlotTop + _plotHeight)" class="crosshair" />
+                }
+                @if (SelectionBand is (double bandLeft, double bandWidth))
+                {
+                    <rect x="@F(bandLeft)" y="@F(PlotTop)" width="@F(bandWidth)" height="@F(_plotHeight)" class="selection" />
+                    <line x1="@F(bandLeft)" y1="@F(PlotTop)" x2="@F(bandLeft)" y2="@F(PlotTop + _plotHeight)" class="selection-edge" />
+                    <line x1="@F(bandLeft + bandWidth)" y1="@F(PlotTop)" x2="@F(bandLeft + bandWidth)" y2="@F(PlotTop + _plotHeight)" class="selection-edge" />
+                    @SvgText(bandLeft + bandWidth / 2, PlotTop + 12, "middle", true, "selection-label", 11, SelectionDurationText)
                 }
             </svg>
             @if (_hoverX is double tooltipX && _hoverRows.Count > 0)
@@ -109,6 +118,12 @@
     private const double BottomPad = 34;
     private const double HoverRadiusPx = 24;
 
+    /// <summary>A drag has to cover this much before it is a selection rather than a stray click.</summary>
+    private const double MinimumSelectionPx = 8;
+
+    /// <summary>How close to the right-hand edge a drag has to end to count as ending at "now".</summary>
+    private const double EndEdgeTolerancePx = 6;
+
     [Parameter, EditorRequired] public IReadOnlyList<ChartSeriesData> Series { get; set; } = [];
     [Parameter] public DateTime RangeStartUtc { get; set; }
     [Parameter] public DateTime RangeEndUtc { get; set; }
@@ -137,8 +152,16 @@
     /// </summary>
     [Parameter] public Action<double>? PlotDeviceWidthChanged { get; set; }
 
+    /// <summary>
+    /// Raised when a drag across the plot has picked out a range of time. The chart only reports
+    /// the selection; what to do with it — and whether the range it is currently being given is
+    /// still moving with the clock — belongs to the caller.
+    /// </summary>
+    [Parameter] public EventCallback<ChartSelection> RangeSelected { get; set; }
+
     private ElementReference _cardRef;
     private ElementReference _plotRef;
+    private ElementReference _svgRef;
     private IJSObjectReference? _module;
     private IJSObjectReference? _observer;
     private DotNetObjectReference<LineChart>? _selfRef;
@@ -159,6 +182,8 @@
     private double? _hoverX;
     private string _hoverTime = string.Empty;
     private List<HoverRow> _hoverRows = [];
+    private double? _dragStartX;
+    private double? _dragCurrentX;
 
     private sealed record RenderedSeries(ChartSeriesData Series, ChartSeriesGeometry Geometry, int Lane);
     private sealed record DirectLabel(double CircleX, double TextX, double Y);
@@ -292,7 +317,131 @@
         Recompute();
     }
 
-    private void OnMouseMove(MouseEventArgs e)
+    /// <summary>The band being dragged out, in chart pixels, or null when nothing is being dragged.</summary>
+    private (double Left, double Width)? SelectionBand
+    {
+        get
+        {
+            if (_dragStartX is not double startX || _dragCurrentX is not double currentX)
+            {
+                return null;
+            }
+
+            var width = Math.Abs(currentX - startX);
+            return width < 1 ? null : (Math.Min(startX, currentX), width);
+        }
+    }
+
+    /// <summary>How much time the band being dragged out covers, for the label inside it.</summary>
+    private string SelectionDurationText
+    {
+        get
+        {
+            if (SelectionBand is not (_, double width) || _plotWidth <= 0)
+            {
+                return string.Empty;
+            }
+
+            return Downtime.FormatDuration((RangeEndUtc - RangeStartUtc) * (width / _plotWidth));
+        }
+    }
+
+    // Dragging across the plot picks a range of time out of it. These are pointer events rather
+    // than mouse events so that the pointer can be captured for the duration of the drag: a
+    // selection that runs off the side of the plot, or out of the window altogether, still ends
+    // where the button comes up instead of leaving a band stranded on screen.
+    private async Task OnPointerDownAsync(PointerEventArgs e)
+    {
+        // Primary button only, and never touch: on a touch screen this same gesture scrolls the
+        // page, and a chart that swallowed it would strand the reader on it.
+        if (e.Button != 0 || e.PointerType == "touch" || _plotWidth <= 0)
+        {
+            return;
+        }
+
+        var x = e.OffsetX;
+        if (x < PlotLeft || x > PlotLeft + _plotWidth)
+        {
+            return;
+        }
+
+        _dragStartX = x;
+        _dragCurrentX = x;
+        ClearHover();
+
+        if (_module is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _module.InvokeVoidAsync("capturePointer", _svgRef, e.PointerId);
+        }
+        catch (JSException)
+        {
+            // The pointer was already released by the time the call landed. The drag still ends
+            // itself on the next move that arrives with no button held.
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+    }
+
+    private void OnPointerMove(PointerEventArgs e)
+    {
+        if (_dragStartX is null)
+        {
+            UpdateHover(e);
+            return;
+        }
+
+        // Moving with no button held means the release happened somewhere this element never heard
+        // about — the pointer left before the capture took effect. Drop the drag rather than
+        // leaving a band following the pointer around.
+        if (e.Buttons == 0)
+        {
+            CancelDrag();
+            return;
+        }
+
+        _dragCurrentX = Math.Clamp(e.OffsetX, PlotLeft, PlotLeft + _plotWidth);
+    }
+
+    private async Task OnPointerUpAsync(PointerEventArgs e)
+    {
+        if (_dragStartX is not double startX)
+        {
+            return;
+        }
+
+        // With the pointer captured this can land well outside the plot, which is the point: a drag
+        // aimed past the right-hand edge means "up to the end", so it clamps there rather than
+        // being thrown away.
+        var endX = Math.Clamp(e.OffsetX, PlotLeft, PlotLeft + _plotWidth);
+        CancelDrag();
+
+        var selection = ChartMath.SelectionFromPixels(
+            startX - PlotLeft,
+            endX - PlotLeft,
+            _plotWidth,
+            RangeStartUtc,
+            RangeEndUtc,
+            MinimumSelectionPx,
+            EndEdgeTolerancePx);
+        if (selection is not null)
+        {
+            await RangeSelected.InvokeAsync(selection);
+        }
+    }
+
+    private void CancelDrag()
+    {
+        _dragStartX = null;
+        _dragCurrentX = null;
+    }
+
+    private void UpdateHover(MouseEventArgs e)
     {
         var x = e.OffsetX;
         if (x < PlotLeft || x > PlotLeft + _plotWidth || _rendered.Count == 0)

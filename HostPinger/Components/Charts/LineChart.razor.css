@@ -80,6 +80,32 @@
     stroke-dasharray: 3 3;
 }
 
+/* The crosshair cursor is the whole invitation to drag a range out, so it is on the plot from the
+   start rather than appearing once a drag is under way. Dragging over text is ordinarily a
+   selection, and the axis and series labels are text: without this, picking a range leaves them
+   highlighted behind the band. */
+.chart-wrap svg {
+    cursor: crosshair;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* The band dragged out over the series. A wash of the chart's own ink rather than a colour of its
+   own, so that it cannot be mistaken for one of the plotted hosts. */
+.selection {
+    fill: var(--chart-ink-strong);
+    fill-opacity: 0.08;
+}
+
+.selection-edge {
+    stroke: var(--chart-ink-muted);
+    stroke-width: 1;
+}
+
+.chart-wrap ::deep text.selection-label {
+    fill: var(--chart-ink);
+}
+
 .legend {
     display: flex;
     flex-wrap: wrap;

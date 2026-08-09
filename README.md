@@ -49,8 +49,19 @@ Round-trip time plotted against time, for up to eight hosts at once. It reloads 
 and resizes with the window.
 
 - **Time windows** — 15 minutes, 1 hour, 6 hours, 24 hours or 7 days. Long windows are averaged
-  down to at most 600 points per host, so a week of history draws as quickly as a quarter of an
-  hour of it.
+  down to one point per pixel of plot width, so a week of history draws as quickly as a quarter of
+  an hour of it, at whatever detail the display can actually show.
+- **Zoom to a period** — dragging across the plot redraws the chart over just the stretch of time
+  the drag covered, and dragging back to where it started abandons it. Where the drag ends decides
+  what it means: run it into the right-hand edge of a live chart and it picks a narrower window
+  that still ends at *now*, so the chart goes on following the clock; stop short of the edge, or
+  zoom in further on a period already picked out, and it is a fixed period out of the past.
+- **Live and paused** — a bar above the chart gives the exact range on screen and says which of
+  those two it is. A fixed period reads as <span class="badge text-bg-warning">**Paused**</span>,
+  and the five-second refresh stops for as long as one is on screen, so it stays where it was put
+  rather than being dragged back to the present. **Resume live** puts back the window that was on
+  screen before the zoom and starts it following again, however many times it was zoomed in the
+  meantime; picking any of the time windows follows the clock over that window instead.
 - **Host picker** — searchable by name or address. Where the search leaves a single match, Enter
   selects it and closes the picker.
 - **Shareable selection** — the hosts on the chart are part of the URL, so a particular comparison

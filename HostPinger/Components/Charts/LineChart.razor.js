@@ -1,3 +1,18 @@
+// Hands the pointer to the chart for the rest of a drag, so a selection that leaves the plot — or
+// the window — still reports its release back to the element it started on. Without this the
+// pointerup lands on whatever the pointer happens to be over and the drag never ends.
+//
+// The capture is released by the browser on pointerup, so there is no matching teardown. Failing
+// is harmless and expected: by the time this round-trip lands the pointer may already be gone, and
+// the component ends the drag itself on the next move with no button held.
+export function capturePointer(el, pointerId) {
+    try {
+        el.setPointerCapture(pointerId);
+    } catch {
+        /* no such pointer any more */
+    }
+}
+
 // Keeps the chart sized to its available space in both dimensions and reports the plot area's
 // real pixel size back to the component, so the SVG is rendered (not viewBox-scaled) and text and
 // stroke widths stay crisp at any size.

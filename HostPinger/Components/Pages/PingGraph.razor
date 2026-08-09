@@ -28,8 +28,24 @@ else
             }
             else
             {
+                <div class="range-bar">
+                    <span class="badge @(IsPaused ? "text-bg-warning" : "bg-body-secondary text-body-secondary")">
+                        @(IsPaused ? "Paused" : "Live")
+                    </span>
+                    <span class="range-state">@RangeStateText</span>
+                    <span class="range-times">@RangeTimesText</span>
+                    @if (IsPaused)
+                    {
+                        <span class="range-duration">@Downtime.FormatDuration(_rangeEnd - _rangeStart)</span>
+                        <button type="button" class="btn btn-sm btn-outline-secondary range-resume" @onclick="ResumeLiveAsync">
+                            Resume live
+                        </button>
+                    }
+                </div>
+
                 <LineChart Series="_series" RangeStartUtc="_rangeStart" RangeEndUtc="_rangeEnd" UpdateInterval="_updateInterval"
-                           BucketDuration="_bucketDuration" PlotDeviceWidthChanged="OnPlotDeviceWidthChanged" />
+                           BucketDuration="_bucketDuration" PlotDeviceWidthChanged="OnPlotDeviceWidthChanged"
+                           RangeSelected="OnRangeSelectedAsync" />
             }
         </div>
 
@@ -38,7 +54,7 @@ else
                 @foreach (var window in Windows)
                 {
                     <button type="button"
-                            class="btn btn-sm @(window.Span == _window ? "btn-primary" : "btn-outline-secondary")"
+                            class="btn btn-sm @(!IsPaused && window.Span == _window ? "btn-primary" : "btn-outline-secondary")"
                             @onclick="() => SetWindowAsync(window.Span)">@window.Label</button>
                 }
             </div>
@@ -118,6 +134,14 @@ else
     private List<MonitoredHost> _allHosts = [];
     private HashSet<int> _selected = [];
     private TimeSpan _window = TimeSpan.FromHours(1);
+
+    // A range dragged out of the chart that does not run up to now, carrying the window width to
+    // put back when it is let go of. The range is held as two absolute instants rather than a
+    // width, because the whole point of it is that it stays where it was put while the clock moves
+    // on; null means the chart is following the clock at _window wide. The width to return to
+    // travels with the range rather than sitting in a field of its own so that clearing the one
+    // cannot leave the other behind.
+    private (DateTime StartUtc, DateTime EndUtc, TimeSpan ResumeWindow)? _pinnedRange;
     private List<ChartSeriesData> _series = [];
     private DateTime _rangeStart;
     private DateTime _rangeEnd;
@@ -132,6 +156,42 @@ else
     private int _loadedPointsPerSeries = DefaultPointsPerSeries;
     private TimeSpan _bucketDuration;
     private bool _awaitingFirstMeasurement = true;
+
+    private bool IsPaused => _pinnedRange is not null;
+
+    /// <summary>What the range on screen is: a width ending now, or a fixed slice of the past.</summary>
+    private string RangeStateText => IsPaused ? "Custom range" : $"Last {WindowText}";
+
+    private string WindowText
+    {
+        get
+        {
+            foreach (var window in Windows)
+            {
+                if (window.Span == _window)
+                {
+                    return window.Label;
+                }
+            }
+
+            // Zooming into a live window leaves a width no preset has a name for.
+            return Downtime.FormatDuration(_window);
+        }
+    }
+
+    /// <summary>
+    /// The range on screen in absolute local time, which is the only form a pinned range can be
+    /// read in. The date is repeated on the end of the range only when the range crosses midnight.
+    /// </summary>
+    private string RangeTimesText
+    {
+        get
+        {
+            var start = _rangeStart.ToLocalTime();
+            var end = _rangeEnd.ToLocalTime();
+            return $"{start:d MMM HH:mm:ss} → {end.ToString(start.Date == end.Date ? "HH:mm:ss" : "d MMM HH:mm:ss")}";
+        }
+    }
 
     private string SelectionSummary => _selected.Count switch
     {
@@ -224,6 +284,16 @@ else
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
             while (await timer.WaitForNextTickAsync(_cts.Token))
             {
+                // A pinned range covers a stretch of the past that is not going to change, and
+                // holding still is the point of pinning it, so the tick does nothing. The one
+                // exception is a resize: how densely the range is sampled is tied to the plot's
+                // pixel width, and without this the line would stay at the old width's resolution
+                // until the chart was live again.
+                if (IsPaused && _pointsPerSeries == _loadedPointsPerSeries)
+                {
+                    continue;
+                }
+
                 await LoadAsync();
                 await InvokeAsync(StateHasChanged);
             }
@@ -235,8 +305,16 @@ else
 
     private async Task LoadAsync()
     {
-        _rangeEnd = DateTime.UtcNow;
-        _rangeStart = _rangeEnd - _window;
+        if (_pinnedRange is (DateTime pinnedStart, DateTime pinnedEnd, _))
+        {
+            _rangeStart = pinnedStart;
+            _rangeEnd = pinnedEnd;
+        }
+        else
+        {
+            _rangeEnd = DateTime.UtcNow;
+            _rangeStart = _rangeEnd - _window;
+        }
 
         await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);
         _allHosts = await db.Hosts.AsNoTracking().OrderBy(h => h.Id).ToListAsync(_cts.Token);
@@ -347,6 +425,53 @@ else
     private async Task SetWindowAsync(TimeSpan window)
     {
         _window = window;
+        _pinnedRange = null;
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// Applies a range dragged out of the chart. A drag that ran up to the right-hand edge of a
+    /// live chart picked a width ending at now, so it goes on following the clock, only narrower;
+    /// anything else picked a fixed stretch of the past, and the refresh has to stop overwriting it
+    /// or it would be dragged back to the present within five seconds.
+    /// </summary>
+    private async Task OnRangeSelectedAsync(ChartSelection selection)
+    {
+        // Reaching that edge only means "up to now" while the chart is following the clock. On a
+        // range that is already pinned it is the end of the pinned range, which is a moment in the
+        // past like any other in it, so zooming into one stays paused however far right it goes.
+        if (selection.ReachesRangeEnd && !IsPaused)
+        {
+            _window = selection.EndUtc - selection.StartUtc;
+        }
+        else
+        {
+            // The window to come back to is taken on the way in and then carried across any further
+            // zooming: narrowing a pinned range again is still the same excursion into the past,
+            // and resuming should undo the whole of it rather than one step of it.
+            _pinnedRange = (
+                selection.StartUtc,
+                selection.EndUtc,
+                _pinnedRange?.ResumeWindow ?? _window);
+        }
+
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// Follows the clock again over the window that was on screen before the zoom, so that leaving
+    /// a pinned range puts the chart back where it was rather than at whatever width happened to be
+    /// dragged out along the way.
+    /// </summary>
+    private async Task ResumeLiveAsync()
+    {
+        if (_pinnedRange is not (_, _, TimeSpan resumeWindow))
+        {
+            return;
+        }
+
+        _window = resumeWindow;
+        _pinnedRange = null;
         await LoadAsync();
     }
 

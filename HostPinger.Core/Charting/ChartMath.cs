@@ -148,6 +148,53 @@ namespace HostPinger.Core.Charting
             return new ChartSeriesGeometry(segments, downMarkers);
         }
 
+        /// <summary>
+        /// Turns the two ends of a drag across the plot into the range of time it covers, or null
+        /// if it covers too little to be one. The ends are ordered, so dragging right to left picks
+        /// the same range as dragging left to right, and clamped to the plot, so a drag that runs
+        /// off the edge stops at it rather than selecting time that was never on screen.
+        /// </summary>
+        /// <param name="fromX">Where the drag started, in pixels from the left edge of the plot.</param>
+        /// <param name="toX">Where it ended, in the same space.</param>
+        /// <param name="minimumWidthPx">
+        /// Below this the drag is treated as a click that wobbled and nothing is selected. It is
+        /// also what makes a drag abandonable: come back to where you started and let go.
+        /// </param>
+        /// <param name="edgeTolerancePx">
+        /// How near the right-hand edge still counts as reaching it. A drag meant to end at "now"
+        /// is aimed at that edge by eye and lands a pixel or two short of it as often as not.
+        /// </param>
+        public static ChartSelection? SelectionFromPixels(
+            double fromX,
+            double toX,
+            double plotWidth,
+            DateTime rangeStartUtc,
+            DateTime rangeEndUtc,
+            double minimumWidthPx,
+            double edgeTolerancePx)
+        {
+            if (plotWidth <= 0 || rangeEndUtc <= rangeStartUtc)
+            {
+                return null;
+            }
+
+            var lo = Math.Clamp(Math.Min(fromX, toX), 0, plotWidth);
+            var hi = Math.Clamp(Math.Max(fromX, toX), 0, plotWidth);
+            if (hi - lo < minimumWidthPx)
+            {
+                return null;
+            }
+
+            var rangeTicks = (rangeEndUtc - rangeStartUtc).Ticks;
+            var startUtc = rangeStartUtc.AddTicks((long)(lo / plotWidth * rangeTicks));
+            var endUtc = rangeStartUtc.AddTicks((long)(hi / plotWidth * rangeTicks));
+
+            // A range narrow enough to round to nothing would be a range the chart cannot draw.
+            return endUtc > startUtc
+                ? new ChartSelection(startUtc, endUtc, hi >= plotWidth - edgeTolerancePx)
+                : null;
+        }
+
         /// <summary>The width of one <see cref="Downsample"/> bucket over the given range.</summary>
         public static TimeSpan BucketDuration(DateTime rangeStartUtc, DateTime rangeEndUtc, int bucketCount)
         {

@@ -10,6 +10,36 @@
     min-width: 0;
 }
 
+/*
+ * Sits above the chart and says what is on screen: the range in absolute local time, and whether
+ * it is still following the clock. The height is fixed so that the Resume button coming and going
+ * cannot shift the chart below it — the chart's own script has already resolved that card's height
+ * against the bottom of the viewport, and it does not recompute for a reflow above it.
+ */
+.range-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    min-height: 40px;
+    padding: 0 2px;
+    font-size: 14px;
+}
+
+.range-state {
+    font-weight: 600;
+}
+
+.range-times,
+.range-duration {
+    color: var(--bs-secondary-color);
+    font-variant-numeric: tabular-nums;
+}
+
+.range-resume {
+    margin-left: auto;
+}
+
 .graph-settings {
     display: flex;
     flex-direction: column;
