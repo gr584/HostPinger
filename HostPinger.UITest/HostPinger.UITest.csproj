@@ -1,0 +1,54 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="10.0.1">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <!-- Drives a real browser against a real instance of the application. The package carries its
+         own Node runtime, so nothing has to be installed on the machine running the tests; the
+         browser is whichever Chrome or Chromium is already there, found by BrowserTest. -->
+    <PackageReference Include="Microsoft.Playwright" Version="1.61.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+    <PackageReference Include="NUnit" Version="4.6.1" />
+    <PackageReference Include="NUnit.Analyzers" Version="4.14.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="NUnit3TestAdapter" Version="6.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="NUnit.Framework" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- For ChartPaletteTests, which checks that the stylesheet still defines a color for every
+         palette slot. Copied rather than referenced in place so the test does not have to guess
+         where the checkout is from its output directory. -->
+    <Content Include="..\HostPinger\wwwroot\app.css" Link="app.css" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HostPinger\HostPinger.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Where the built application ends up, so WebApp can start a real one to drive. Written in
+         as an attribute rather than worked out at run time from the test assembly's location,
+         which only happens to sit beside it. -->
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>WebAppDirectory</_Parameter1>
+      <_Parameter2>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../HostPinger/bin/$(Configuration)/$(TargetFramework)'))</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

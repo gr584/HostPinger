@@ -27,6 +27,10 @@ jobs:
       # and only ever execute here.
       - run: dotnet test HostPinger.Test/HostPinger.Test.csproj -c Release
 
+      # The runner image ships Chrome, which is what these drive; on a machine without one they
+      # report that and are ignored rather than failing, so this stays green either way.
+      - run: dotnet test HostPinger.UITest/HostPinger.UITest.csproj -c Release
+
   rpm:
     name: rpm (fedora)
     runs-on: ubuntu-latest

@@ -500,8 +500,15 @@ adding the line by hand and restarting comes to the same thing.
 
 ```bash
 dotnet run --project HostPinger        # http://localhost:5041, database under HostPinger/Data
-dotnet test HostPinger.Test
+dotnet test HostPinger.Test            # the library and the service logic
+dotnet test HostPinger.UITest          # the web UI, some of it through a real browser
 ```
+
+`HostPinger.UITest` drives Chrome or Chromium against an instance of the application it starts
+itself, on a spare port and with a database in a temporary directory, so a run touches neither the
+development data nor an installed service's. It uses whichever browser is already installed rather
+than downloading one; where there is none, those tests report why and are ignored instead of
+failing.
 
 The development profile keeps its database and settings inside the working tree, so a local run
 never touches an installed service's data.
@@ -522,7 +529,8 @@ such rather than becoming the current release.
 | --- | --- |
 | `HostPinger/` | Blazor Server web application and service host. |
 | `HostPinger.Core/` | Pinging, storage, pruning, settings. |
-| `HostPinger.Test/` | NUnit tests. |
+| `HostPinger.Test/` | NUnit tests over the library and the service logic. |
+| `HostPinger.UITest/` | NUnit tests over the web UI, driving a browser through Playwright. |
 | `HostPinger.WindowsInstaller/` | WiX project producing the MSI. |
 | `HostPinger.LinuxInstaller/` | Spec file, systemd unit, SELinux policy module and build script producing the RPMs. |
 

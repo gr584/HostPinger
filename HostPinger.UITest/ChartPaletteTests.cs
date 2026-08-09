@@ -1,7 +1,7 @@
 using System.Text.RegularExpressions;
 using HostPinger.Core.Charting;
 
-namespace HostPinger.Test
+namespace HostPinger.UITest
 {
     /// <summary>
     /// Guards the arrangement between the palette and the stylesheet. A slot is only a name here —

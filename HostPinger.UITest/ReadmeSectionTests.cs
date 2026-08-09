@@ -1,6 +1,6 @@
 using HostPinger.Documentation;
 
-namespace HostPinger.Test
+namespace HostPinger.UITest
 {
     /// <summary>
     /// Guards the one-copy arrangement between the README and the About page. The page renders the
