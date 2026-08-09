@@ -40,6 +40,13 @@ namespace HostPinger.Security
         public const string FailedQuery = "unlockFailed";
 
         /// <summary>
+        /// Whole seconds left of the wait a run of wrong passwords has earned, carried back so the
+        /// overlay can say how long rather than only that there is one. Absent when there is none,
+        /// which is the ordinary refusal.
+        /// </summary>
+        public const string WaitQuery = "unlockWait";
+
+        /// <summary>
         /// Asks for the overlay on arrival, for a page that cannot ask for it directly. The pages
         /// that write cookies are rendered statically and so have no click to run anything on; a
         /// link carrying this is how they offer to unlock.

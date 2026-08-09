@@ -60,7 +60,14 @@ namespace HostPinger.Security
                 && user.FindFirstValue(StampClaimType) == PasswordHash.Stamp(stored);
         }
 
-        /// <summary>Whether <paramref name="password"/> is the one that is set.</summary>
+        /// <summary>
+        /// Whether <paramref name="password"/> is the one that is set.
+        /// </summary>
+        /// <remarks>
+        /// The plain question, and not the one a page should be asking: guesses arrive through
+        /// <see cref="PasswordAttempts"/>, which asks this and counts the asking, so that no form
+        /// can offer somebody an unlimited run at the password by forgetting to.
+        /// </remarks>
         public bool Verify(string password) => PasswordHash.Verify(StoredHash, password);
 
         /// <summary>

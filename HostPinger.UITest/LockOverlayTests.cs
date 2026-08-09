@@ -99,6 +99,11 @@ namespace HostPinger.UITest
             await Assertions.Expect(Page.Locator("#new-password")).ToBeVisibleAsync();
         }
 
+        /// <summary>
+        /// One wrong password costs nothing: the first few are free, which is what keeps somebody
+        /// mistyping their own password from meeting the wait that
+        /// <see cref="Overlay_StopsLookingAtGuessesOnceThereHaveBeenTooManyWrongOnes"/> is about.
+        /// </summary>
         [Test]
         public async Task Overlay_ReopensWithItsErrorWhenThePasswordIsWrong()
         {
@@ -110,6 +115,55 @@ namespace HostPinger.UITest
             await Assertions.Expect(Overlay).ToBeVisibleAsync();
             await Assertions.Expect(Page.GetByText("That is not the password.")).ToBeVisibleAsync();
             await Assertions.Expect(Page).ToHaveURLAsync($"{BaseUrl}/");
+        }
+
+        /// <summary>
+        /// The rising wait, driven through the form it protects. The schedule itself is settled in
+        /// PasswordAttemptsTests against a clock that can be moved by hand; what only a browser can
+        /// show is that the form is wired to it at all, and that the wait finds its way back into
+        /// the overlay — which it does the long way round, as a count of seconds on the address.
+        /// </summary>
+        /// <remarks>
+        /// Every test in this fixture reaches the application from the same address, so they share
+        /// one tally, and the tests run one after another rather than at once. That is what makes
+        /// this safe to do here and what obliges it to sit the wait out afterwards rather than
+        /// leaving it standing: a run that unlocks in three other places must not find itself
+        /// turned away in them.
+        /// </remarks>
+        [Test]
+        public async Task Overlay_StopsLookingAtGuessesOnceThereHaveBeenTooManyWrongOnes()
+        {
+            await GoAsync();
+            await OpenOverlayAsync();
+
+            // However many wrong answers are free, rather than a number written down twice: the
+            // point is that there is an end to them, not where exactly it falls.
+            var refused = Page.GetByText("Too many wrong passwords");
+            for (var attempt = 1; !await refused.IsVisibleAsync(); attempt++)
+            {
+                Assert.That(attempt, Is.LessThan(10), "no run of wrong passwords was ever refused");
+                await SubmitPasswordAsync("not the password");
+                await Assertions.Expect(Overlay).ToBeVisibleAsync();
+                await Assertions.Expect(Page).ToHaveURLAsync($"{BaseUrl}/");
+            }
+
+            // The right password is turned away too while the wait stands, which is what makes it a
+            // wait rather than a hint.
+            await SubmitPasswordAsync(WebApp.Password);
+            await Assertions.Expect(refused).ToBeVisibleAsync();
+            await Assertions.Expect(Button("Locked")).ToBeVisibleAsync();
+
+            // Sitting it out is the only way through, and it is also the tidying up: getting it
+            // right leaves nothing owed against the address the rest of the run shares.
+            var unlocked = Button("Unlocked");
+            var deadline = DateTime.UtcNow + TimeSpan.FromMinutes(2);
+            while (!await unlocked.IsVisibleAsync())
+            {
+                Assert.That(DateTime.UtcNow, Is.LessThan(deadline), "the wait never ran out");
+                await Task.Delay(500);
+                await SubmitPasswordAsync(WebApp.Password);
+                await Page.WaitForLoadStateAsync();
+            }
         }
 
         /// <summary>

@@ -60,6 +60,12 @@ namespace HostPinger
             // rather than Always because the service is normally reached over plain HTTP — a
             // cookie marked secure there would never come back.
             builder.Services.AddSingleton<PasswordGate>();
+
+            // Every guess goes through here, which is why it is a singleton: what it remembers is
+            // how many wrong ones each address has sent lately, and a tally kept per request would
+            // be no tally at all.
+            builder.Services.AddSingleton<PasswordAttempts>();
+
             builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
                 .AddCookie(options =>
                 {

@@ -22,8 +22,10 @@ namespace HostPinger.Core.Options
         private const string Version = "v1";
 
         // OWASP's floor for PBKDF2-HMAC-SHA256 at the time of writing, and about a tenth of a
-        // second per attempt on ordinary hardware. That cost is the only thing standing between a
-        // guessable password and someone working through a list, since there is no lockout.
+        // second per attempt on ordinary hardware. That cost is what a run of guesses meets first,
+        // and it is what holds if the rest ever fails: the web UI turns an address away for longer
+        // and longer as it goes on guessing, but nothing of that reaches down here, and a copy of
+        // the settings file taken off the machine leaves this as the only thing in the way.
         private const int Iterations = 210_000;
 
         private const int SaltBytes = 16;

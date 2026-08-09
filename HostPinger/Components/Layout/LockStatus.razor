@@ -130,7 +130,9 @@
         // history, a password since removed — comes off the address without doing anything.
         if (!_isUnlocked && Gate.IsPasswordSet)
         {
-            _error = wasRefused ? "That is not the password." : null;
+            // A wait outranks the refusal that came with it: being told the password was wrong is
+            // no use to somebody whose next few attempts will not be looked at either.
+            _error = WaitMessage ?? (wasRefused ? "That is not the password." : null);
             _destination = Marker(LockFormNames.NextQuery);
             OpenNow();
         }
@@ -205,6 +207,16 @@
         }
     }
 
+    /// <summary>
+    /// What to say about the wait a run of wrong passwords has earned, and null while there is
+    /// none. The seconds are carried back on the address rather than the sentence itself, so a
+    /// marker somebody has typed can only ever change the number in it.
+    /// </summary>
+    private string? WaitMessage =>
+        int.TryParse(Marker(LockFormNames.WaitQuery), out var seconds) && seconds > 0
+            ? PasswordAttempt.Waiting(TimeSpan.FromSeconds(seconds))
+            : null;
+
     private string? Marker(string name) =>
         QueryHelpers.ParseQuery(Navigation.ToAbsoluteUri(Navigation.Uri).Query)
             .TryGetValue(name, out var value) ? value.ToString() : null;
@@ -214,6 +226,7 @@
         new Dictionary<string, object?>
         {
             [LockFormNames.FailedQuery] = null,
+            [LockFormNames.WaitQuery] = null,
             [LockFormNames.OpenQuery] = null,
             [LockFormNames.NextQuery] = null,
         });

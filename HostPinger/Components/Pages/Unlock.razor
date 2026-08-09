@@ -1,9 +1,11 @@
 @page "/unlock"
+@using System.Globalization
 @using HostPinger.Security
 @using Microsoft.AspNetCore.Authentication
 @using Microsoft.AspNetCore.Authentication.Cookies
 @using Microsoft.AspNetCore.WebUtilities
 @inject PasswordGate Gate
+@inject PasswordAttempts Attempts
 @inject NavigationManager Navigation
 @inject ILogger<Unlock> Logger
 
@@ -101,12 +103,20 @@
 
     private async Task SubmitAsync()
     {
-        // Every attempt is logged, right and wrong. Nothing rate-limits this page, so the log is
-        // the only place a run of guesses shows up at all — and a run of failures is worth much
-        // less without the line saying whether one of them eventually worked.
-        if (string.IsNullOrEmpty(Password) || !Gate.Verify(Password))
+        // Through PasswordAttempts rather than straight at the gate, which is what counts this
+        // guess against the address it came from and refuses it outright once too many have come
+        // from there. See PasswordAttempts for the schedule.
+        var attempt = Attempts.Verify(HttpContext?.Connection.RemoteIpAddress, Password);
+        if (!attempt.IsAccepted)
         {
-            Logger.LogWarning("Failed unlock attempt from {Address}.", RequestOrigin.Describe(HttpContext));
+            // Every guess that was actually looked at is logged, and so is every unlock below: a
+            // run of failures is worth much less without the line saying whether one of them
+            // eventually worked. A refusal is not logged here, only in the throttle and only at
+            // debug — a line per request would hand whoever is guessing a way to fill the journal.
+            if (attempt.Result == PasswordAttemptResult.Wrong)
+            {
+                Logger.LogWarning("Failed unlock attempt from {Address}.", RequestOrigin.Describe(HttpContext));
+            }
 
             if (OverlayPath is { } overlayPath)
             {
@@ -114,6 +124,15 @@
                 // The destination goes along when it is somewhere else, so that getting the
                 // password wrong once does not quietly change where the unlock was heading.
                 var markers = new Dictionary<string, string?> { [LockFormNames.FailedQuery] = "1" };
+                if (attempt.Wait > TimeSpan.Zero)
+                {
+                    // Whole seconds, because that is all the overlay says: it rebuilds the sentence
+                    // from this rather than being told it, so nothing carries a message the browser
+                    // could edit into something the page would then repeat back.
+                    markers[LockFormNames.WaitQuery] = ((int)Math.Ceiling(attempt.Wait.TotalSeconds))
+                        .ToString(CultureInfo.InvariantCulture);
+                }
+
                 if (ReturnHref != overlayPath)
                 {
                     markers[LockFormNames.NextQuery] = ReturnHref;
@@ -123,7 +142,8 @@
                 return;
             }
 
-            _error = string.IsNullOrEmpty(Password) ? "Enter the password." : "That is not the password.";
+            _error = attempt.WaitMessage
+                ?? (string.IsNullOrEmpty(Password) ? "Enter the password." : "That is not the password.");
             return;
         }
 

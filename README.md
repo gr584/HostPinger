@@ -129,13 +129,27 @@ service, locked or not.
   list keeps what it had until it is used again.
 - **Changing the password locks every browser again**, including the one that changed it, which is
   signed straight back in under the new one. Removing it unlocks everything for everyone.
+- **Wrong passwords are made to wait.** The first three cost nothing, so mistyping a password from
+  memory is free. Each one after that doubles the wait before another guess from the same address
+  is looked at — five seconds, then ten, then twenty, and so on up to an hour, where it stops. That
+  turns an unattended run through a word list into a couple of dozen guesses a day. The right
+  password is turned away along with the wrong ones while a wait stands; getting it right once the
+  wait is over clears the tally, as does leaving the password alone for an hour afterwards. The
+  change and removal forms count against the same tally, so neither is a way round it, and an empty
+  box is never counted as a guess. Nothing is written to disk, so restarting the service forgets
+  every tally.
+- **The wait is per address**, so that somebody guessing cannot shut everybody else out of their own
+  monitoring. Behind a reverse proxy every visitor arrives from the same address, and there it is in
+  practice one wait for the whole service. A whole IPv6 /64 counts as one address, since a single
+  machine there usually has billions to guess from.
 - **Every attempt is logged.** A wrong password — on the unlock page, or as the current password
   when changing or removing one — is a warning naming the address it came from, and unlocking,
   setting, changing and removing are recorded beside them, so a run of failures can be read
-  against whether any of them worked. Nothing throttles the unlock page, so the log is where a
-  run of guesses shows up. The address is the one the connection was opened from, which behind a
-  reverse proxy is the proxy: no forwarded headers are trusted. Passwords themselves are never
-  written to the log.
+  against whether any of them worked. A run long enough to earn a wait says so on its own line,
+  once per wait rather than once per attempt, so nobody can fill the journal by guessing. The
+  address is the one the connection was opened from, which behind a reverse proxy is the proxy: no
+  forwarded headers are trusted, because a tally kept against a header anyone can set is no tally
+  at all. Passwords themselves are never written to the log.
 - **The password is stored hashed** — PBKDF2 over a random salt — in the settings overlay beside
   the database, and only ever compared against. There is nothing to read back out of it, which
   also means a forgotten one cannot be recovered: delete the `Security` section from
