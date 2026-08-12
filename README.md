@@ -82,6 +82,34 @@ and resizes with the window.
 - **Stable colours** — each host keeps its colour as the selection changes, from a palette chosen
   to stay distinguishable with colour vision deficiency.
 
+### Resolver errors — `/resolver-errors`
+
+The addresses that could not be turned into an IP address, one row each, refreshed every five
+seconds. A round that cannot resolve a host never asks it anything, so the failure is recorded
+here rather than as a missed ping — a name that does not resolve is not the same as a host that is
+down, and this is where the difference can be read without going through the log.
+
+- **One row per address**, the most recently failed at the top, however many rounds it has failed
+  in. Every failure is stored; the row is what they add up to.
+- **Reason** — <span class="badge text-bg-secondary">**Timed out**</span> when the lookup did not
+  come back inside the *Resolve timeout*, which usually says more about the resolver than about
+  the name, <span class="badge text-bg-warning">**No addresses**</span> when it came back with
+  nothing in it, and <span class="badge text-bg-warning">**Lookup failed**</span> when it failed
+  outright — an unknown name, or no resolver able to answer. What is shown is the most recent
+  failure's reason, and hovering it explains what it means.
+- **Last 24 h**, **Last 7 d** and **Last 30 d** — how many failures fall inside each window,
+  counted back from now. They are what separate an address failing every round from one that
+  failed once last week; an address whose failures have aged out of the narrower windows is still
+  listed, with a dash in each of them.
+- **Kept for 30 days** — failures older than that are deleted on the next ping round, so the
+  widest column is the whole of what is stored and an address stops being listed once its last
+  failure has aged out. This happens whatever the maximum database size is set to, including the
+  0 that turns size pruning off: it is about there being nothing left to read rather than about
+  disk space.
+- **The address rather than the host** — the rows belong to the address that was looked up, so
+  they survive a host being re-pointed or deleted. The host's name is shown beside it for as long
+  as one still carries that address.
+
 ### Configuration — `/configuration`
 
 The settings that can be changed while the service is running. Saving writes them to an overlay
@@ -94,7 +122,7 @@ is.
 - **Resolve timeout** — how long to wait for a host name to become an address. Default 3 seconds.
   Separate from the reply timeout, which does not cover resolution, so a name that hangs cannot
   set the pace of the round on its own. A name that does not resolve in time is skipped for that
-  round rather than recorded as down.
+  round rather than recorded as down, and the failure is listed on the *Resolver errors* page.
 - **Retry attempts** — how many times a host that misses a ping is retried before it counts as
   down. Default 3, and never less than 0. A host reads as *Retrying* rather than *Down* while it
   has attempts left, and a run of misses it recovers from inside them is not reported as downtime
@@ -102,8 +130,9 @@ is.
   retries and makes the first missed ping count, as it did before this setting existed. It
   changes what is reported rather than what is recorded — every attempt is stored either way, and
   changing it re-reads the whole history rather than only applying from here on.
-- **Maximum database size** — the oldest attempts are pruned once the file grows past this.
-  Default 100 MB; 0 disables pruning and lets the file grow without bound.
+- **Maximum database size** — the oldest recorded history is pruned once the file grows past this.
+  Default 100 MB; 0 disables pruning and lets the file grow without bound, apart from the resolver
+  errors, which are dropped at 30 days either way.
 - **Capacity estimate** — the current file size, how fast it is growing at the present host count
   and interval, and roughly how much history fits inside the limit at that rate.
 - **Security** — whether a password is set, and the way to `/password` to set, change or remove
@@ -172,10 +201,12 @@ service, locked or not.
 - A ping that reaches a known address but cannot be completed — a silent host, or a socket the
   operating system refuses — is recorded as unanswered rather than abandoning the round, so one
   bad host cannot cost every other host its data point.
-- A name that will not resolve is different, and records nothing at all: nothing was asked of the
-  host, so there is nothing to store about it, and storing a missed ping would show up later as an
-  outage invented out of a name that does not resolve. The host is tried again the next round.
-  Either failure is logged at most once every 15 minutes per address.
+- A name that will not resolve is different, and records no ping attempt at all: nothing was asked
+  of the host, so there is nothing to store about its reachability, and storing a missed ping
+  would show up later as an outage invented out of a name that does not resolve. What is recorded
+  instead is the failed lookup itself — the address, the moment, and which way it failed — against
+  the address rather than the host, which is what the *Resolver errors* page reads. The host is
+  tried again the next round. Either failure is logged at most once every 15 minutes per address.
 - Downtime is measured between the answered pings on either side of an outage, from the last
   moment the host was known reachable to the moment it answered again. That is deliberately the
   widest window the recorded attempts support: an outage that began while the service itself was
@@ -192,14 +223,19 @@ service, locked or not.
 
 ## Storage
 
-- One SQLite file holds the hosts and every ping attempt. Its schema is migrated automatically at
-  startup, so an upgrade needs no separate step.
+- One SQLite file holds the hosts, every ping attempt and every failed lookup. Its schema is
+  migrated automatically at startup, so an upgrade needs no separate step.
 - The settings edited on the Configuration page, and the hashed password if one is set, live in a
   small JSON file beside the database rather than inside it. It holds only what has been changed
   from the defaults, and can be read or repaired with a text editor.
-- Pruning deletes the oldest attempts in batches until the file is back under the limit, and the
-  file is vacuumed incrementally as it goes so the space is actually returned rather than left as
-  free pages.
+- Pruning deletes the oldest recorded history in batches until the file is back under the limit,
+  and the file is vacuumed incrementally as it goes so the space is actually returned rather than
+  left as free pages. Ping attempts and resolver errors are trimmed alike, so whichever of them is
+  filling the file, the limit holds — an address that never resolves records a failure every round
+  for as long as it stays configured.
+- Resolver errors are kept for 30 days on top of that, and dropped past it on the next ping round
+  whatever the size limit allows. Ping attempts have no such window: they are kept for as long as
+  the file has room for them, since the graph and the downtime figures read the whole history.
 - Everything is local. Nothing is sent anywhere, and there is no external dependency beyond the
   hosts being pinged.
 

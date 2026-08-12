@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using HostPinger.Core.Data;
 using HostPinger.Core.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -61,7 +62,9 @@ namespace HostPinger.Test
 
         /// <summary>
         /// The whole point of the separate timeout: a name that will not come back is abandoned, and
-        /// nothing is echoed on its behalf.
+        /// nothing is echoed on its behalf. The reason travels with the outcome because it is
+        /// recorded — see <see cref="ResolverError"/> — and a resolver that is too slow to answer is
+        /// a different problem from a name that is not there.
         /// </summary>
         [Test]
         public async Task SendPing_ResolutionTimingOutEchoesNothing()
@@ -74,7 +77,7 @@ namespace HostPinger.Test
 
             Assert.Multiple(() =>
             {
-                Assert.That(result, Is.EqualTo(PingResult.Unresolved));
+                Assert.That(result, Is.EqualTo(PingResult.Unresolved(ResolverFailure.TimedOut)));
                 Assert.That(echo.Destinations, Is.Empty, "there was no address to echo");
             });
         }
@@ -113,7 +116,7 @@ namespace HostPinger.Test
 
             Assert.Multiple(() =>
             {
-                Assert.That(result, Is.EqualTo(PingResult.Unresolved));
+                Assert.That(result, Is.EqualTo(PingResult.Unresolved(ResolverFailure.NoAddresses)));
                 Assert.That(echo.Destinations, Is.Empty);
             });
         }
@@ -126,7 +129,25 @@ namespace HostPinger.Test
 
             var result = await sender.SendPingAsync("nope.example", ReplyTimeout, ResolveTimeout);
 
-            Assert.That(result, Is.EqualTo(PingResult.Unresolved));
+            Assert.That(result, Is.EqualTo(PingResult.Unresolved(ResolverFailure.LookupFailed)));
+        }
+
+        /// <summary>
+        /// A literal is not looked up at all, so it cannot fail to resolve — which is what keeps
+        /// the address of a host that is simply switched off out of the resolver errors, where it
+        /// would read as a name that could not be found.
+        /// </summary>
+        [Test]
+        public async Task SendPing_AnIpLiteralThatDoesNotAnswerIsUnansweredRatherThanUnresolved()
+        {
+            var sender = CreateSender(
+                new FakeResolver(),
+                new FakeEcho { Reply = new IcmpReply(IPStatus.TimedOut, 0) });
+
+            var result = await sender.SendPingAsync("10.0.0.7", ReplyTimeout, ResolveTimeout);
+
+            Assert.That(result, Is.EqualTo(PingResult.Unanswered));
+            Assert.That(result.Failure, Is.Null, "nothing was looked up, so there is no lookup failure to record");
         }
 
         [TestCase(IPStatus.TimedOut)]

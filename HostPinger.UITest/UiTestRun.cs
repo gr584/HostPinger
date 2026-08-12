@@ -40,6 +40,10 @@ namespace HostPinger.UITest
         public static string BaseUrl =>
             _app?.BaseUrl ?? throw new InvalidOperationException("The application was not started for this run.");
 
+        /// <summary>The database the running application reads, for a test that has to seed one.</summary>
+        public static string DatabasePath =>
+            _app?.DatabasePath ?? throw new InvalidOperationException("The application was not started for this run.");
+
         [OneTimeSetUp]
         public async Task StartAsync()
         {

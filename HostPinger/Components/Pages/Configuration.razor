@@ -52,7 +52,9 @@
                     </div>
                     <ValidationMessage For="() => _databaseForm.MaxDatabaseSizeMb" />
                     <div class="form-text">
-                        The oldest ping attempts are pruned once the file grows past this. 0 disables pruning.
+                        The oldest ping attempts and resolver errors are pruned once the file grows
+                        past this. 0 disables pruning, though resolver errors are still dropped
+                        once they are 30 days old.
                         @if (_databaseStatus is not null)
                         {
                             <span class="@StatusClass(_isDatabaseSaveRefused)">@_databaseStatus</span>
@@ -115,7 +117,8 @@
                     <ValidationMessage For="() => _pingerForm.ResolveTimeoutSeconds" />
                     <div class="form-text">
                         How long to wait for a host name to become an address. A name that does not
-                        resolve in time is skipped for that round rather than recorded as down.
+                        resolve in time is skipped for that round rather than recorded as down, and
+                        the failure is listed under <a href="resolver-errors">Resolver errors</a>.
                     </div>
                 </dd>
 

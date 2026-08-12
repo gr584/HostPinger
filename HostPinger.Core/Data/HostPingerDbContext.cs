@@ -8,6 +8,8 @@ namespace HostPinger.Core.Data
 
         public DbSet<PingAttempt> PingAttempts => Set<PingAttempt>();
 
+        public DbSet<ResolverError> ResolverErrors => Set<ResolverError>();
+
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             modelBuilder.Entity<MonitoredHost>(host =>
@@ -33,6 +35,23 @@ namespace HostPinger.Core.Data
                 // seek stays flat no matter how long the host has been healthy.
                 attempt.HasIndex(a => new { a.HostId, a.TimestampUtc }, "IX_PingAttempts_Unanswered")
                     .HasFilter("\"RoundtripMs\" IS NULL");
+            });
+
+            modelBuilder.Entity<ResolverError>(error =>
+            {
+                // Matching the column the address is copied from, so a name a host can hold is a
+                // name this table can record.
+                error.Property(e => e.Address).IsRequired().HasMaxLength(253);
+
+                // Oldest first, which is the order the pruner deletes in.
+                error.HasIndex(e => e.TimestampUtc);
+
+                // The page groups every recorded error by address. Leading on Address lets that
+                // group run straight off this index in address order — no temporary sort, and no
+                // row ever read, since between them the two columns and the row id answer
+                // everything the grouping asks for. Only the reason of each address's newest error
+                // is then fetched by id, one row per address on the page.
+                error.HasIndex(e => new { e.Address, e.TimestampUtc });
             });
         }
     }

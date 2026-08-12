@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using HostPinger.Core.Data;
 using Microsoft.Extensions.Logging;
 
 namespace HostPinger.Core.Services
@@ -51,10 +52,10 @@ namespace HostPinger.Core.Services
             int resolveTimeoutMilliseconds,
             CancellationToken cancellationToken = default)
         {
-            var destination = await ResolveAsync(address, resolveTimeoutMilliseconds, cancellationToken);
-            if (destination is null)
+            var resolved = await ResolveAsync(address, resolveTimeoutMilliseconds, cancellationToken);
+            if (resolved.Address is not { } destination)
             {
-                return PingResult.Unresolved;
+                return PingResult.Unresolved(resolved.Failure);
             }
 
             try
@@ -84,8 +85,9 @@ namespace HostPinger.Core.Services
         }
 
         /// <summary>
-        /// Turns the configured address into an IP, waiting no longer than its own timeout. Returns
-        /// null when the name does not resolve, or does not resolve in time.
+        /// Turns the configured address into an IP, waiting no longer than its own timeout. A null
+        /// address is a lookup that failed, and the failure beside it says which way — the caller
+        /// records that, so every path out of here that gives up names its reason.
         /// </summary>
         /// <remarks>
         /// Cancelling the lookup stops this method waiting for it; the resolver call itself carries
@@ -93,7 +95,7 @@ namespace HostPinger.Core.Services
         /// wait is the point regardless — it is what keeps one host with a dead name from setting
         /// the pace of the whole round.
         /// </remarks>
-        private async Task<IPAddress?> ResolveAsync(
+        private async Task<(IPAddress? Address, ResolverFailure Failure)> ResolveAsync(
             string address,
             int resolveTimeoutMilliseconds,
             CancellationToken cancellationToken)
@@ -102,7 +104,9 @@ namespace HostPinger.Core.Services
             // invent a way for it to fail.
             if (IPAddress.TryParse(address, out var literal))
             {
-                return literal;
+                // Nothing failed, so the failure beside it is not read; there is no member for
+                // "did not fail" because no such row is ever recorded.
+                return (literal, default);
             }
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -118,7 +122,7 @@ namespace HostPinger.Core.Services
                     _logger.LogWarning("{Address} resolved to no addresses; skipping it this round.", address);
                 }
 
-                return resolved;
+                return (resolved, ResolverFailure.NoAddresses);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
@@ -131,7 +135,7 @@ namespace HostPinger.Core.Services
                         resolveTimeoutMilliseconds);
                 }
 
-                return null;
+                return (null, ResolverFailure.TimedOut);
             }
             catch (Exception ex) when (ex is SocketException or ArgumentException)
             {
@@ -140,7 +144,7 @@ namespace HostPinger.Core.Services
                     _logger.LogWarning(ex, "Could not resolve {Address}; skipping it this round.", address);
                 }
 
-                return null;
+                return (null, ResolverFailure.LookupFailed);
             }
         }
 

@@ -35,14 +35,23 @@ namespace HostPinger.UITest
         private readonly Process _process;
         private readonly string _dataDirectory;
 
-        private WebApp(Process process, string dataDirectory, string baseUrl)
+        private WebApp(Process process, string dataDirectory, string databasePath, string baseUrl)
         {
             _process = process;
             _dataDirectory = dataDirectory;
+            DatabasePath = databasePath;
             BaseUrl = baseUrl;
         }
 
         public string BaseUrl { get; }
+
+        /// <summary>
+        /// The database this instance is running on, so a test can put rows in front of a page that
+        /// only reads them. Writing to it from outside is safe for the same reason two browsers on
+        /// one service are: SQLite locks per write, and nothing else is writing — the ping interval
+        /// below puts the next round a day away.
+        /// </summary>
+        public string DatabasePath { get; }
 
         public static async Task<WebApp> StartAsync()
         {
@@ -63,6 +72,7 @@ namespace HostPinger.UITest
             var settingsPath = Path.Combine(dataDirectory, PingerPaths.SettingsFileName);
             WriteSettings(settingsPath);
 
+            var databasePath = Path.Combine(dataDirectory, PingerPaths.DatabaseFileName);
             var baseUrl = $"http://127.0.0.1:{FreePort()}";
             var start = new ProcessStartInfo("dotnet")
             {
@@ -82,7 +92,7 @@ namespace HostPinger.UITest
 
             // The development settings name a database inside the checkout; these are read after
             // them and are what keep the run in its own temporary directory.
-            start.Environment["Pinger__DatabasePath"] = Path.Combine(dataDirectory, PingerPaths.DatabaseFileName);
+            start.Environment["Pinger__DatabasePath"] = databasePath;
             start.Environment["Pinger__UserSettingsPath"] = settingsPath;
 
             var process = Process.Start(start)
@@ -95,7 +105,7 @@ namespace HostPinger.UITest
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
-            var app = new WebApp(process, dataDirectory, baseUrl);
+            var app = new WebApp(process, dataDirectory, databasePath, baseUrl);
             try
             {
                 await app.WaitUntilAnsweringAsync(output);

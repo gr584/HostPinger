@@ -88,21 +88,44 @@ namespace HostPinger.Core.Services
 
         /// <summary>
         /// Pings all enabled hosts once, stores the attempts, and prunes the database. Hosts whose
-        /// address did not resolve are left out rather than stored as unanswered, so the number
-        /// returned can be smaller than the number of enabled hosts.
+        /// address did not resolve are left out of the ping history rather than stored as
+        /// unanswered — they are recorded as resolver errors instead — so the number returned can
+        /// be smaller than the number of enabled hosts.
         /// </summary>
         public async Task<int> RunRoundAsync(CancellationToken cancellationToken = default)
         {
             var options = _options.CurrentValue;
             await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+            var timestampUtc = _timeProvider.GetUtcNow().UtcDateTime;
 
+            var recorded = await PingAndStoreAsync(db, options, timestampUtc, cancellationToken);
+
+            // Pruning runs whether or not there was anything to ping. A service whose hosts have
+            // all been deleted or paused still holds a database, and what has aged out of the
+            // resolver errors has aged out regardless — tying that to a round having recorded
+            // something would leave the last failures of a host that is gone sitting there for
+            // good.
+            await _pruner.EnforceResolverErrorRetentionAsync(db, timestampUtc, cancellationToken);
+            await _pruner.EnforceSizeLimitAsync(db, options.MaxDatabaseSizeBytes, cancellationToken);
+            return recorded;
+        }
+
+        /// <summary>
+        /// Pings every enabled host once and stores what came of it, returning the number of ping
+        /// attempts recorded. Nothing to ping is not a failure: it stores nothing and returns zero.
+        /// </summary>
+        private async Task<int> PingAndStoreAsync(
+            HostPingerDbContext db,
+            PingerOptions options,
+            DateTime timestampUtc,
+            CancellationToken cancellationToken)
+        {
             var hosts = await db.Hosts.AsNoTracking().Where(h => h.IsEnabled).ToListAsync(cancellationToken);
             if (hosts.Count == 0)
             {
                 return 0;
             }
 
-            var timestampUtc = _timeProvider.GetUtcNow().UtcDateTime;
             var timeoutMilliseconds = Math.Clamp(options.TimeoutSeconds, 1, MaxTimeoutSeconds) * 1000;
             var resolveTimeoutMilliseconds = Math.Clamp(options.ResolveTimeoutSeconds, 1, MaxTimeoutSeconds) * 1000;
 
@@ -115,10 +138,11 @@ namespace HostPinger.Core.Services
                     cancellationToken))));
 
             // A host whose address would not resolve was never asked anything, so the round has
-            // nothing to say about it and records nothing. Storing it as unanswered would show up
-            // as downtime later — an outage invented out of a name that does not resolve.
+            // nothing to say about its reachability. Storing it as unanswered would show up as
+            // downtime later — an outage invented out of a name that does not resolve — so it stays
+            // out of the ping history.
             var attempts = results
-                .Where(outcome => outcome.result.IsRecordable)
+                .Where(outcome => outcome.result.IsRecordablePing)
                 .Select(outcome => new PingAttempt
                 {
                     HostId = outcome.host.Id,
@@ -127,10 +151,22 @@ namespace HostPinger.Core.Services
                 })
                 .ToList();
 
-            db.PingAttempts.AddRange(attempts);
-            await db.SaveChangesAsync(cancellationToken);
+            // The failed lookup is still worth having: it is the reason the host is missing from
+            // the history for this round, and reading it anywhere else means going through the log.
+            // Recorded against the address rather than the host for the reasons on ResolverError.
+            var resolverErrors = results
+                .Where(outcome => outcome.result.Failure is not null)
+                .Select(outcome => new ResolverError
+                {
+                    Address = outcome.host.Address,
+                    TimestampUtc = timestampUtc,
+                    Reason = outcome.result.Failure!.Value,
+                })
+                .ToList();
 
-            await _pruner.EnforceSizeLimitAsync(db, options.MaxDatabaseSizeBytes, cancellationToken);
+            db.PingAttempts.AddRange(attempts);
+            db.ResolverErrors.AddRange(resolverErrors);
+            await db.SaveChangesAsync(cancellationToken);
             return attempts.Count;
         }
     }

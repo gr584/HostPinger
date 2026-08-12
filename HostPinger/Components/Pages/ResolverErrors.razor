@@ -1,0 +1,179 @@
+@page "/resolver-errors"
+@rendermode InteractiveServer
+@inject IDbContextFactory<HostPingerDbContext> DbFactory
+@implements IDisposable
+
+<PageTitle>HostPinger - Resolver errors</PageTitle>
+
+<h1>Resolver errors</h1>
+
+<p class="text-muted">
+    Addresses that could not be turned into an IP address, the most recently failed first. A round
+    that cannot resolve a host never asks it anything, so the failure is recorded here rather than
+    as a missed ping: a name that does not resolve is not the same as a host that is down. Failures
+    are kept for @RetentionDays days, which is why the widest count below is the whole of one.
+</p>
+
+@if (_rows.Count == 0)
+{
+    @*
+        Qualified by the retention rather than absolute: an empty table is a table nothing has
+        failed into for thirty days, which is not quite the same as nothing ever having failed.
+    *@
+    <p class="text-muted">
+        Nothing has failed to resolve lately. Every address has become an IP address every time it
+        was tried in the last @RetentionDays days.
+    </p>
+}
+else
+{
+    <div class="table-responsive">
+        <table class="table table-hover align-middle resolver-table">
+            <colgroup>
+                <col class="address" />
+                <col class="host" />
+                <col class="reason" />
+                <col class="last" />
+                <col class="count" />
+                <col class="count" />
+                <col class="count" />
+            </colgroup>
+            <thead>
+                <tr>
+                    <th>Address</th>
+                    <th>Host</th>
+                    <th>Reason</th>
+                    <th>Last failure</th>
+                    @* Every window ends now rather than at a midnight, like every other elapsed time on the pages. *@
+                    <th class="count" title="Failures recorded in the 24 hours up to now">Last 24 h</th>
+                    <th class="count" title="Failures recorded in the 7 days up to now">Last 7 d</th>
+                    <th class="count" title="Failures recorded in the 30 days up to now, which is every one kept">Last 30 d</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in _rows)
+                {
+                    <tr @key="row.Address">
+                        <td title="@row.Address"><code>@row.Address</code></td>
+                        <td title="@(row.HostName ?? NotMonitored)">
+                            @if (row.HostName is { } name)
+                            {
+                                @name
+                            }
+                            else
+                            {
+                                @* The address outlives the host, so a row can be the only remaining trace of one. *@
+                                <span class="text-muted">@NotMonitored</span>
+                            }
+                        </td>
+                        <td>
+                            <span class="badge @ReasonClass(row.LastReason)" title="@ReasonTitle(row.LastReason)">
+                                @ReasonText(row.LastReason)
+                            </span>
+                        </td>
+                        <td>
+                            <span class="resolver-value">@row.LastUtc.ToLocalTime().ToString("g")</span>
+                            <small class="text-muted ms-2">@RelativeTime(row.LastUtc)</small>
+                        </td>
+                        @*
+                            A window with nothing in it is dashed rather than zeroed: the point of
+                            the two columns is to separate what is failing now from what has
+                            stopped, and a column of noughts reads as neither.
+                        *@
+                        <td class="count resolver-value">@Count(row.Last24Hours)</td>
+                        <td class="count resolver-value">@Count(row.Last7Days)</td>
+                        <td class="count resolver-value">@Count(row.Last30Days)</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@code {
+    /// <summary>Shown for an address no host carries any more, and used as that cell's tooltip.</summary>
+    private const string NotMonitored = "no longer monitored";
+
+    // Read off the retention itself rather than written out, so the sentence and the widest column
+    // cannot come to say something the pruner does not do.
+    private static readonly string RetentionDays = ResolverError.Retention.TotalDays.ToString("0");
+
+    private List<ResolverErrorSummary> _rows = [];
+    private readonly CancellationTokenSource _cts = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        _ = AutoRefreshAsync();
+    }
+
+    // The same five seconds the Hosts page refreshes on: a new row appears here at the same moment
+    // the round that recorded it shows up there.
+    private async Task AutoRefreshAsync()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+            while (await timer.WaitForNextTickAsync(_cts.Token))
+            {
+                await LoadAsync();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);
+        _rows = await ResolverErrorSummary.LoadAsync(db, DateTime.UtcNow, _cts.Token);
+    }
+
+    private static string Count(int count) => count == 0 ? "—" : count.ToString("N0");
+
+    private static string ReasonText(ResolverFailure reason) => reason switch
+    {
+        ResolverFailure.TimedOut => "Timed out",
+        ResolverFailure.NoAddresses => "No addresses",
+        _ => "Lookup failed",
+    };
+
+    /// <summary>
+    /// What each reason points at, which is the whole reason they are told apart: a resolver that
+    /// is slow or unreachable, a name that answers with nothing, and a name that is not there.
+    /// </summary>
+    private static string ReasonTitle(ResolverFailure reason) => reason switch
+    {
+        ResolverFailure.TimedOut => "The lookup did not come back inside the resolve timeout, which "
+            + "is on the Configuration page. Usually a resolver that is slow or unreachable.",
+        ResolverFailure.NoAddresses => "The lookup came back, and there were no addresses in it.",
+        _ => "The lookup failed outright: an unknown name, or no resolver able to answer.",
+    };
+
+    // Warning rather than danger throughout: none of these says the host is down, only that it
+    // could not be asked. Timing out is the one that is as likely to be about this machine as about
+    // the name, so it is the one drawn differently.
+    private static string ReasonClass(ResolverFailure reason) =>
+        reason is ResolverFailure.TimedOut ? "text-bg-secondary" : "text-bg-warning";
+
+    private static string RelativeTime(DateTime timestampUtc)
+    {
+        var age = DateTime.UtcNow - timestampUtc;
+        return age switch
+        {
+            { TotalSeconds: < 5 } => "just now",
+            { TotalMinutes: < 1 } => $"{(int)age.TotalSeconds}s ago",
+            { TotalHours: < 1 } => $"{(int)age.TotalMinutes}m ago",
+            { TotalDays: < 1 } => $"{(int)age.TotalHours}h ago",
+            _ => $"{(int)age.TotalDays}d ago",
+        };
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        _cts.Dispose();
+    }
+}

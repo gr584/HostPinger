@@ -135,13 +135,15 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// An unresolved address means nothing was ever asked of the host, so the round stores
-        /// nothing for it. Storing it as unanswered would be read as downtime later — an outage
+        /// An unresolved address means nothing was ever asked of the host, so the round stores no
+        /// attempt for it. Storing it as unanswered would be read as downtime later — an outage
         /// invented out of a name that does not resolve. A host that was asked and stayed silent is
-        /// still a missed ping, and the difference between the two is the point.
+        /// still a missed ping, and the difference between the two is the point. What the round does
+        /// record for it is a resolver error; see
+        /// <see cref="RunRound_RecordsAFailedLookupAgainstTheAddress"/>.
         /// </summary>
         [Test]
-        public async Task RunRound_StoresNothingForAHostThatDidNotResolve()
+        public async Task RunRound_StoresNoPingAttemptForAHostThatDidNotResolve()
         {
             int answeredId, silentId, unresolvedId;
             await using (var db = new HostPingerDbContext(_options))
@@ -160,7 +162,7 @@ namespace HostPinger.Test
                 {
                     ["answered.example"] = PingResult.Answered(7),
                     ["silent.example"] = PingResult.Unanswered,
-                    ["unresolved.example"] = PingResult.Unresolved,
+                    ["unresolved.example"] = PingResult.Unresolved(ResolverFailure.LookupFailed),
                 },
             };
             var service = CreateService(sender);
@@ -178,10 +180,93 @@ namespace HostPinger.Test
                 Assert.That(attempts.Single(a => a.HostId == silentId).RoundtripMs, Is.Null,
                     "a host that was asked and stayed silent is still a missed ping");
                 Assert.That(attempts.All(a => a.HostId != unresolvedId),
-                    "the unresolved host must not appear in the history at all");
+                    "the unresolved host must not appear in the ping history at all");
                 Assert.That(sender.Calls, Contains.Item("unresolved.example"),
                     "it should still be tried next round, not dropped from the rotation");
             });
+        }
+
+        /// <summary>
+        /// The other half of that: the round the host was left out of says why, against the address
+        /// that would not resolve and with the reason the lookup failed. Only the addresses that
+        /// failed to resolve are recorded — a host that answered, and one that was asked and stayed
+        /// silent, both resolved perfectly well.
+        /// </summary>
+        [Test]
+        public async Task RunRound_RecordsAFailedLookupAgainstTheAddress()
+        {
+            await using (var db = new HostPingerDbContext(_options))
+            {
+                db.Hosts.AddRange(
+                    new MonitoredHost { Name = "answered", Address = "answered.example" },
+                    new MonitoredHost { Name = "silent", Address = "silent.example" },
+                    new MonitoredHost { Name = "slow name", Address = "slow.example" },
+                    new MonitoredHost { Name = "unknown name", Address = "unknown.example" });
+                await db.SaveChangesAsync();
+            }
+
+            var sender = new FakePingSender
+            {
+                Results =
+                {
+                    ["answered.example"] = PingResult.Answered(7),
+                    ["silent.example"] = PingResult.Unanswered,
+                    ["slow.example"] = PingResult.Unresolved(ResolverFailure.TimedOut),
+                    ["unknown.example"] = PingResult.Unresolved(ResolverFailure.LookupFailed),
+                },
+            };
+
+            await CreateService(sender).RunRoundAsync();
+
+            await using var verify = new HostPingerDbContext(_options);
+            var errors = await verify.ResolverErrors.AsNoTracking().ToListAsync();
+            Assert.Multiple(() =>
+            {
+                Assert.That(errors.Select(e => e.Address),
+                    Is.EquivalentTo(new[] { "slow.example", "unknown.example" }));
+                Assert.That(errors.Single(e => e.Address == "slow.example").Reason,
+                    Is.EqualTo(ResolverFailure.TimedOut));
+                Assert.That(errors.Single(e => e.Address == "unknown.example").Reason,
+                    Is.EqualTo(ResolverFailure.LookupFailed));
+                Assert.That(errors.All(e => Math.Abs((DateTime.UtcNow - e.TimestampUtc).TotalSeconds) < 30),
+                    "timestamps should be the round's own");
+            });
+        }
+
+        /// <summary>
+        /// The round is where the retention is applied, and it is applied whether or not the round
+        /// had anything to ping: a service whose hosts have all been deleted or paused still holds
+        /// the failures they left behind, and those age out like any others.
+        /// </summary>
+        [Test]
+        public async Task RunRound_DropsResolverErrorsPastTheRetentionEvenWithNothingToPing()
+        {
+            var now = DateTime.UtcNow;
+            await using (var db = new HostPingerDbContext(_options))
+            {
+                db.ResolverErrors.AddRange(
+                    new ResolverError
+                    {
+                        Address = "gone.example",
+                        TimestampUtc = now - ResolverError.Retention - TimeSpan.FromDays(1),
+                        Reason = ResolverFailure.LookupFailed,
+                    },
+                    new ResolverError
+                    {
+                        Address = "gone.example",
+                        TimestampUtc = now.AddDays(-1),
+                        Reason = ResolverFailure.LookupFailed,
+                    });
+                await db.SaveChangesAsync();
+            }
+
+            var recorded = await CreateService(new FakePingSender()).RunRoundAsync();
+
+            Assert.That(recorded, Is.Zero, "there were no hosts to ping");
+
+            await using var verify = new HostPingerDbContext(_options);
+            var remaining = await verify.ResolverErrors.AsNoTracking().ToListAsync();
+            Assert.That(remaining.Select(e => e.TimestampUtc), Is.EqualTo(new[] { now.AddDays(-1) }));
         }
 
         /// <summary>

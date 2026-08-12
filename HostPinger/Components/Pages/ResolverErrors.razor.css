@@ -1,0 +1,61 @@
+/* Fixed layout so the refreshing counts and times can never resize a column, as on the host table. */
+.resolver-table {
+    table-layout: fixed;
+    min-width: 60rem;
+}
+
+/*
+ * The badge and the three counts are the same size at every window size, so those four columns are
+ * absolute and the text columns share what is left. 7.5rem holds the widest badge, "No addresses".
+ */
+.resolver-table col.reason {
+    width: 7.5rem;
+}
+
+/* The widest heading in bold, "Last 24 h", plus the cell padding either side of it. */
+.resolver-table col.count {
+    width: 5.5rem;
+}
+
+/*
+ * The text columns split what the four fixed columns above leave, in the ratio below. The
+ * percentages sum to 100% on top of those 24rem on purpose; see the note on the host table for
+ * why an over-constrained fixed layout is what keeps the ratio at every width.
+ *
+ * The largest share goes to the last failure, which is the one cell whose width is not a matter of
+ * how long a name happens to be: a date, a time and an age, all of which are there to be read
+ * rather than recognised, and none of which an ellipsis leaves anything of.
+ */
+.resolver-table col.address {
+    width: 32%;
+}
+
+.resolver-table col.host {
+    width: 24%;
+}
+
+.resolver-table col.last {
+    width: 44%;
+}
+
+.resolver-table th,
+.resolver-table td {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Numbers line up under their heading rather than against the column beside them. */
+.resolver-table .count {
+    text-align: right;
+}
+
+/* Compact rows, matching the host table. Nothing here is as tall as a button, so this is all it takes. */
+.resolver-table > :not(caption) > * > * {
+    padding-top: 0.25rem;
+    padding-bottom: 0.25rem;
+}
+
+.resolver-value {
+    font-variant-numeric: tabular-nums;
+}
