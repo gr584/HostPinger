@@ -134,8 +134,8 @@
     /// <summary>
     /// The width of one bucket the samples in <see cref="Series"/> were reduced into, or
     /// <see cref="TimeSpan.Zero"/> when they are raw pings. Sets the scale at which a hole in a
-    /// downsampled series is real: bucketed points sit exactly one bucket apart, so a wider step
-    /// than that is a bucket that had nothing to average.
+    /// downsampled series is real: bucketed points sit one bucket apart — the one still filling can
+    /// sit closer, never further — so a wider step than that is a bucket that had nothing to average.
     /// </summary>
     [Parameter] public TimeSpan BucketDuration { get; set; }
 

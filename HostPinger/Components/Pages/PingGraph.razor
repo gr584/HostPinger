@@ -316,21 +316,6 @@ else
             _rangeStart = _rangeEnd - _window;
         }
 
-        await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);
-        _allHosts = await db.Hosts.AsNoTracking().OrderBy(h => h.Id).ToListAsync(_cts.Token);
-
-        var ids = _selected.Where(id => _allHosts.Any(h => h.Id == id)).ToArray();
-        var attempts = await db.PingAttempts.AsNoTracking()
-            .Where(a => ids.Contains(a.HostId) && a.TimestampUtc >= _rangeStart)
-            .OrderBy(a => a.TimestampUtc)
-            .Select(a => new { a.HostId, a.TimestampUtc, a.RoundtripMs })
-            .ToListAsync(_cts.Token);
-        var samplesByHost = attempts
-            .GroupBy(a => a.HostId)
-            .ToDictionary(
-                g => g.Key,
-                g => (IReadOnlyList<ChartSample>)g.Select(a => new ChartSample(a.TimestampUtc, a.RoundtripMs)).ToList());
-
         // Read once, so a resize partway through cannot leave series in the same load at different
         // densities.
         var points = _pointsPerSeries;
@@ -339,6 +324,28 @@ else
         // Derived from the very range and count the series below are built with, so the chart can
         // never be told a bucket width the samples it is holding were not bucketed at.
         _bucketDuration = ChartMath.BucketDuration(_rangeStart, _rangeEnd, points);
+
+        // Buckets sit on a grid fixed in absolute time, so the oldest one on screen starts before
+        // the range does, and reading only from the range would leave it averaging whatever part of
+        // itself has not been slid past yet — a value that would change on every refresh. Reading
+        // from its own start instead costs one bucket's worth of extra rows and lets it hold still
+        // like every other bucket until it drops off the end.
+        var queryStart = ChartMath.BucketStart(_rangeStart, _bucketDuration);
+
+        await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);
+        _allHosts = await db.Hosts.AsNoTracking().OrderBy(h => h.Id).ToListAsync(_cts.Token);
+
+        var ids = _selected.Where(id => _allHosts.Any(h => h.Id == id)).ToArray();
+        var attempts = await db.PingAttempts.AsNoTracking()
+            .Where(a => ids.Contains(a.HostId) && a.TimestampUtc >= queryStart)
+            .OrderBy(a => a.TimestampUtc)
+            .Select(a => new { a.HostId, a.TimestampUtc, a.RoundtripMs })
+            .ToListAsync(_cts.Token);
+        var samplesByHost = attempts
+            .GroupBy(a => a.HostId)
+            .ToDictionary(
+                g => g.Key,
+                g => (IReadOnlyList<ChartSample>)g.Select(a => new ChartSample(a.TimestampUtc, a.RoundtripMs)).ToList());
         _series = _allHosts
             .Select((host, index) => (host, index))
             .Where(t => _selected.Contains(t.host.Id))

@@ -199,22 +199,59 @@ namespace HostPinger.Core.Charting
         public static TimeSpan BucketDuration(DateTime rangeStartUtc, DateTime rangeEndUtc, int bucketCount)
         {
             ArgumentOutOfRangeException.ThrowIfLessThan(bucketCount, 1);
-            return (rangeEndUtc - rangeStartUtc) / bucketCount;
+            return TimeSpan.FromTicks(Math.Max(1, (rangeEndUtc - rangeStartUtc).Ticks / bucketCount));
         }
 
         /// <summary>
-        /// Reduces samples to at most bucketCount points by averaging them into equal-duration time
-        /// buckets spanning [rangeStartUtc, rangeEndUtc]. A bucket holding only failed pings comes
-        /// back null (down); a bucket holding no samples at all is left out, so a stretch where
-        /// nothing was recorded stays a hole rather than being reported as an outage. Emitted
-        /// samples carry their bucket's midpoint, which puts consecutive points exactly one
-        /// <see cref="BucketDuration"/> apart and lets a caller tell the next bucket from a skipped
-        /// one by time alone. Samples must be time-ordered; any outside the range are skipped.
+        /// The start of the bucket <paramref name="instantUtc"/> falls in, on the same grid
+        /// <see cref="Downsample"/> buckets onto. Feeding a bucketed series from here rather than
+        /// from the range start is what makes its oldest bucket an average over the whole of itself
+        /// rather than over the part of it the range has not yet slid past.
+        /// </summary>
+        public static DateTime BucketStart(DateTime instantUtc, TimeSpan bucketDuration)
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(bucketDuration.Ticks, 1);
+            return new DateTime(instantUtc.Ticks / bucketDuration.Ticks * bucketDuration.Ticks, DateTimeKind.Utc);
+        }
+
+        /// <summary>
+        /// Reduces samples to about bucketCount points by averaging them into
+        /// <see cref="BucketDuration"/>-wide time buckets covering [rangeStartUtc, rangeEndUtc]. A
+        /// bucket holding only failed pings comes back null (down); a bucket holding no samples at
+        /// all is left out, so a stretch where nothing was recorded stays a hole rather than being
+        /// reported as an outage. Emitted samples carry their bucket's midpoint, which puts
+        /// consecutive points one <see cref="BucketDuration"/> apart — the bucket still filling can
+        /// fall closer, never further — and lets a caller tell the next bucket from a skipped one by
+        /// time alone. Samples must be time-ordered.
         /// </summary>
         /// <remarks>
+        /// <para>
+        /// The buckets are cells of a grid fixed in absolute time — a whole number of bucket widths
+        /// from the start of the calendar — rather than measured off rangeStartUtc. That is what
+        /// keeps a chart that follows the clock still: were they measured off the range, every
+        /// bucket boundary would move with it, and a refresh five seconds later would re-average
+        /// every bucket on screen and redraw history that had not changed. On the grid, a bucket
+        /// covers the same absolute stretch of time whenever it is asked for, so all a refresh can
+        /// do is fill the bucket the present is in and drop the one that has fallen off the far end;
+        /// everything between keeps its value and only slides along the axis.
+        /// </para>
+        /// <para>
+        /// The consequence for the caller is that both ends of the range generally fall inside a
+        /// bucket rather than on a boundary, and that the result can hold one more point than
+        /// bucketCount. The bucket rangeEndUtc falls in is still filling, and its midpoint may be an
+        /// instant that has not arrived, so it reports at rangeEndUtc instead: on a live chart what
+        /// is coming in now belongs at the leading edge, not off the end of it. The bucket
+        /// rangeStartUtc falls in is averaged over all of itself, which needs the caller to pass the
+        /// samples from <see cref="BucketStart"/> onwards rather than from the range; samples
+        /// belonging to buckets wholly before the range are skipped either way. That bucket's
+        /// midpoint may land before rangeStartUtc, where a chart clipping to the range does not draw
+        /// it — half a bucket of the oldest end, which is half a pixel at one bucket per pixel.
+        /// </para>
+        /// <para>
         /// Samples that already fit in bucketCount are handed back untouched, keeping their exact
         /// timestamps for the hover readout. Their spacing is then the ping cadence rather than the
         /// bucket width, so a caller splitting on a gap has to allow for both scales.
+        /// </para>
         /// </remarks>
         public static IReadOnlyList<ChartSample> Downsample(
             IReadOnlyList<ChartSample> samples,
@@ -233,12 +270,15 @@ namespace HostPinger.Core.Charting
                 return samples;
             }
 
-            var bucketTicks = (rangeEndUtc - rangeStartUtc).Ticks / (double)bucketCount;
-            var result = new List<ChartSample>(bucketCount);
+            var bucketTicks = BucketDuration(rangeStartUtc, rangeEndUtc, bucketCount).Ticks;
+            var firstBucket = rangeStartUtc.Ticks / bucketTicks;
+            var result = new List<ChartSample>(bucketCount + 1);
 
             // Time-ordered input means bucket indices only ever climb, so one running bucket is
-            // enough: it is emitted when a sample lands past it, and once more at the end.
-            var openBucket = -1;
+            // enough: it is emitted when a sample lands past it, and once more at the end. Indices
+            // are grid cells counted from the start of the calendar, so they are always positive
+            // and -1 can stand for "nothing open yet".
+            var openBucket = -1L;
             long valueSum = 0;
             var valueCount = 0;
 
@@ -249,24 +289,27 @@ namespace HostPinger.Core.Charting
                     return;
                 }
 
-                var midpoint = new DateTime(
-                    rangeStartUtc.Ticks + (long)((openBucket + 0.5) * bucketTicks),
-                    DateTimeKind.Utc);
-                result.Add(new ChartSample(midpoint, valueCount > 0 ? (int)(valueSum / valueCount) : null));
+                // The bucket the range ends in is the one still filling, and its midpoint may be an
+                // instant that has not arrived; it reports at the range end rather than in the future.
+                var midpoint = Math.Min(openBucket * bucketTicks + bucketTicks / 2, rangeEndUtc.Ticks);
+                result.Add(new ChartSample(
+                    new DateTime(midpoint, DateTimeKind.Utc),
+                    valueCount > 0 ? (int)(valueSum / valueCount) : null));
             }
 
             foreach (var sample in samples)
             {
-                if (sample.TimestampUtc < rangeStartUtc || sample.TimestampUtc > rangeEndUtc)
+                if (sample.TimestampUtc > rangeEndUtc)
                 {
                     continue;
                 }
 
-                // The last bucket owns both its ends, so a sample sitting exactly on rangeEndUtc
-                // joins it instead of opening a bucket past the end of the range.
-                var bucket = Math.Min(
-                    (int)((sample.TimestampUtc - rangeStartUtc).Ticks / bucketTicks),
-                    bucketCount - 1);
+                var bucket = sample.TimestampUtc.Ticks / bucketTicks;
+                if (bucket < firstBucket)
+                {
+                    continue;
+                }
+
                 if (bucket != openBucket)
                 {
                     EmitOpenBucket();

@@ -56,7 +56,10 @@ and resizes with the window.
 
 - **Time windows** — 15 minutes, 1 hour, 6 hours, 24 hours or 7 days. Long windows are averaged
   down to one point per pixel of plot width, so a week of history draws as quickly as a quarter of
-  an hour of it, at whatever detail the display can actually show.
+  an hour of it, at whatever detail the display can actually show. Each point covers a fixed
+  stretch of the clock rather than one measured back from now, so a refresh only fills in the point
+  at the leading edge and drops the one that has fallen off the far end: the rest of the line keeps
+  the shape it had and slides along.
 - **Zoom to a period** — dragging across the plot redraws the chart over just the stretch of time
   the drag covered, and dragging back to where it started abandons it. Where the drag ends decides
   what it means: run it into the right-hand edge of a live chart and it picks a narrower window

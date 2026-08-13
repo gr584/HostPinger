@@ -227,6 +227,103 @@ namespace HostPinger.Test
         }
 
         [Test]
+        public void Downsample_BucketsOnAGridFixedInTimeRatherThanOnTheRangeStart()
+        {
+            // A range starting three quarters of the way through a minute, bucketed at one bucket a
+            // minute: the buckets are the minutes themselves, not five minutes measured off 10:00:45.
+            var rangeStart = Start.AddSeconds(45);
+            var rangeEnd = rangeStart.AddMinutes(5);
+            var samples = Enumerable.Range(0, 70)
+                .Select(i => new ChartSample(Start.AddSeconds(i * 5), i * 5 < 45 ? 10 : 20))
+                .ToList();
+
+            var result = ChartMath.Downsample(samples, rangeStart, rangeEnd, 5);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(
+                    result.Select(s => s.TimestampUtc),
+                    Is.EqualTo(new[] { 30, 90, 150, 210, 270, 330 }.Select(s => Start.AddSeconds(s))));
+
+                // The first bucket is the whole of the 10:00 minute, three quarters of which came
+                // before the range: averaging only the part inside it would read 20 like the rest.
+                Assert.That(result.Select(s => s.RoundtripMs), Is.EqualTo(new int?[] { 12, 20, 20, 20, 20, 20 }));
+            });
+        }
+
+        [Test]
+        public void Downsample_ReportsTheBucketStillFillingAtTheRangeEnd()
+        {
+            // The range ends a third of the way into the 10:04 bucket, whose midpoint is still to
+            // come: it has to be reported at the range end, or what is arriving now would be missing
+            // from the near edge of a live chart until the bucket was half over.
+            var rangeEnd = Start.AddMinutes(4).AddSeconds(20);
+            var rangeStart = rangeEnd.AddMinutes(-5);
+            var samples = Enumerable.Range(0, 53)
+                .Select(i => new ChartSample(Start.AddSeconds(i * 5), 100 + i))
+                .ToList();
+
+            var result = ChartMath.Downsample(samples, rangeStart, rangeEnd, 5);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(result[^1].TimestampUtc, Is.EqualTo(rangeEnd));
+
+                // 10:04:00, :05, :10, :15 and :20 — the part of the bucket that has happened.
+                Assert.That(result[^1].RoundtripMs, Is.EqualTo(150));
+                Assert.That(result[^2].TimestampUtc, Is.EqualTo(Start.AddMinutes(3).AddSeconds(30)));
+            });
+        }
+
+        [Test]
+        public void Downsample_LeavesBucketsAloneAsTheRangeSlidesOn()
+        {
+            // The regression this guards: a live chart reloads every few seconds over a range that
+            // has moved on by that much, and everything but the bucket the present is in has to come
+            // back exactly as it was. Buckets measured off the range start instead of a fixed grid
+            // re-average on every refresh, which redraws history that never changed.
+            const int bucketCount = 60;
+            var window = TimeSpan.FromHours(1);
+            var now = Start.AddHours(2).AddSeconds(7);
+            var samples = Enumerable.Range(0, 2000)
+                .Select(i => new ChartSample(now.AddSeconds(-5 * i), i % 37))
+                .Reverse()
+                .ToList();
+
+            var bucket = ChartMath.BucketDuration(now - window, now, bucketCount);
+            IReadOnlyList<ChartSample> Reduce(DateTime end) => ChartMath.Downsample(
+                samples.Where(s => s.TimestampUtc >= ChartMath.BucketStart(end - window, bucket)).ToList(),
+                end - window,
+                end,
+                bucketCount);
+
+            var before = Reduce(now);
+            var after = Reduce(now.AddSeconds(5));
+
+            // Every bucket the two loads have in common, which is all of them bar the one filling at
+            // either end of the pair of ranges.
+            var overlapStart = now.AddSeconds(5) - window;
+            bool InOverlap(ChartSample s) => s.TimestampUtc > overlapStart && s.TimestampUtc < now;
+
+            Assert.That(before.Where(InOverlap).ToList(), Has.Count.EqualTo(bucketCount));
+            Assert.That(after.Where(InOverlap), Is.EqualTo(before.Where(InOverlap)));
+        }
+
+        [Test]
+        public void BucketStart_SnapsBackToTheEnclosingBucket()
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(
+                    ChartMath.BucketStart(Start.AddSeconds(95), TimeSpan.FromMinutes(1)),
+                    Is.EqualTo(Start.AddMinutes(1)));
+                Assert.That(
+                    ChartMath.BucketStart(Start.AddMinutes(1), TimeSpan.FromMinutes(1)),
+                    Is.EqualTo(Start.AddMinutes(1)));
+            });
+        }
+
+        [Test]
         public void NearestSampleIndex_FindsClosestSample()
         {
             var samples = new[]
