@@ -55,12 +55,17 @@
                 <col class="actions" />
             </colgroup>
             <thead>
+                @*
+                    Every column that says something about a host is sortable; the switch and the
+                    Edit button are not columns anyone reads down. Paused hosts are reachable
+                    through Status, which is where a host that is not being pinged already shows up.
+                *@
                 <tr>
-                    <th>Name</th>
-                    <th>Address</th>
-                    <th>Status</th>
-                    <th>Last ping</th>
-                    <th>Last downtime</th>
+                    @SortHeader(HostSortColumn.Name, "Name")
+                    @SortHeader(HostSortColumn.Address, "Address")
+                    @SortHeader(HostSortColumn.Status, "Status")
+                    @SortHeader(HostSortColumn.LastPing, "Last ping")
+                    @SortHeader(HostSortColumn.LastDowntime, "Last downtime")
                     <th><span class="visually-hidden">Enabled</span></th>
                     <th></th>
                 </tr>
@@ -234,8 +239,26 @@
 }
 
 @code {
+    /// <summary>The address bar's name for the column sorted on, and for the direction.</summary>
+    private const string SortQuery = "sort";
+
+    private const string DirectionQuery = "dir";
+
     [CascadingParameter]
     private Task<AuthenticationState>? AuthenticationState { get; set; }
+
+    /// <summary>
+    /// The order the table is in, kept in the address rather than in a field of this component. A
+    /// row opens that host's graph, so the sort has to survive going there and coming back, and a
+    /// table sorted to show what is wrong is worth being able to send someone.
+    /// </summary>
+    [SupplyParameterFromQuery(Name = SortQuery)]
+    private string? SortColumn { get; set; }
+
+    [SupplyParameterFromQuery(Name = DirectionQuery)]
+    private string? SortDirection { get; set; }
+
+    private HostSort Sort => HostSort.Parse(SortColumn, SortDirection);
 
     private List<HostSummary> _rows = [];
 
@@ -264,6 +287,12 @@
         await LoadAsync();
         _ = AutoRefreshAsync();
     }
+
+    /// <summary>
+    /// Re-orders what is already on screen, which is what a click on a heading comes back to: the
+    /// table turns round there and then rather than at the next refresh five seconds later.
+    /// </summary>
+    protected override void OnParametersSet() => _rows = Sort.Apply(_rows);
 
     // Focusing the first field also puts the keyboard inside the dialog, which is what lets the
     // Escape key reach OnFormKeyDown.
@@ -298,7 +327,7 @@
         _missesToDown = Math.Max(0, retryAttempts) + 1;
         _isUnlocked = await IsUnlockedAsync();
         await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);
-        _rows = await HostSummary.LoadAsync(db, retryAttempts, _cts.Token);
+        _rows = Sort.Apply(await HostSummary.LoadAsync(db, retryAttempts, _cts.Token));
     }
 
     /// <summary>
@@ -447,6 +476,73 @@
     }
 
     private void OpenGraph(int hostId) => Navigation.NavigateTo($"graph/{hostId}");
+
+    /// <summary>
+    /// A heading that sorts the table. The heading itself is the button rather than carrying one,
+    /// so the whole label is the target and a keyboard reaches it in the order it is read in.
+    /// </summary>
+    private RenderFragment SortHeader(HostSortColumn column, string label) =>
+        @<th aria-sort="@AriaSort(column)">
+            <button type="button" class="sort-header" title="@SortTitle(column, label)"
+                    @onclick="() => SortBy(column)">
+                @label<span class="sort-arrow" aria-hidden="true">@Arrow(column)</span>
+            </button>
+        </th>;
+
+    /// <summary>
+    /// Where a click on this heading would take the table, which is not always obvious from the
+    /// heading: the columns that say how a host is doing lead with the worst of it rather than with
+    /// the top of a range.
+    /// </summary>
+    private string SortTitle(HostSortColumn column, string label)
+    {
+        var next = Sort.ClickedOn(column);
+        var end = (column, next.IsDescending) switch
+        {
+            (HostSortColumn.Status, true) => "down first",
+            (HostSortColumn.Status, false) => "paused first",
+            (HostSortColumn.LastPing, true) => "slowest first, and no reply before those",
+            (HostSortColumn.LastPing, false) => "fastest first",
+            (HostSortColumn.LastDowntime, true) => "most recent first",
+            (HostSortColumn.LastDowntime, false) => "oldest first",
+            (_, true) => "Z to A",
+            _ => "A to Z",
+        };
+
+        return $"Sort by {label.ToLowerInvariant()}, {end}";
+    }
+
+    /// <summary>
+    /// The arrow on the sorted heading, pointing the way the column is read: down for a column
+    /// starting at its far end. Only the sorted column carries one, and the width it takes is
+    /// reserved on every heading so that sorting cannot shift a label sideways.
+    /// </summary>
+    private string Arrow(HostSortColumn column) =>
+        Sort.Column != column ? string.Empty : Sort.IsDescending ? "▼" : "▲";
+
+    /// <summary>
+    /// What a screen reader is told about a column. The arrow beside it is hidden from one, so this
+    /// is the only thing saying which column the table is in the order of.
+    /// </summary>
+    private string AriaSort(HostSortColumn column) =>
+        Sort.Column != column ? "none" : Sort.IsDescending ? "descending" : "ascending";
+
+    /// <summary>
+    /// Takes the click to the address rather than to a field of this component; see
+    /// <see cref="SortColumn"/>. The entry is replaced rather than added, so the back button goes
+    /// on pointing at wherever the reader came from instead of at their own last click.
+    /// </summary>
+    private void SortBy(HostSortColumn column)
+    {
+        var sort = Sort.ClickedOn(column);
+        Navigation.NavigateTo(
+            Navigation.GetUriWithQueryParameters(new Dictionary<string, object?>
+            {
+                [SortQuery] = sort.QueryColumn,
+                [DirectionQuery] = sort.QueryDirection,
+            }),
+            replace: true);
+    }
 
     private string PauseTitle(bool isEnabled) => _isUnlocked
         ? isEnabled ? "Pause monitoring" : "Resume monitoring"

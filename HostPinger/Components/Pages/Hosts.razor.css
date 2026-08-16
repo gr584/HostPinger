@@ -59,6 +59,39 @@
 }
 
 /*
+ * A sortable heading is a button drawn as the heading text it replaced: the table's own font,
+ * weight and colour, and none of a button's box. Only the pointer and the hover underline say it
+ * does anything, which is as much as a column heading should.
+ */
+.host-table th .sort-header {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.25rem;
+    max-width: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+.host-table th .sort-header:hover {
+    text-decoration: underline;
+}
+
+/*
+ * Reserved on every heading rather than only on the sorted one, so that sorting the table cannot
+ * shift a label sideways. Sized in em to hold the arrow at the size it is drawn at below.
+ */
+.host-table th .sort-arrow {
+    flex: none;
+    width: 0.75em;
+    font-size: 0.75em;
+    color: var(--bs-secondary-color);
+}
+
+/*
  * Right-align the button so it ends 0.5rem from the table's right edge — the same 0.5rem of cell
  * padding that precedes the name at the other end of the row — whatever width the label renders
  * at. Dropping the leading padding puts the column's slack on the button's left, where a wider

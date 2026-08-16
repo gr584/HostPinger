@@ -33,8 +33,8 @@ can be read either way; the password only decides who can change something.
 
 ### Hosts — `/`
 
-The list of everything being monitored, one row per host, refreshed every five seconds. Clicking a
-row opens that host's ping graph.
+The list of everything being monitored, one row per host, in name order until a heading is clicked,
+refreshed every five seconds. Clicking a row opens that host's ping graph.
 
 - **Status** — <span class="badge text-bg-success">**Up**</span> when the last ping was answered, <span class="badge text-bg-warning">**Retrying**</span> once pings start going unanswered, <span class="badge text-bg-danger">**Down**</span> once it has used up the *Retry attempts* it is allowed, <span class="badge bg-body-secondary text-body-secondary">**Waiting…**</span> until the first round covers a newly added host, and <span class="badge text-bg-secondary">**Paused**</span> for a host that is not being pinged at all. Hovering **Retrying** says how many pings it has missed so far, and how many make it down.
 - **Last ping** — the round trip in milliseconds, or *no reply*, with how long ago the attempt was
@@ -43,6 +43,13 @@ row opens that host's ping graph.
   stayed unanswered. An ongoing outage keeps counting. A run of missed pings the host recovered
   from inside its *Retry attempts* is not an outage and is not reported, so a host that is
   retrying goes on showing whatever outage it last had.
+- **Sorting** — clicking a column heading orders the table by it, and clicking that heading again
+  turns the order round. **Name** and **Address** read A to Z first; the three columns that say how
+  a host is doing lead with the worst of what they show — down before up, no reply before a slow
+  reply, the most recent outage first. Hosts with nothing in the column being sorted on stay at the
+  end whichever way it is read, and hosts that tie fall back to their names. The order is kept in
+  the address rather than in the browser, so it survives opening a host's graph and coming back,
+  and a table sorted to show what is wrong can be sent to someone as a link.
 - **Add, edit and delete** — a host is a name and an address, either an IP address or a name to
   resolve. Addresses are unique, and a delete asks for confirmation because it takes the host's
   recorded history with it. Offered only while the browser is unlocked, as below.
