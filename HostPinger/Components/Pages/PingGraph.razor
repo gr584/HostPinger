@@ -264,9 +264,26 @@ else
         CloseDropdown();
     }
 
+    /// <summary>
+    /// The rows of the picker: every host by name, cut down to whatever the search box matches.
+    /// Names are not unique — only addresses are — so two that share one fall back to the address
+    /// that tells them apart, rather than to whichever the database happened to hand over first.
+    /// </summary>
+    /// <remarks>
+    /// The index each row carries is the host's position in <see cref="_allHosts"/>, which is by id
+    /// — the order the hosts were added — and is what picks its colour, both for the swatch here and
+    /// for its line on the chart. It is taken before this sorts or filters anything, so that a host
+    /// keeps its colour whatever the list around it does: alphabetical order is for reading the list
+    /// in, and it must not repaint a chart that is being watched. That is also why the hosts are not
+    /// simply read out of the database in name order — a host added or renamed would then shift the
+    /// colour of every host after it.
+    /// </remarks>
     private IEnumerable<(MonitoredHost Host, int Index)> FilteredHosts()
     {
-        var hosts = _allHosts.Select((host, index) => (Host: host, Index: index));
+        var hosts = _allHosts
+            .Select((host, index) => (Host: host, Index: index))
+            .OrderBy(t => t.Host.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(t => t.Host.Address, StringComparer.OrdinalIgnoreCase);
         if (string.IsNullOrWhiteSpace(_search))
         {
             return hosts;

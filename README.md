@@ -78,8 +78,8 @@ and resizes with the window.
   rather than being dragged back to the present. **Resume live** puts back the window that was on
   screen before the zoom and starts it following again, however many times it was zoomed in the
   meantime; picking any of the time windows follows the clock over that window instead.
-- **Host picker** — searchable by name or address. Where the search leaves a single match, Enter
-  selects it and closes the picker.
+- **Host picker** — every host by name, searchable by name or address. Where the search leaves a
+  single match, Enter selects it and closes the picker.
 - **Shareable selection** — the hosts on the chart are part of the URL, so a particular comparison
   can be bookmarked or sent to someone else.
 - **Hover readout** — a crosshair with every plotted host's value at that moment, an unanswered
@@ -89,8 +89,10 @@ and resizes with the window.
 - **Gaps are drawn as gaps** — the line breaks at an unanswered ping and marks it with a cross
   along the baseline, rather than bridging the outage. It breaks the same way across a stretch
   where nothing was recorded at all, so a stopped service does not read as a flat, healthy line.
-- **Stable colours** — each host keeps its colour as the selection changes, from a palette chosen
-  to stay distinguishable with colour vision deficiency.
+- **Stable colours** — each host keeps its colour as the selection changes, and as the picker is
+  searched or another host is added, from a palette chosen to stay distinguishable with colour
+  vision deficiency. A colour follows the host rather than its place in the list, which is why the
+  picker is read in name order but coloured in the order the hosts were added.
 
 ### Resolver errors — `/resolver-errors`
 
