@@ -151,3 +151,13 @@
     margin-top: 0;
     margin-left: 0;
 }
+
+/*
+ * The Last downtime cell opens the graph on the outage it reports rather than on the live window
+ * the rest of the row opens. The row already says it is clickable; underlining the outage as the
+ * pointer crosses it is what says this part of it goes somewhere else, and a cell with no outage
+ * in it — which does go where the row goes — has nothing to underline.
+ */
+.host-table td.last-downtime:hover .ping-value {
+    text-decoration: underline;
+}

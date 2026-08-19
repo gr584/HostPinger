@@ -111,14 +111,14 @@ namespace HostPinger.UITest
 
                 var host = new MonitoredHost { Name = name, Address = address, CreatedUtc = DateTime.UtcNow };
                 db.Hosts.Add(host);
-                await db.SaveChangesAsync();
+                await UiTestRun.SaveAsync(db);
                 db.PingAttempts.Add(new PingAttempt
                 {
                     HostId = host.Id,
                     TimestampUtc = DateTime.UtcNow,
                     RoundtripMs = roundtripMs,
                 });
-                await db.SaveChangesAsync();
+                await UiTestRun.SaveAsync(db);
             }
         }
     }

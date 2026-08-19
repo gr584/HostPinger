@@ -131,6 +131,23 @@ else
 
     [Parameter] public string? HostIdsSegment { get; set; }
 
+    /// <summary>
+    /// What the address asks the chart to open on: a fixed period as its two ends, or a live
+    /// window as its width. Carried in the address so that a link can point the chart at either —
+    /// which is how the Hosts page's Last downtime column opens the graph on the outage it reports,
+    /// paused on one that is over and live on one still running. Read as text rather than as typed
+    /// parameters so that this page decides what an unreadable one means; see
+    /// <see cref="GraphOpening.Parse"/>.
+    /// </summary>
+    [SupplyParameterFromQuery(Name = GraphOpening.StartQuery)]
+    private string? PeriodStartQuery { get; set; }
+
+    [SupplyParameterFromQuery(Name = GraphOpening.EndQuery)]
+    private string? PeriodEndQuery { get; set; }
+
+    [SupplyParameterFromQuery(Name = GraphOpening.WindowQuery)]
+    private string? WindowWidthQuery { get; set; }
+
     private List<MonitoredHost> _allHosts = [];
     private HashSet<int> _selected = [];
     private TimeSpan _window = TimeSpan.FromHours(1);
@@ -156,6 +173,9 @@ else
     private int _loadedPointsPerSeries = DefaultPointsPerSeries;
     private TimeSpan _bucketDuration;
     private bool _awaitingFirstMeasurement = true;
+
+    // What the address last asked this page to open on, and it acted on; see ApplyQueryOpening.
+    private GraphOpening? _appliedQueryOpening;
 
     private bool IsPaused => _pinnedRange is not null;
 
@@ -204,6 +224,7 @@ else
     {
         _selected = ParseIds(HostIdsSegment);
         _updateInterval = TimeSpan.FromSeconds(Math.Max(1, PingerOptions.Value.IntervalSeconds));
+        ApplyQueryOpening();
         await LoadAsync();
         if (!_refreshLoopStarted)
         {
@@ -375,6 +396,41 @@ else
                     _rangeEnd,
                     points)))
             .ToList();
+    }
+
+    /// <summary>
+    /// Opens on whatever the address asks for. A period pins the chart exactly as dragging one out
+    /// of it does: it holds still and the five-second refresh leaves it alone until it is resumed,
+    /// to the window the page would have opened on had the address said nothing, since there was no
+    /// window on screen before it to put back. A width leaves the chart following the clock over
+    /// that much time, so what is on it goes on arriving.
+    /// </summary>
+    /// <remarks>
+    /// Acted on once per opening rather than once per parameters set: the picker rewrites the
+    /// address as hosts are ticked, and applying it again on the way through would drag a reader
+    /// who had resumed live, or picked a window of their own, back to what they arrived on. An
+    /// address asking for something else is a request of its own and is acted on in its turn.
+    /// </remarks>
+    private void ApplyQueryOpening()
+    {
+        var opening = GraphOpening.Parse(PeriodStartQuery, PeriodEndQuery, WindowWidthQuery);
+        if (opening is null || opening == _appliedQueryOpening)
+        {
+            return;
+        }
+
+        _appliedQueryOpening = opening;
+        switch (opening)
+        {
+            case GraphOpening.Period period:
+                _pinnedRange = (period.StartUtc, period.EndUtc, _window);
+                break;
+
+            case GraphOpening.Window window:
+                _window = window.Width;
+                _pinnedRange = null;
+                break;
+        }
     }
 
     private async Task ToggleHostAsync(int hostId, bool isChecked)

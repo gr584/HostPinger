@@ -34,7 +34,8 @@ can be read either way; the password only decides who can change something.
 ### Hosts — `/`
 
 The list of everything being monitored, one row per host, in name order until a heading is clicked,
-refreshed every five seconds. Clicking a row opens that host's ping graph.
+refreshed every five seconds. Clicking a row opens that host's ping graph, and clicking its last
+downtime opens that graph on the outage itself.
 
 - **Status** — <span class="badge text-bg-success">**Up**</span> when the last ping was answered, <span class="badge text-bg-warning">**Retrying**</span> once pings start going unanswered, <span class="badge text-bg-danger">**Down**</span> once it has used up the *Retry attempts* it is allowed, <span class="badge bg-body-secondary text-body-secondary">**Waiting…**</span> until the first round covers a newly added host, and <span class="badge text-bg-secondary">**Paused**</span> for a host that is not being pinged at all. Hovering **Retrying** says how many pings it has missed so far, and how many make it down.
 - **Last ping** — the round trip in milliseconds, or *no reply*, with how long ago the attempt was
@@ -42,7 +43,13 @@ refreshed every five seconds. Clicking a row opens that host's ping graph.
 - **Last downtime** — when the host was last seen up before it stopped answering, and how long it
   stayed unanswered. An ongoing outage keeps counting. A run of missed pings the host recovered
   from inside its *Retry attempts* is not an outage and is not reported, so a host that is
-  retrying goes on showing whatever outage it last had.
+  retrying goes on showing whatever outage it last had. Clicking the cell opens the graph on that
+  outage. One that is over arrives paused, over a range twice as long as the outage with it in the
+  middle, so a quarter of the chart either side of it is what led up to it and what came after.
+  One that is still running arrives live instead, over a window one and a half times as long as
+  the outage so far — the outage fills the last two thirds of the chart and what led up to it the
+  first third — and the chart goes on following the clock from there, so the outage takes up more
+  of it as it lasts and the recovery arrives on screen as it happens.
 - **Sorting** — clicking a column heading orders the table by it, and clicking that heading again
   turns the order round. **Name** and **Address** read A to Z first; the three columns that say how
   a host is doing lead with the worst of what they show — down before up, no reply before a slow
@@ -82,6 +89,12 @@ and resizes with the window.
   single match, Enter selects it and closes the picker.
 - **Shareable selection** — the hosts on the chart are part of the URL, so a particular comparison
   can be bookmarked or sent to someone else.
+- **Opening on a period or a window** — an address can name what to open on: `?from=…&to=…` in
+  UTC arrives paused on that period, exactly as one zoomed into by hand would, and `?window=…` in
+  seconds arrives live over a window that wide. That is how the Hosts page's *Last downtime*
+  column opens the graph on a particular outage — paused on one that is over, live on one that is
+  still running. Anything that cannot be read is passed over rather than argued with, and the
+  chart opens live over its usual window.
 - **Hover readout** — a crosshair with every plotted host's value at that moment, an unanswered
   ping reading as *down*.
 - **Legend** — the latest value per host, and a click hides or shows a series, which also rescales

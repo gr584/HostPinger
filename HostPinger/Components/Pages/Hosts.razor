@@ -25,7 +25,7 @@
         }
         else
         {
-            @("Click a host to open its ping graph.")
+            @("Click a host to open its ping graph, or its last downtime to open the graph on that outage.")
         }
         @if (!_isUnlocked)
         {
@@ -121,7 +121,15 @@
                                 <span class="text-muted">—</span>
                             }
                         </td>
-                        <td>
+                        @*
+                            The one cell that goes somewhere of its own, so it swallows the click
+                            rather than letting the row's handler take it: an outage is worth
+                            arriving at the graph already looking at, and the row cannot know which
+                            one was meant. A cell with no outage in it has nothing of its own to
+                            open and falls back to the row's plain graph.
+                        *@
+                        <td class="last-downtime" title="@DowntimeTitle(row)"
+                            @onclick="() => OpenDowntime(row)" @onclick:stopPropagation>
                             @if (row.LastDowntime is { } downtime)
                             {
                                 <span class="ping-value">@downtime.StartedUtc.ToLocalTime().ToString("g")</span>
@@ -476,6 +484,43 @@
     }
 
     private void OpenGraph(int hostId) => Navigation.NavigateTo($"graph/{hostId}");
+
+    /// <summary>
+    /// Opens the graph on the outage this row reports rather than on the live window the row itself
+    /// opens.
+    /// </summary>
+    /// <remarks>
+    /// An outage that is over is a stretch of the past, so the chart is pinned to a range twice as
+    /// long as it with it in the middle: a quarter of the chart either side of it is what led up to
+    /// it and what came after. One still running has no end to put in the middle, and pinning it
+    /// would freeze the chart on something that is still happening, so the chart is left following
+    /// the clock over a window one and a half times as long as the outage so far — the outage
+    /// fills the last two thirds of it and what led up to it the first third. It goes on following
+    /// from there, so the outage grows across the chart while it lasts and the recovery arrives on
+    /// screen as it happens rather than leaving the reader on a picture of the outage. A row with
+    /// no outage to open goes where the row goes.
+    /// </remarks>
+    private void OpenDowntime(HostSummary row)
+    {
+        if (row.LastDowntime is not { } downtime)
+        {
+            OpenGraph(row.Host.Id);
+            return;
+        }
+
+        GraphOpening opening = downtime.EndedUtc is { } endedUtc
+            ? GraphOpening.Around(downtime.StartedUtc, endedUtc)
+            : GraphOpening.Following(DateTime.UtcNow - downtime.StartedUtc);
+        Navigation.NavigateTo($"graph/{row.Host.Id}?{opening.QueryString}");
+    }
+
+    /// <summary>
+    /// What the Last downtime cell offers, which is worth spelling out because it is the one cell
+    /// that does not do what the rest of the row does. A cell with no outage in it does, and says
+    /// nothing.
+    /// </summary>
+    private static string? DowntimeTitle(HostSummary row) =>
+        row.LastDowntime is null ? null : "Open the graph on this outage";
 
     /// <summary>
     /// A heading that sorts the table. The heading itself is the button rather than carrying one,

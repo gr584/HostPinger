@@ -129,7 +129,7 @@ namespace HostPinger.UITest
                 }
 
                 db.Hosts.Add(new MonitoredHost { Name = name, Address = address, CreatedUtc = DateTime.UtcNow });
-                await db.SaveChangesAsync();
+                await UiTestRun.SaveAsync(db);
             }
         }
     }

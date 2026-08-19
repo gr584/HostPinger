@@ -77,7 +77,7 @@ namespace HostPinger.UITest
             }
 
             db.ResolverErrors.AddRange(errors);
-            await db.SaveChangesAsync();
+            await UiTestRun.SaveAsync(db);
         }
     }
 }

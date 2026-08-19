@@ -1,3 +1,6 @@
+using HostPinger.Core.Data;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Playwright;
 
 namespace HostPinger.UITest
@@ -43,6 +46,37 @@ namespace HostPinger.UITest
         /// <summary>The database the running application reads, for a test that has to seed one.</summary>
         public static string DatabasePath =>
             _app?.DatabasePath ?? throw new InvalidOperationException("The application was not started for this run.");
+
+        /// <summary>
+        /// Saves what a test has seeded, asking again while the database is locked.
+        /// </summary>
+        /// <remarks>
+        /// The seeds are written from outside a running application, and SQLite locks the whole
+        /// file rather than the row: the pages the tests are driving re-read every five seconds,
+        /// fixtures seed alongside one another, and the application writes what its own rounds
+        /// turn up. A save that lands on one of those is refused there and then rather than made
+        /// to wait, and the lock it collided with is held for a matter of milliseconds, so asking
+        /// again is the whole of the recovery. A refused save leaves what it was going to write on
+        /// the context, to be tried again as it stands.
+        /// </remarks>
+        public static async Task SaveAsync(HostPingerDbContext db)
+        {
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    await db.SaveChangesAsync();
+                    return;
+                }
+                // SQLITE_BUSY and SQLITE_LOCKED: another connection has the file, and nothing here
+                // writes over what another writer could have put there in the meantime.
+                catch (DbUpdateException e)
+                    when (e.InnerException is SqliteException { SqliteErrorCode: 5 or 6 } && attempt < 19)
+                {
+                    await Task.Delay(50);
+                }
+            }
+        }
 
         [OneTimeSetUp]
         public async Task StartAsync()
