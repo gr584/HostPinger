@@ -29,8 +29,11 @@ main {
     }
 
     .sidebar {
-        /* Wide enough for the longest label, "Configuration", and its icon — no wider. */
-        width: 200px;
+        /* Wide enough for the longest label, "Configuration", and its icon — no wider. In rem
+           rather than pixels so that it grows with the text when the browser is set to a larger
+           font, which would otherwise leave the labels wrapping inside a sidebar that had not
+           moved. */
+        width: 12.5rem;
         height: 100vh;
         position: sticky;
         top: 0;
