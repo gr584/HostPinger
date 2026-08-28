@@ -58,14 +58,25 @@ namespace HostPinger.Core.Charting
         public abstract string QueryString { get; }
 
         /// <summary>
-        /// A period twice as wide as the stretch handed to it, with that stretch in the middle: it
-        /// fills the middle half of the chart, and a quarter of the width stands either side of it
-        /// as what led up to it and what followed. For a stretch that is over, and so has both ends
-        /// to be centred between.
+        /// The opening for a stretch of downtime, one rule for every stretch: a range twice as
+        /// wide as it with it in the middle, so that it fills the middle half of the chart and a
+        /// quarter of the width stands either side of it as what led up to it and what followed.
         /// </summary>
-        /// <param name="startUtc">The start of the stretch to put in the middle.</param>
-        /// <param name="endUtc">Its end.</param>
-        public static Period Around(DateTime startUtc, DateTime endUtc)
+        /// <remarks>
+        /// The trailing quarter can reach past now — always, for a stretch still running and so
+        /// measured to now, and briefly for one that only just ended — and the time past now has
+        /// nothing in it to draw. Rather than pin the chart with blank time to come on it, the
+        /// range is cut off at now and handed back as a <see cref="Window"/>, so the chart follows
+        /// the clock and what follows the stretch arrives on screen as it happens. That leaves a
+        /// stretch measured to now filling the last two thirds of the window and its lead-up the
+        /// first third, as the running case of this rule rather than a rule of its own; only a
+        /// stretch whose range is wholly past opens centred and held still, as a
+        /// <see cref="Period"/>.
+        /// </remarks>
+        /// <param name="startUtc">The start of the stretch.</param>
+        /// <param name="endUtc">Its end: when it recovered, or now for one still running.</param>
+        /// <param name="nowUtc">The present, which is as far as the chart has anything to draw.</param>
+        public static GraphOpening Around(DateTime startUtc, DateTime endUtc, DateTime nowUtc)
         {
             var width = endUtc - startUtc;
             var context = width > TimeSpan.Zero ? width / 2 : TimeSpan.Zero;
@@ -79,20 +90,10 @@ namespace HostPinger.Core.Charting
                 rangeEnd += shortfall / 2;
             }
 
-            return new Period(rangeStart, rangeEnd);
+            return rangeEnd > nowUtc
+                ? new Window(Clamp(nowUtc - rangeStart))
+                : new Period(rangeStart, rangeEnd);
         }
-
-        /// <summary>
-        /// A window one and a half times as wide as a stretch that is still running, so that the
-        /// stretch fills the last two thirds of the chart and what led up to it the first third.
-        /// The chart follows the clock over it rather than holding still: a stretch that is still
-        /// running has no end to centre on, and freezing the chart on something that is still
-        /// happening would leave the reader watching a picture of it rather than it. What that
-        /// costs is that the proportions above are only true as it opens — the width stays put
-        /// while the stretch goes on growing into it — which is the point of showing it live.
-        /// </summary>
-        /// <param name="stretch">How long the stretch has been running.</param>
-        public static Window Following(TimeSpan stretch) => new(Clamp(stretch + stretch / 2));
 
         /// <summary>
         /// Reads an opening back out of an address, preferring a period where one is spelled out.

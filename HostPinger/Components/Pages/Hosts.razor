@@ -490,15 +490,13 @@
     /// opens.
     /// </summary>
     /// <remarks>
-    /// An outage that is over is a stretch of the past, so the chart is pinned to a range twice as
-    /// long as it with it in the middle: a quarter of the chart either side of it is what led up to
-    /// it and what came after. One still running has no end to put in the middle, and pinning it
-    /// would freeze the chart on something that is still happening, so the chart is left following
-    /// the clock over a window one and a half times as long as the outage so far — the outage
-    /// fills the last two thirds of it and what led up to it the first third. It goes on following
-    /// from there, so the outage grows across the chart while it lasts and the recovery arrives on
-    /// screen as it happens rather than leaving the reader on a picture of the outage. A row with
-    /// no outage to open goes where the row goes.
+    /// The outage — measured to now while it is still running — goes in the middle of a range
+    /// twice its length, pinned where that whole range is already past and cut off at now and left
+    /// live where its trailing quarter is still to come; see <see cref="GraphOpening.Around"/>,
+    /// which is where the rule and its reasons live. So an outage long over is held still and
+    /// centred, and one still running or only just ended opens live, with the recovery — when it
+    /// comes — arriving on screen rather than the reader being frozen on a picture of the outage.
+    /// A row with no outage to open goes where the row goes.
     /// </remarks>
     private void OpenDowntime(HostSummary row)
     {
@@ -508,9 +506,8 @@
             return;
         }
 
-        GraphOpening opening = downtime.EndedUtc is { } endedUtc
-            ? GraphOpening.Around(downtime.StartedUtc, endedUtc)
-            : GraphOpening.Following(DateTime.UtcNow - downtime.StartedUtc);
+        var nowUtc = DateTime.UtcNow;
+        var opening = GraphOpening.Around(downtime.StartedUtc, downtime.EndedUtc ?? nowUtc, nowUtc);
         Navigation.NavigateTo($"graph/{row.Host.Id}?{opening.QueryString}");
     }
 

@@ -7,6 +7,13 @@ namespace HostPinger.Test
         private static readonly DateTime Start = new(2026, 7, 31, 12, 0, 0, DateTimeKind.Utc);
 
         /// <summary>
+        /// A present far enough past the outages below that none of the chart they ask for is time
+        /// the clock has not reached, which is what the tests taking it are about; the ones about
+        /// an outage that only just ended name their own.
+        /// </summary>
+        private static readonly DateTime LongAfter = Start.AddDays(1);
+
+        /// <summary>
         /// What the Hosts page's Last downtime column asks for once an outage is over: the outage
         /// in the middle half of the chart, with a quarter of the range either side of it as
         /// context.
@@ -14,7 +21,7 @@ namespace HostPinger.Test
         [Test]
         public void Around_PutsTheStretchInTheMiddleOfAPeriodTwiceAsWide()
         {
-            var period = GraphOpening.Around(Start, Start.AddMinutes(20));
+            var period = Around(Start, Start.AddMinutes(20));
 
             Assert.Multiple(() =>
             {
@@ -30,7 +37,7 @@ namespace HostPinger.Test
         [Test]
         public void Around_WidensAStretchTooShortToRead()
         {
-            var period = GraphOpening.Around(Start, Start.AddSeconds(2));
+            var period = Around(Start, Start.AddSeconds(2));
 
             Assert.Multiple(() =>
             {
@@ -47,7 +54,7 @@ namespace HostPinger.Test
         [Test]
         public void Around_OrdersAPeriodBuiltFromABackwardsStretch()
         {
-            var period = GraphOpening.Around(Start, Start.AddSeconds(-10));
+            var period = Around(Start, Start.AddSeconds(-10));
 
             Assert.Multiple(() =>
             {
@@ -57,24 +64,60 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// What the same column asks for while an outage is still running: a window one and a half
-        /// times as long as it, which is the outage in the last two thirds of the chart and what
-        /// led up to it in the first third.
+        /// What the same column asks for while an outage is still running, which is the same rule
+        /// with the outage measured to now: the trailing quarter of the range is all time to come,
+        /// so the range is cut off at now and the chart left live. What that leaves is a window one
+        /// and a half times as long as the outage so far — the outage in the last two thirds of the
+        /// chart and what led up to it in the first third.
         /// </summary>
         [Test]
-        public void Following_LeavesTheStretchFillingTheLastTwoThirds()
+        public void Around_FollowsTheClockOverAStretchStillRunning()
         {
-            var window = GraphOpening.Following(TimeSpan.FromHours(1));
+            var now = Start.AddHours(1);
 
-            Assert.That(window.Width, Is.EqualTo(TimeSpan.FromMinutes(90)));
+            var opening = GraphOpening.Around(Start, now, now);
+
+            Assert.That(opening, Is.EqualTo(new GraphOpening.Window(TimeSpan.FromMinutes(90))));
         }
 
+        /// <summary>
+        /// An outage that only just ended is the same case a little further on: a minute after a
+        /// 20 minute outage, nine of the ten minutes held for what followed it are still to come,
+        /// so the chart is cut off at now and left live rather than pinned with blank time to come
+        /// drawn on it. What is left is the lead-in, the outage, and the minute since.
+        /// </summary>
         [Test]
-        public void Following_WidensAStretchTooShortToRead()
+        public void Around_FollowsTheClockWhereWhatFollowedTheOutageIsStillToCome()
         {
-            var window = GraphOpening.Following(TimeSpan.FromSeconds(2));
+            var opening = GraphOpening.Around(Start, Start.AddMinutes(20), Start.AddMinutes(21));
 
-            Assert.That(window.Width, Is.EqualTo(TimeSpan.FromMinutes(1)));
+            Assert.That(opening, Is.EqualTo(new GraphOpening.Window(TimeSpan.FromMinutes(31))));
+        }
+
+        /// <summary>
+        /// The boundary of the rule above: the moment the whole range is past, the chart holds
+        /// still on it.
+        /// </summary>
+        [Test]
+        public void Around_HoldsStillOnceWhatFollowedTheOutageHasAllHappened()
+        {
+            var opening = GraphOpening.Around(Start, Start.AddMinutes(20), Start.AddMinutes(30));
+
+            Assert.That(
+                opening,
+                Is.EqualTo(new GraphOpening.Period(Start.AddMinutes(-10), Start.AddMinutes(30))));
+        }
+
+        /// <summary>
+        /// A blip that just ended is cut back to almost nothing, and what is left still has to be
+        /// wide enough to read — the same floor the period it would otherwise have been gets.
+        /// </summary>
+        [Test]
+        public void Around_WidensAWindowCutBackTooNarrowToRead()
+        {
+            var opening = GraphOpening.Around(Start, Start.AddSeconds(2), Start.AddSeconds(2));
+
+            Assert.That(opening, Is.EqualTo(new GraphOpening.Window(TimeSpan.FromMinutes(1))));
         }
 
         /// <summary>
@@ -82,11 +125,13 @@ namespace HostPinger.Test
         /// years, and the width has to stay one that "now minus it" is an instant the calendar has.
         /// </summary>
         [Test]
-        public void Following_CapsAStretchLongerThanTheChartWillDraw()
+        public void Around_CapsAStretchLongerThanTheChartWillDraw()
         {
-            var window = GraphOpening.Following(TimeSpan.FromDays(4000));
+            var now = Start.AddDays(4000);
 
-            Assert.That(window.Width, Is.EqualTo(TimeSpan.FromDays(365)));
+            var opening = GraphOpening.Around(Start, now, now);
+
+            Assert.That(opening, Is.EqualTo(new GraphOpening.Window(TimeSpan.FromDays(365))));
         }
 
         /// <summary>
@@ -96,8 +141,8 @@ namespace HostPinger.Test
         [Test]
         public void QueryString_IsReadBackByParse()
         {
-            var period = GraphOpening.Around(Start, Start.AddMinutes(20));
-            var window = GraphOpening.Following(TimeSpan.FromHours(1));
+            var period = Around(Start, Start.AddMinutes(20));
+            var window = GraphOpening.Around(Start, Start.AddHours(1), Start.AddHours(1));
 
             Assert.Multiple(() =>
             {
@@ -169,5 +214,12 @@ namespace HostPinger.Test
         {
             Assert.That(GraphOpening.Parse(null, null, "2"), Is.EqualTo(new GraphOpening.Window(TimeSpan.FromMinutes(1))));
         }
+
+        /// <summary>
+        /// An outage read from <see cref="LongAfter"/>, which is late enough that the chart it asks
+        /// for is all in the past and so comes back as a period every time.
+        /// </summary>
+        private static GraphOpening.Period Around(DateTime startUtc, DateTime endUtc) =>
+            (GraphOpening.Period)GraphOpening.Around(startUtc, endUtc, LongAfter);
     }
 }
