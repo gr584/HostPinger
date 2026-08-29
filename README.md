@@ -157,7 +157,7 @@ and saved only when it is.
   changes what is reported rather than what is recorded — every attempt is stored either way, and
   changing it re-reads the whole history rather than only applying from here on.
 - **Maximum database size** — the oldest recorded history is pruned once the file grows past this.
-  Default 100 MB; 0 disables pruning and lets the file grow without bound, apart from the resolver
+  Default 1024 MB; 0 disables pruning and lets the file grow without bound, apart from the resolver
   errors, which are dropped at 30 days either way.
 - **Capacity estimate** — the current file size, how fast it is growing at the present host count
   and interval, and roughly how much history fits inside the limit at that rate.

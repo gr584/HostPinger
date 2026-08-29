@@ -37,7 +37,7 @@ namespace HostPinger.Core.Options
         /// Maximum database file size. The oldest ping attempts are pruned when the file grows
         /// beyond this; zero or negative disables pruning.
         /// </summary>
-        public int MaxDatabaseSizeMb { get; set; } = 100;
+        public int MaxDatabaseSizeMb { get; set; } = 1024;
 
         public long MaxDatabaseSizeBytes => (long)MaxDatabaseSizeMb * 1024 * 1024;
     }
