@@ -339,10 +339,15 @@ namespace HostPinger.Test
 
         private PingMonitorService CreateService(IPingSender sender, PingerOptions? options = null)
         {
+            // The settings arrive as configured defaults under a store with no rows, which is the
+            // state of a fresh install.
             return new PingMonitorService(
                 new TestDb.Factory(_options),
                 sender,
-                new TestOptionsMonitor<PingerOptions>(options ?? new PingerOptions()),
+                new UserSettingsStore(
+                    new TestDb.Factory(_options),
+                    new TestOptionsMonitor<PingerOptions>(options ?? new PingerOptions()),
+                    new TestOptionsMonitor<SecurityOptions>(new SecurityOptions())),
                 new DatabasePruner(),
                 NullLogger<PingMonitorService>.Instance);
         }

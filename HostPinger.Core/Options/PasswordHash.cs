@@ -10,8 +10,8 @@ namespace HostPinger.Core.Options
     /// <remarks>
     /// Hand-rolled over <see cref="Rfc2898DeriveBytes"/> rather than taken from ASP.NET Core
     /// Identity, whose hasher would work but lives in the web framework: this is the one thing the
-    /// settings overlay stores that has to be understood by both the library that writes the file
-    /// and the tests that read it back, and neither references the framework.
+    /// settings store keeps that has to be understood by both the library that writes it and the
+    /// tests that read it back, and neither references the framework.
     /// </remarks>
     public static class PasswordHash
     {
@@ -25,7 +25,7 @@ namespace HostPinger.Core.Options
         // second per attempt on ordinary hardware. That cost is what a run of guesses meets first,
         // and it is what holds if the rest ever fails: the web UI turns an address away for longer
         // and longer as it goes on guessing, but nothing of that reaches down here, and a copy of
-        // the settings file taken off the machine leaves this as the only thing in the way.
+        // the database taken off the machine leaves this as the only thing in the way.
         private const int Iterations = 210_000;
 
         private const int SaltBytes = 16;
@@ -45,9 +45,10 @@ namespace HostPinger.Core.Options
         /// Whether <paramref name="password"/> is the one <paramref name="stored"/> was made from.
         /// </summary>
         /// <remarks>
-        /// Anything unreadable answers false rather than throwing. The overlay is a plain JSON file
-        /// meant to be editable by hand — a truncated or half-deleted value must leave the
-        /// application locked and working, not failing on every request.
+        /// Anything unreadable answers false rather than throwing. The stored value can also come
+        /// from appsettings.json or an environment variable, both edited by hand — a truncated or
+        /// half-deleted value must leave the application locked and working, not failing on every
+        /// request.
         /// </remarks>
         public static bool Verify(string? stored, string password)
         {

@@ -2,6 +2,7 @@ using System.Net;
 using System.Security.Cryptography;
 using HostPinger.Core.Options;
 using HostPinger.Security;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace HostPinger.Test
@@ -23,20 +24,31 @@ namespace HostPinger.Test
         private static readonly TimeSpan ADay = TimeSpan.FromDays(1);
 
         private StubClock _clock = null!;
+        private SqliteConnection _connection = null!;
         private PasswordAttempts _attempts = null!;
 
         [SetUp]
         public void SetUp()
         {
             _clock = new StubClock(new DateTimeOffset(2026, 8, 9, 12, 0, 0, TimeSpan.Zero));
-            var options = new TestOptionsMonitor<SecurityOptions>(
-                new SecurityOptions { PasswordHash = CheapHash(Password) });
+
+            // The password arrives as a configured default rather than a stored row, so nothing
+            // here ever writes to the store's database.
+            (_connection, var options) = TestDb.CreateInMemory();
+            var store = new UserSettingsStore(
+                new TestDb.Factory(options),
+                new TestOptionsMonitor<PingerOptions>(new PingerOptions()),
+                new TestOptionsMonitor<SecurityOptions>(
+                    new SecurityOptions { PasswordHash = CheapHash(Password) }));
 
             _attempts = new PasswordAttempts(
-                new PasswordGate(options),
+                new PasswordGate(store),
                 NullLogger<PasswordAttempts>.Instance,
                 _clock);
         }
+
+        [TearDown]
+        public void TearDown() => _connection.Dispose();
 
         [Test]
         public void WaitFor_AsksNothingOfTheFirstFewWrongAnswers()

@@ -137,10 +137,11 @@ down, and this is where the difference can be read without going through the log
 
 ### Configuration — `/configuration`
 
-The settings that can be changed while the service is running. Saving writes them to an overlay
-file beside the database and they take effect from the next ping round — no restart, and nothing
-to edit on disk. They can be read whether or not the browser is unlocked, and saved only when it
-is.
+The settings that can be changed while the service is running. Saving writes them to a table in
+the database and they take effect from the next ping round — no restart, and nothing to edit on
+disk. The table only holds what has been saved here; everything else keeps falling through to
+`appsettings.json` and the environment. They can be read whether or not the browser is unlocked,
+and saved only when it is.
 
 - **Ping interval** — how often every enabled host is pinged. Default 30 seconds.
 - **Timeout** — how long to wait for a reply before recording the host as down. Default 5 seconds.
@@ -209,10 +210,25 @@ service, locked or not.
   address is the one the connection was opened from, which behind a reverse proxy is the proxy: no
   forwarded headers are trusted, because a tally kept against a header anyone can set is no tally
   at all. Passwords themselves are never written to the log.
-- **The password is stored hashed** — PBKDF2 over a random salt — in the settings overlay beside
-  the database, and only ever compared against. There is nothing to read back out of it, which
-  also means a forgotten one cannot be recovered: delete the `Security` section from
-  `usersettings.json` and the service unlocks itself within seconds, without a restart.
+- **The password is stored hashed** — PBKDF2 over a random salt — in the database, and only ever
+  compared against. There is nothing to read back out of it, which also means a forgotten one
+  cannot be recovered — it can only be removed. Run the service's own executable with
+  `--remove-password` and every action is unlocked again:
+
+  ```
+  sudo systemctl stop hostpinger
+  sudo /usr/lib/hostpinger/HostPinger --remove-password
+  sudo systemctl start hostpinger
+  ```
+
+  On Windows the same three steps are `Stop-Service HostPinger`, the installed `HostPinger.exe`
+  with the same switch, and `Start-Service HostPinger`, from an elevated prompt. Stopping first
+  matters: the running service answers from memory and only reads the removal on its next start.
+  The command finds the database the way the service does, so a deployment that moved it — the
+  sysconfig file on Linux, the service's `Environment` value on Windows — must pass the same
+  `Pinger__DatabasePath` in the command's environment. The removal is recorded the way the
+  Password page records one, so a password configured in the environment or `appsettings.json`
+  is overridden rather than uncovered.
 - **It travels in the clear over plain HTTP**, which is how the service is normally reached. On a
   network where that matters, put something that terminates TLS in front of it. The password stops
   a passer-by changing the monitoring; it is not a defence against someone watching the wire.
@@ -268,7 +284,7 @@ service, locked or not.
 
 - The same build runs as a Windows service named `HostPinger` and as the systemd unit
   `hostpinger`, and starts with the machine either way.
-- The database, the settings overlay and the data protection keys live under
+- The database — settings included — and the data protection keys live under
   `%ProgramData%\HostPinger` on Windows and `/var/lib/hostpinger` on Linux. Both survive an
   upgrade or an uninstall. The keys are what let an unlocked browser stay unlocked across a
   restart of the service, as well as reconnecting a page that was open when it went down.
@@ -425,7 +441,6 @@ edited on the Configuration page, as described above. Everything else is environ
 | `ASPNETCORE_HTTP_PORTS` | Listening port, on every interface. 8080 on Linux, 5000 on Windows. |
 | `TZ` | Time zone for displayed timestamps. They are rendered server-side, so this decides what users see. Linux only — Windows takes the system time zone. |
 | `Pinger__DatabasePath` | Database location. Defaults to `/var/lib/hostpinger/hostpinger.db` on Linux and `%ProgramData%\HostPinger\hostpinger.db` on Windows. |
-| `Pinger__UserSettingsPath` | Settings overlay location. Defaults to sitting beside the database. |
 | `DOTNET_EnableDiagnostics` | `0` in the shipped Linux sysconfig, which keeps the runtime from opening a debugger transport and a diagnostics socket a service does not need. See below. |
 
 On Linux they live in `/etc/sysconfig/hostpinger` and take effect on `systemctl restart

@@ -5,11 +5,9 @@
 @using HostPinger.Core.Services
 @using HostPinger.Security
 @using Microsoft.AspNetCore.Components.Authorization
-@using Microsoft.Extensions.Options
 @inject IDbContextFactory<HostPingerDbContext> DbFactory
-@inject IOptionsMonitor<PingerOptions> PingerOptions
 @inject PingerPaths Paths
-@inject PingerSettingsStore SettingsStore
+@inject UserSettingsStore SettingsStore
 @inject PasswordGate Gate
 @inject LockPrompt Prompt
 @implements IDisposable
@@ -262,7 +260,7 @@
     /// </summary>
     private void SyncFromConfiguration()
     {
-        var options = PingerOptions.CurrentValue;
+        var options = SettingsStore.CurrentPinger;
         if (_databaseForm.MaxDatabaseSizeMb == _effectiveMaxDatabaseSizeMb)
         {
             _databaseForm.MaxDatabaseSizeMb = options.MaxDatabaseSizeMb;
@@ -322,9 +320,9 @@
             new PingerSettingsUpdate { MaxDatabaseSizeMb = _databaseForm.MaxDatabaseSizeMb },
             _cts.Token);
 
-        // The configuration reload is asynchronous, so project from the saved value right away
-        // rather than waiting for the file watcher to catch up.
-        _effectiveMaxDatabaseSizeMb = _databaseForm.MaxDatabaseSizeMb;
+        // The save is in force the moment it returns, so re-reading the store is all it takes
+        // for the projections below to use it.
+        SyncFromConfiguration();
         _databaseStatus = "Saved — applied after the next ping round.";
         _isDatabaseSaveRefused = false;
         await LoadStatsAsync();
@@ -369,10 +367,8 @@
             },
             _cts.Token);
 
-        _effectiveIntervalSeconds = _pingerForm.IntervalSeconds;
-        _effectiveTimeoutSeconds = _pingerForm.TimeoutSeconds;
-        _effectiveResolveTimeoutSeconds = _pingerForm.ResolveTimeoutSeconds;
-        _effectiveRetryAttempts = _pingerForm.RetryAttempts;
+        // The save is in force the moment it returns, so re-reading the store catches it up.
+        SyncFromConfiguration();
         _pingerStatus = "Saved — applied from the next ping round.";
         _isPingerSaveRefused = false;
         await LoadStatsAsync();

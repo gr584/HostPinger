@@ -15,6 +15,14 @@ namespace HostPinger
     {
         public static void Main(string[] args)
         {
+            // A break-glass command rather than configuration, so it is pulled out before the
+            // command-line configuration provider can trip over a switch with no value.
+            var removePassword = args.Contains("--remove-password");
+            if (removePassword)
+            {
+                args = args.Where(a => a != "--remove-password").ToArray();
+            }
+
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
                 Args = args,
@@ -35,23 +43,28 @@ namespace HostPinger
             builder.Services.AddRazorComponents()
                 .AddInteractiveServerComponents();
 
-            // Both paths are read straight from appsettings.json, before the overlay below joins the
-            // configuration: the overlay cannot be the place that says where the overlay is.
+            // The database path has to come from the file and environment configuration alone: the
+            // settings stored inside the database cannot be the place that says where it is.
             var paths = PingerPaths.Resolve(
                 builder.Configuration[$"{PingerOptions.SectionName}:{nameof(PingerOptions.DatabasePath)}"],
-                builder.Configuration[$"{PingerOptions.SectionName}:{nameof(PingerOptions.UserSettingsPath)}"],
                 builder.Environment.ContentRootPath);
             Directory.CreateDirectory(Path.GetDirectoryName(paths.DatabasePath)!);
 
-            // Settings edited on the Configuration page live in an overlay layered on top of
-            // appsettings.json. Registering it last makes it win, and reloadOnChange lets a save
-            // reach IOptionsMonitor without restarting the service.
-            builder.Configuration.AddJsonFile(paths.SettingsPath, optional: true, reloadOnChange: true);
+            if (removePassword)
+            {
+                RemovePassword(paths);
+                return;
+            }
 
+            // These bindings are the defaults the store below falls back to for any setting the
+            // UserSettings table holds no row for.
             builder.Services.Configure<PingerOptions>(builder.Configuration.GetSection(PingerOptions.SectionName));
             builder.Services.Configure<SecurityOptions>(builder.Configuration.GetSection(SecurityOptions.SectionName));
             builder.Services.AddSingleton(paths);
-            builder.Services.AddSingleton<PingerSettingsStore>();
+
+            // Settings edited on the Configuration page live in the UserSettings table, read
+            // through this store: a save is in force the moment it returns.
+            builder.Services.AddSingleton<UserSettingsStore>();
             builder.Services.AddDbContextFactory<HostPingerDbContext>(options => options.UseSqlite($"Data Source={paths.DatabasePath}"));
 
             // Unlocking the actions that change hosts and settings. There are no accounts: signing
@@ -113,6 +126,9 @@ namespace HostPinger
                 HostPingerDatabase.InitializeAsync(db).GetAwaiter().GetResult();
             }
 
+            // After the migrations, which is what guarantees the table it reads exists.
+            app.Services.GetRequiredService<UserSettingsStore>().LoadAsync().GetAwaiter().GetResult();
+
             // Configure the HTTP request pipeline.
             if (!app.Environment.IsDevelopment())
             {
@@ -135,6 +151,33 @@ namespace HostPinger
                 .AddInteractiveServerRenderMode();
 
             app.Run();
+        }
+
+        /// <summary>
+        /// What `HostPinger --remove-password` runs instead of the service: the recovery for a
+        /// lost password. It writes the same "explicitly no password" row the Password page
+        /// writes, so it also cancels a hash configured in appsettings.json or the environment —
+        /// which is what somebody who cannot produce the password needs it to do. The running
+        /// service reads settings from memory, so this takes effect on its next start.
+        /// </summary>
+        /// <remarks>
+        /// Migrations run first, making the command safe against a database a newer build has not
+        /// opened yet — and against no database at all, where it creates one that says no password
+        /// rather than failing somebody who is locked out.
+        /// </remarks>
+        private static void RemovePassword(PingerPaths paths)
+        {
+            var options = new DbContextOptionsBuilder<HostPingerDbContext>()
+                .UseSqlite($"Data Source={paths.DatabasePath}")
+                .Options;
+            using var db = new HostPingerDbContext(options);
+            HostPingerDatabase.InitializeAsync(db).GetAwaiter().GetResult();
+            UserSettingsStore.StageAsync(db, UserSettingsStore.PasswordHashKey, string.Empty)
+                .GetAwaiter().GetResult();
+            db.SaveChanges();
+
+            Console.WriteLine($"Password removed from {paths.DatabasePath}.");
+            Console.WriteLine("Nothing is locked now. Start the service, or restart it if it is running.");
         }
     }
 }

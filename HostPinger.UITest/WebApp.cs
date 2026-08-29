@@ -2,9 +2,9 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
-using System.Text.Json;
-using System.Text.Json.Nodes;
+using HostPinger.Core.Data;
 using HostPinger.Core.Options;
+using Microsoft.EntityFrameworkCore;
 
 namespace HostPinger.UITest
 {
@@ -14,13 +14,12 @@ namespace HostPinger.UITest
     /// <remarks>
     /// Its own process rather than one hosted inside the test run: the application serves its
     /// static assets from a manifest built alongside them, so it has to run from its own output
-    /// directory to be the thing users actually get. It is given a database and a settings overlay
-    /// in a temporary directory, so a test run never touches the development data or an installed
-    /// service's.
+    /// directory to be the thing users actually get. It is given a database in a temporary
+    /// directory, so a test run never touches the development data or an installed service's.
     /// </remarks>
     public sealed class WebApp : IAsyncDisposable
     {
-        /// <summary>The password every test unlocks with, written into the overlay before the start.</summary>
+        /// <summary>The password every test unlocks with, seeded into the database before the start.</summary>
         public const string Password = "the-test-password";
 
         /// <summary>
@@ -29,8 +28,6 @@ namespace HostPinger.UITest
         /// error, so it is checked before a single test runs.
         /// </summary>
         private const string FrameworkScript = "_framework/blazor.web.js";
-
-        private static readonly JsonSerializerOptions WriteOptions = new() { WriteIndented = true };
 
         private readonly Process _process;
         private readonly string _dataDirectory;
@@ -69,10 +66,8 @@ namespace HostPinger.UITest
 
             var dataDirectory = Path.Combine(Path.GetTempPath(), $"hostpinger-ui-{Guid.NewGuid():N}");
             Directory.CreateDirectory(dataDirectory);
-            var settingsPath = Path.Combine(dataDirectory, PingerPaths.SettingsFileName);
-            WriteSettings(settingsPath);
-
             var databasePath = Path.Combine(dataDirectory, PingerPaths.DatabaseFileName);
+            SeedSettings(databasePath);
             var baseUrl = $"http://127.0.0.1:{FreePort()}";
             var start = new ProcessStartInfo("dotnet")
             {
@@ -90,10 +85,9 @@ namespace HostPinger.UITest
             // CheckItServesTheFrameworkScriptAsync is what keeps that from being silent.
             start.Environment["ASPNETCORE_ENVIRONMENT"] = "Development";
 
-            // The development settings name a database inside the checkout; these are read after
-            // them and are what keep the run in its own temporary directory.
+            // The development settings name a database inside the checkout; this is read after
+            // them and is what keeps the run in its own temporary directory.
             start.Environment["Pinger__DatabasePath"] = databasePath;
-            start.Environment["Pinger__UserSettingsPath"] = settingsPath;
 
             var process = Process.Start(start)
                 ?? throw new InvalidOperationException("Could not start the application.");
@@ -123,24 +117,29 @@ namespace HostPinger.UITest
         /// <summary>
         /// Puts the password in place before the application reads its settings, so every test
         /// starts against one that is set without having to go through the pages that set it.
+        /// Migrating here is a no-op for the application's own startup, which finds it done.
         /// </summary>
-        private static void WriteSettings(string settingsPath)
+        private static void SeedSettings(string databasePath)
         {
-            var root = new JsonObject
-            {
-                [SecurityOptions.SectionName] = new JsonObject
+            var options = new DbContextOptionsBuilder<HostPingerDbContext>()
+                .UseSqlite($"Data Source={databasePath}")
+                .Options;
+            using var db = new HostPingerDbContext(options);
+            db.Database.Migrate();
+            db.UserSettings.AddRange(
+                new UserSetting
                 {
-                    [nameof(SecurityOptions.PasswordHash)] = PasswordHash.Hash(Password),
+                    Key = UserSettingsStore.PasswordHashKey,
+                    Value = PasswordHash.Hash(Password),
                 },
                 // Long enough that no ping round runs during a test: nothing here is about pinging,
                 // and a round would only add noise and load.
-                [PingerOptions.SectionName] = new JsonObject
+                new UserSetting
                 {
-                    [nameof(PingerOptions.IntervalSeconds)] = 86_400,
-                },
-            };
-
-            File.WriteAllText(settingsPath, root.ToJsonString(WriteOptions));
+                    Key = $"{PingerOptions.SectionName}:{nameof(PingerOptions.IntervalSeconds)}",
+                    Value = "86400",
+                });
+            db.SaveChanges();
         }
 
         private static void Capture(List<string> output, string? line)

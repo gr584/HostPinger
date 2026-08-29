@@ -24,8 +24,7 @@ DOTNET_EnableDiagnostics=0
 # decides what users see. Unset means the system time zone.
 #TZ=Europe/Berlin
 
-# Overrides for where state is kept. Both default to /var/lib/hostpinger, which is what
-# StateDirectory= in the unit provisions; changing them means granting the service write access
+# Override for where the database is kept. Defaults to /var/lib/hostpinger, which is what
+# StateDirectory= in the unit provisions; changing it means granting the service write access
 # to the new location yourself.
 #Pinger__DatabasePath=/var/lib/hostpinger/hostpinger.db
-#Pinger__UserSettingsPath=/var/lib/hostpinger/usersettings.json

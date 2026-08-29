@@ -35,7 +35,12 @@ namespace HostPinger.Test
         [Test]
         public async Task EnforceSizeLimit_ShrinksFileAndKeepsNewestRows()
         {
-            const long limitBytes = 150 * 1024;
+            // Pruning runs a batch at a time, so where it stops moves in steps of ~95KB; a limit
+            // near one of those steps flips between "1000 rows survive" and "the table is emptied"
+            // whenever the schema grows by a page or two. This one sits mid-gap — the file passes
+            // ~250KB and ~155KB on consecutive batches — so it stays a test of the pruner rather
+            // than of the schema's exact overhead.
+            const long limitBytes = 200 * 1024;
             await using var db = new HostPingerDbContext(_options);
             await SeedAttemptsAsync(db, 20_000);
 

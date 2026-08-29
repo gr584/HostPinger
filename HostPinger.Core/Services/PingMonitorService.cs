@@ -3,7 +3,6 @@ using HostPinger.Core.Options;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace HostPinger.Core.Services
 {
@@ -21,7 +20,7 @@ namespace HostPinger.Core.Services
 
         private readonly IDbContextFactory<HostPingerDbContext> _dbFactory;
         private readonly IPingSender _pingSender;
-        private readonly IOptionsMonitor<PingerOptions> _options;
+        private readonly UserSettingsStore _settings;
         private readonly DatabasePruner _pruner;
         private readonly ILogger<PingMonitorService> _logger;
         private readonly TimeProvider _timeProvider;
@@ -29,14 +28,14 @@ namespace HostPinger.Core.Services
         public PingMonitorService(
             IDbContextFactory<HostPingerDbContext> dbFactory,
             IPingSender pingSender,
-            IOptionsMonitor<PingerOptions> options,
+            UserSettingsStore settings,
             DatabasePruner pruner,
             ILogger<PingMonitorService> logger,
             TimeProvider? timeProvider = null)
         {
             _dbFactory = dbFactory;
             _pingSender = pingSender;
-            _options = options;
+            _settings = settings;
             _pruner = pruner;
             _logger = logger;
             _timeProvider = timeProvider ?? TimeProvider.System;
@@ -84,7 +83,7 @@ namespace HostPinger.Core.Services
         }
 
         private TimeSpan GetInterval() =>
-            TimeSpan.FromSeconds(Math.Clamp(_options.CurrentValue.IntervalSeconds, 1, MaxIntervalSeconds));
+            TimeSpan.FromSeconds(Math.Clamp(_settings.CurrentPinger.IntervalSeconds, 1, MaxIntervalSeconds));
 
         /// <summary>
         /// Pings all enabled hosts once, stores the attempts, and prunes the database. Hosts whose
@@ -94,7 +93,7 @@ namespace HostPinger.Core.Services
         /// </summary>
         public async Task<int> RunRoundAsync(CancellationToken cancellationToken = default)
         {
-            var options = _options.CurrentValue;
+            var options = _settings.CurrentPinger;
             await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
             var timestampUtc = _timeProvider.GetUtcNow().UtcDateTime;
 

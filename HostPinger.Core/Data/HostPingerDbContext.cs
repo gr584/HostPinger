@@ -10,6 +10,8 @@ namespace HostPinger.Core.Data
 
         public DbSet<ResolverError> ResolverErrors => Set<ResolverError>();
 
+        public DbSet<UserSetting> UserSettings => Set<UserSetting>();
+
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             modelBuilder.Entity<MonitoredHost>(host =>
@@ -35,6 +37,14 @@ namespace HostPinger.Core.Data
                 // seek stays flat no matter how long the host has been healthy.
                 attempt.HasIndex(a => new { a.HostId, a.TimestampUtc }, "IX_PingAttempts_Unanswered")
                     .HasFilter("\"RoundtripMs\" IS NULL");
+            });
+
+            modelBuilder.Entity<UserSetting>(setting =>
+            {
+                // Long enough for any configuration path this application will ever write, and a
+                // bound at all so a stray write cannot make a key the size of a document.
+                setting.HasKey(s => s.Key);
+                setting.Property(s => s.Key).HasMaxLength(100);
             });
 
             modelBuilder.Entity<ResolverError>(error =>

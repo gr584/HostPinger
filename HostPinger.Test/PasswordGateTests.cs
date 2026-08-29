@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using HostPinger.Core.Options;
 using HostPinger.Security;
+using Microsoft.Data.Sqlite;
 
 namespace HostPinger.Test
 {
@@ -14,15 +15,25 @@ namespace HostPinger.Test
 
         private static readonly ClaimsPrincipal Anonymous = new(new ClaimsIdentity());
 
-        private TestOptionsMonitor<SecurityOptions> _options = null!;
+        private SqliteConnection _connection = null!;
+        private TestOptionsMonitor<SecurityOptions> _configured = null!;
+        private UserSettingsStore _store = null!;
         private PasswordGate _gate = null!;
 
         [SetUp]
         public void SetUp()
         {
-            _options = new TestOptionsMonitor<SecurityOptions>(new SecurityOptions());
-            _gate = new PasswordGate(_options);
+            (_connection, var options) = TestDb.CreateInMemory();
+            _configured = new TestOptionsMonitor<SecurityOptions>(new SecurityOptions());
+            _store = new UserSettingsStore(
+                new TestDb.Factory(options),
+                new TestOptionsMonitor<PingerOptions>(new PingerOptions()),
+                _configured);
+            _gate = new PasswordGate(_store);
         }
+
+        [TearDown]
+        public void TearDown() => _connection.Dispose();
 
         /// <summary>How every install starts, and how it stays until someone sets a password.</summary>
         [Test]
@@ -37,9 +48,9 @@ namespace HostPinger.Test
         }
 
         [Test]
-        public void IsUnlocked_IsFalseForAnAnonymousBrowserOnceAPasswordIsSet()
+        public async Task IsUnlocked_IsFalseForAnAnonymousBrowserOnceAPasswordIsSet()
         {
-            SetPassword(Password);
+            await SetPasswordAsync(Password);
 
             Assert.Multiple(() =>
             {
@@ -50,9 +61,9 @@ namespace HostPinger.Test
         }
 
         [Test]
-        public void IsUnlocked_IsTrueForTheBrowserItSignedIn()
+        public async Task IsUnlocked_IsTrueForTheBrowserItSignedIn()
         {
-            SetPassword(Password);
+            await SetPasswordAsync(Password);
 
             Assert.That(_gate.IsUnlocked(_gate.CreatePrincipal()), Is.True);
         }
@@ -62,22 +73,23 @@ namespace HostPinger.Test
         /// the whole reason the cookie carries a stamp.
         /// </summary>
         [Test]
-        public void IsUnlocked_IsFalseForAnUnlockIssuedUnderThePreviousPassword()
+        public async Task IsUnlocked_IsFalseForAnUnlockIssuedUnderThePreviousPassword()
         {
-            SetPassword(Password);
+            await SetPasswordAsync(Password);
             var issuedBefore = _gate.CreatePrincipal();
 
-            SetPassword("something else entirely");
+            await SetPasswordAsync("something else entirely");
 
             Assert.That(_gate.IsUnlocked(issuedBefore), Is.False);
         }
 
         [Test]
-        public void IsUnlocked_IsTrueForEverybodyAgainOnceThePasswordIsRemoved()
+        public async Task IsUnlocked_IsTrueForEverybodyAgainOnceThePasswordIsRemoved()
         {
-            SetPassword(Password);
+            await SetPasswordAsync(Password);
             var issuedBefore = _gate.CreatePrincipal();
-            _options.CurrentValue = new SecurityOptions();
+
+            await _store.SavePasswordHashAsync(null);
 
             Assert.Multiple(() =>
             {
@@ -87,88 +99,47 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// The page that changes the password signs the browser back in from the hash it has just
-        /// written, because the configuration reload has not caught up yet. Stamping that unlock
-        /// from the stored value instead would lock the person changing the password out of their
-        /// own browser the moment it did.
+        /// The page that changes the password signs its browser back in straight after the save.
+        /// That only works because a save is in force the moment it returns: a principal stamped
+        /// from a stale answer would lock the person changing the password out of their own
+        /// browser.
         /// </summary>
         [Test]
-        public void CreatePrincipal_TakesTheHashItIsGivenOverTheOneStillConfigured()
+        public async Task CreatePrincipal_StampsThePasswordJustSaved()
         {
-            SetPassword(Password);
-            var replacement = PasswordHash.Hash("something else entirely");
+            await SetPasswordAsync(Password);
+            var issuedBefore = _gate.CreatePrincipal();
 
-            var issuedOnSave = _gate.CreatePrincipal(replacement);
-            Assert.That(_gate.IsUnlocked(issuedOnSave), Is.False, "it must not unlock under the old password");
+            await SetPasswordAsync("something else entirely");
+            var issuedOnSave = _gate.CreatePrincipal();
 
-            _options.CurrentValue = new SecurityOptions { PasswordHash = replacement };
-            Assert.That(_gate.IsUnlocked(issuedOnSave), Is.True, "and must unlock once the reload arrives");
+            Assert.Multiple(() =>
+            {
+                Assert.That(_gate.IsUnlocked(issuedOnSave), Is.True);
+                Assert.That(_gate.IsUnlocked(issuedBefore), Is.False);
+            });
         }
 
         /// <summary>
-        /// The page that saves a password redirects straight afterwards, and the page it lands on
-        /// reads this gate. Without the wait it reads the state that was just replaced: removing a
-        /// password lands on a Configuration page still reporting one.
+        /// A password can also arrive from appsettings.json or the environment rather than the
+        /// store, and the gate must enforce it the same way.
         /// </summary>
         [Test]
-        public async Task WaitForSave_ReturnsOnceTheReloadReportsWhatWasSaved()
+        public void IsUnlocked_HonoursAPasswordConfiguredRatherThanStored()
         {
-            SetPassword(Password);
-            var replacement = PasswordHash.Hash("something else entirely");
+            _configured.CurrentValue = new SecurityOptions { PasswordHash = PasswordHash.Hash(Password) };
 
-            var waiting = _gate.WaitForSaveAsync(replacement);
-            Assert.That(waiting.IsCompleted, Is.False, "the configuration has not reloaded yet");
-
-            _options.CurrentValue = new SecurityOptions { PasswordHash = replacement };
-
-            await waiting;
-            Assert.That(_gate.IsUnlocked(_gate.CreatePrincipal()), Is.True);
+            Assert.Multiple(() =>
+            {
+                Assert.That(_gate.IsUnlocked(Anonymous), Is.False);
+                Assert.That(_gate.Verify(Password), Is.True);
+            });
         }
 
         [Test]
-        public async Task WaitForSave_ReturnsAtOnceWhenTheReloadHasAlreadyLanded()
+        public async Task Verify_AnswersForThePasswordInForce()
         {
-            SetPassword(Password);
-
-            var waiting = _gate.WaitForSaveAsync(_options.CurrentValue.PasswordHash);
-
-            Assert.That(waiting.IsCompleted, Is.True);
-            await waiting;
-        }
-
-        /// <summary>Removal writes the key as empty, so that is what it waits to see.</summary>
-        [Test]
-        public async Task WaitForSave_TreatsAnEmptyHashAsTheRemovalLanding()
-        {
-            SetPassword(Password);
-
-            var waiting = _gate.WaitForSaveAsync(null);
-            _options.CurrentValue = new SecurityOptions { PasswordHash = string.Empty };
-
-            await waiting;
-            Assert.That(_gate.IsPasswordSet, Is.False);
-        }
-
-        /// <summary>
-        /// A reload that never arrives costs the page a stale render, which it recovers from on its
-        /// own refresh; holding the request open until it gives up would be worse.
-        /// </summary>
-        [Test]
-        public void WaitForSave_GivesUpQuietlyWhenTheReloadNeverArrives()
-        {
-            SetPassword(Password);
-
-            Assert.That(
-                async () => await _gate.WaitForSaveAsync(
-                    PasswordHash.Hash("never written"),
-                    TimeSpan.FromMilliseconds(50)),
-                Throws.Nothing);
-        }
-
-        [Test]
-        public void Verify_AnswersForThePasswordInForce()
-        {
-            SetPassword(Password);
+            await SetPasswordAsync(Password);
 
             Assert.Multiple(() =>
             {
@@ -183,7 +154,7 @@ namespace HostPinger.Test
             Assert.That(_gate.Verify(string.Empty), Is.False);
         }
 
-        private void SetPassword(string password) =>
-            _options.CurrentValue = new SecurityOptions { PasswordHash = PasswordHash.Hash(password) };
+        private Task SetPasswordAsync(string password) =>
+            _store.SavePasswordHashAsync(PasswordHash.Hash(password));
     }
 }

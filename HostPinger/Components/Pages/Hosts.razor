@@ -4,9 +4,8 @@
 @using HostPinger.Core.Options
 @using HostPinger.Security
 @using Microsoft.AspNetCore.Components.Authorization
-@using Microsoft.Extensions.Options
 @inject IDbContextFactory<HostPingerDbContext> DbFactory
-@inject IOptionsMonitor<PingerOptions> PingerOptions
+@inject UserSettingsStore Settings
 @inject NavigationManager Navigation
 @inject PasswordGate Gate
 @inject LockPrompt Prompt
@@ -331,7 +330,7 @@
 
     private async Task LoadAsync()
     {
-        var retryAttempts = PingerOptions.CurrentValue.RetryAttempts;
+        var retryAttempts = Settings.CurrentPinger.RetryAttempts;
         _missesToDown = Math.Max(0, retryAttempts) + 1;
         _isUnlocked = await IsUnlockedAsync();
         await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);

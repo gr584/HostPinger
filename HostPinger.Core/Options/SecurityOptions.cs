@@ -1,6 +1,6 @@
 namespace HostPinger.Core.Options
 {
-    /// <summary>Settings bound from the "Security" section of the settings overlay.</summary>
+    /// <summary>Settings bound from the "Security" section of configuration.</summary>
     /// <remarks>
     /// A section of its own rather than a key on <see cref="PingerOptions"/>: nothing here reaches
     /// the pinger, and the Configuration page saves that section as a whole.
