@@ -161,6 +161,18 @@ and saved only when it is.
   errors, which are dropped at 30 days either way.
 - **Capacity estimate** — the current file size, how fast it is growing at the present host count
   and interval, and roughly how much history fits inside the limit at that rate.
+- **Backup** — downloads a snapshot of the whole database: hosts, history, settings and the
+  hashed password, if one is set, all travel with it. The copy is consistent — monitoring pauses
+  for the moment it takes — and compacted, so it weighs what the data weighs rather than what the
+  file on disk does. Unlock to use it.
+- **Restore** — uploads a backup and, after a confirmation, replaces the current database with
+  it. Everything comes from the backup, including its password or the lack of one, so a restore
+  can lock the browser out — `--remove-password` is the recovery, as ever — or unlock the
+  service. The file is checked before anything is replaced: it must be an intact SQLite database
+  with HostPinger's schema, and one from a newer version is refused. A backup from an older
+  version is migrated up, the way an old database is at startup. The database being replaced is
+  kept beside the new one as `hostpinger.db.pre-restore`, one restore's worth of undo. Unlock to
+  use it.
 - **Security** — whether a password is set, and the way to `/password` to set, change or remove
   one.
 
@@ -267,8 +279,9 @@ service, locked or not.
 - One SQLite file holds the hosts, every ping attempt and every failed lookup. Its schema is
   migrated automatically at startup, so an upgrade needs no separate step.
 - The settings edited on the Configuration page, and the hashed password if one is set, live in a
-  small JSON file beside the database rather than inside it. It holds only what has been changed
-  from the defaults, and can be read or repaired with a text editor.
+  small table inside the same file. It holds only what has been changed from the defaults, so a
+  default improved by a later release shows through for everything nobody has touched — and a
+  backup of the one file carries the settings and the password along with the history.
 - Pruning deletes the oldest recorded history in batches until the file is back under the limit,
   and the file is vacuumed incrementally as it goes so the space is actually returned rather than
   left as free pages. Ping attempts and resolver errors are trimmed alike, so whichever of them is

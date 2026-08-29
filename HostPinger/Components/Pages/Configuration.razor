@@ -10,6 +10,9 @@
 @inject UserSettingsStore SettingsStore
 @inject PasswordGate Gate
 @inject LockPrompt Prompt
+@inject DatabaseBackup Backup
+@inject BackupDownloadTokens Tokens
+@inject NavigationManager Navigation
 @implements IDisposable
 
 <PageTitle>HostPinger - Configuration</PageTitle>
@@ -62,6 +65,63 @@
 
                 <dt>Estimated capacity</dt>
                 <dd>@CapacityText</dd>
+
+                <dt>Backup</dt>
+                <dd>
+                    <button type="button" class="btn btn-outline-primary btn-sm" disabled="@(!_isUnlocked)"
+                            @onclick="DownloadBackupAsync">Download backup</button>
+                    <div class="form-text">
+                        A compacted snapshot of the whole database: hosts, history, settings and
+                        the password, if one is set, all travel with it.
+                        @if (_backupStatus is not null)
+                        {
+                            <span class="config-refused">@_backupStatus</span>
+                        }
+                    </div>
+                </dd>
+
+                <dt>Restore</dt>
+                <dd>
+                    @*
+                        The visible control is the label, styled to sit beside Download backup;
+                        clicking a label opens its input's file picker, which is what lets the
+                        input itself stay hidden without a line of script. Hidden but always in
+                        the DOM: the browser keeps the chosen file on the input element itself,
+                        and reading it on confirm goes back to that element — unmounting it is
+                        how an upload loses its file. Cancelling re-keys the input instead, which
+                        recreates it empty and lets the browser drop the choice.
+                    *@
+                    <InputFile id="restore-file" @key="_restoreInputKey" OnChange="OnRestoreFileSelected"
+                               disabled="@(!_isUnlocked)" class="d-none" />
+                    @if (!_isRestorePending)
+                    {
+                        <label for="restore-file" role="button"
+                               class="btn btn-outline-primary btn-sm@(_isUnlocked ? null : " disabled")">Restore backup…</label>
+                    }
+                    else
+                    {
+                        <span class="text-danger">
+                            Restore <code>@_restoreFile?.Name</code>? It replaces everything —
+                            hosts, history and settings, and the backup's password (or lack of
+                            one) will apply, which can lock this browser out or unlock the
+                            application. The current database is kept as
+                            <code>@Path.GetFileName(Backup.PreRestorePath)</code>.
+                        </span>
+                        <div class="d-flex gap-2 mt-2">
+                            <button type="button" class="btn btn-outline-secondary btn-sm" disabled="@_isRestoring"
+                                    @onclick="CancelRestore">Cancel</button>
+                            <button type="button" class="btn btn-danger btn-sm" disabled="@_isRestoring"
+                                    @onclick="ConfirmRestoreAsync">@(_isRestoring ? "Restoring…" : "Confirm restore")</button>
+                        </div>
+                    }
+                    <div class="form-text">
+                        Uploading a backup replaces the current database after a confirmation.
+                        @if (_restoreStatus is not null)
+                        {
+                            <span class="@StatusClass(_isRestoreRefused)">@_restoreStatus</span>
+                        }
+                    </div>
+                </dd>
             </dl>
         </EditForm>
     </div>
@@ -188,6 +248,11 @@
     // which is well past useful.
     private const int RetryAttemptsUpperBound = 1_000;
 
+    // A sanity bound on a restore upload, not the real guard: free disk space is checked before
+    // the upload starts, and a backup larger than this install's size limit is legitimate — it
+    // came from an install with a bigger one, and the pruner trims it after the restore.
+    private const long MaxRestoreUploadBytes = 16L * 1024 * 1024 * 1024;
+
     [CascadingParameter]
     private Task<AuthenticationState>? AuthenticationState { get; set; }
 
@@ -198,6 +263,22 @@
     private DatabaseStats? _stats;
     private string? _databaseStatus;
     private string? _pingerStatus;
+
+    // The backup status only ever reports a refusal — a download that starts is its own feedback.
+    private string? _backupStatus;
+
+    private string? _restoreStatus;
+    private bool _isRestoreRefused;
+
+    // The chosen file, held while the confirmation is on screen. Confirming is a separate click
+    // from choosing, because what follows replaces the database.
+    private IBrowserFile? _restoreFile;
+    private bool _isRestorePending;
+    private bool _isRestoring;
+
+    // Replaced to recreate the restore input. The file lives on the browser's input element, so
+    // the element has to survive until the upload has been read, and be rebuilt to be cleared.
+    private object _restoreInputKey = new();
 
     // Whether the message beside each Save is a refusal rather than a confirmation, which is only
     // the locked case: the buttons are disabled then, so it takes a lock arriving between the last
@@ -372,6 +453,123 @@
         _pingerStatus = "Saved — applied from the next ping round.";
         _isPingerSaveRefused = false;
         await LoadStatsAsync();
+    }
+
+    private async Task DownloadBackupAsync()
+    {
+        if (!await IsUnlockedAsync())
+        {
+            _backupStatus = "HostPinger is locked — unlock it to download a backup.";
+            _isUnlocked = false;
+            return;
+        }
+
+        // The snapshot lands beside the database before the browser starts pulling it, so the
+        // disk has to hold a second copy of the file for the duration of the download.
+        await LoadStatsAsync();
+        if (_stats is { } stats
+            && Backup.AvailableFreeBytes() < stats.SizeBytes + DatabaseBackup.FreeSpaceMarginBytes)
+        {
+            _backupStatus = "Not enough free disk space beside the database to write the snapshot.";
+            return;
+        }
+
+        // A full page navigation rather than anything on the circuit: the response says
+        // attachment, so the browser starts the download and this page stays where it is.
+        _backupStatus = null;
+        Navigation.NavigateTo($"database-backup?token={Tokens.Issue()}", forceLoad: true);
+    }
+
+    private void OnRestoreFileSelected(InputFileChangeEventArgs e)
+    {
+        _restoreFile = e.File;
+        _isRestorePending = true;
+        _restoreStatus = null;
+    }
+
+    private void CancelRestore()
+    {
+        _restoreFile = null;
+        _isRestorePending = false;
+        _restoreInputKey = new object();
+    }
+
+    private async Task ConfirmRestoreAsync()
+    {
+        if (_restoreFile is not { } file)
+        {
+            return;
+        }
+
+        if (!await IsUnlockedAsync())
+        {
+            _restoreStatus = "HostPinger is locked — unlock it to restore a backup.";
+            _isRestoreRefused = true;
+            _isUnlocked = false;
+            CancelRestore();
+            return;
+        }
+
+        if (Backup.AvailableFreeBytes() < file.Size + DatabaseBackup.FreeSpaceMarginBytes)
+        {
+            _restoreStatus = "Not enough free disk space beside the database to receive the file.";
+            _isRestoreRefused = true;
+            CancelRestore();
+            return;
+        }
+
+        _isRestoring = true;
+        try
+        {
+            var tempPath = Backup.CreateRestoreTempPath();
+            try
+            {
+                await using (var target = new FileStream(
+                    tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81_920,
+                    FileOptions.Asynchronous))
+                {
+                    await using var source = file.OpenReadStream(MaxRestoreUploadBytes, _cts.Token);
+                    await source.CopyToAsync(target, _cts.Token);
+                }
+
+                if (await Backup.ValidateBackupAsync(tempPath, _cts.Token) is { } refusal)
+                {
+                    _restoreStatus = refusal;
+                    _isRestoreRefused = true;
+                    return;
+                }
+
+                await Backup.RestoreAsync(tempPath, _cts.Token);
+            }
+            finally
+            {
+                // The swap consumes the temp file; this catches every earlier exit — a failed
+                // upload, a refused validation — where it would otherwise be left behind.
+                File.Delete(tempPath);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or Microsoft.JSInterop.JSException)
+        {
+            // IOException is the file work on this side; JSException is the browser failing to
+            // read what was chosen — a file changed or deleted since it was picked. Either is a
+            // failed restore to report beside the control, not a reason to tear the circuit down.
+            _restoreStatus = $"The restore failed: {ex.Message}";
+            _isRestoreRefused = true;
+            return;
+        }
+        finally
+        {
+            _isRestoring = false;
+            CancelRestore();
+        }
+
+        // The restore is in force the moment it returns: the store already holds the backup's
+        // settings, and the unlock answer below is already being judged against its password.
+        SyncFromConfiguration();
+        await LoadStatsAsync();
+        _isUnlocked = await IsUnlockedAsync();
+        _restoreStatus = "Restored — the backup's hosts, history, settings and password now apply.";
+        _isRestoreRefused = false;
     }
 
     private static string StatusClass(bool isRefused) => isRefused ? "config-refused" : "config-saved";

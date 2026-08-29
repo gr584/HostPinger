@@ -112,6 +112,12 @@ namespace HostPinger
             builder.Services.AddSingleton<IPingSender, PingSender>();
             builder.Services.AddSingleton<DatabasePruner>();
 
+            // Backup and restore. The gate is what the monitor, a snapshot and a restore all take
+            // turns on, so it must be the one instance they share.
+            builder.Services.AddSingleton<MaintenanceGate>();
+            builder.Services.AddSingleton<DatabaseBackup>();
+            builder.Services.AddSingleton<BackupDownloadTokens>();
+
             // Registered ahead of the monitor so its verdict reaches the log before the first round
             // starts recording hosts as down.
             builder.Services.AddHostedService<IcmpAvailabilityCheck>();
@@ -129,6 +135,10 @@ namespace HostPinger
             // After the migrations, which is what guarantees the table it reads exists.
             app.Services.GetRequiredService<UserSettingsStore>().LoadAsync().GetAwaiter().GetResult();
 
+            // A download that died with the process or an upload cut off by a restart leaves its
+            // temp file beside the database; nothing holds them now, so they go.
+            DatabaseBackup.DeleteLeftoverTempFiles(paths);
+
             // Configure the HTTP request pipeline.
             if (!app.Environment.IsDevelopment())
             {
@@ -145,6 +155,39 @@ namespace HostPinger
             // Liveness probe for container orchestration. It deliberately touches nothing: a
             // pruning pass holding the database busy is not a reason to restart the container.
             app.MapGet("/health", () => Results.Ok("Healthy"));
+
+            // The backup download. A plain GET rather than anything on the circuit, because a
+            // gigabyte belongs on the HTTP pipe, not the SignalR one; the single-use token proves
+            // the request came from an unlocked page moments ago, and the cookie check keeps the
+            // endpoint exactly as locked as the button that leads here. NotFound either way, so a
+            // probe cannot tell a bad token from there being anything to find.
+            app.MapGet("/database-backup", async (
+                string token,
+                HttpContext context,
+                BackupDownloadTokens tokens,
+                PasswordGate gate,
+                DatabaseBackup backup) =>
+            {
+                if (!tokens.TryConsume(token) || !gate.IsUnlocked(context.User))
+                {
+                    return Results.NotFound();
+                }
+
+                // DeleteOnClose ties the snapshot's life to the response: however the download
+                // ends — completed, cancelled, the browser gone — closing the stream removes it.
+                var snapshotPath = await backup.CreateSnapshotAsync(context.RequestAborted);
+                var snapshot = new FileStream(
+                    snapshotPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read | FileShare.Delete,
+                    bufferSize: 81_920,
+                    FileOptions.Asynchronous | FileOptions.DeleteOnClose);
+                return Results.File(
+                    snapshot,
+                    "application/octet-stream",
+                    $"hostpinger-backup-{DateTime.Now:yyyyMMdd-HHmmss}.db");
+            });
 
             app.MapStaticAssets();
             app.MapRazorComponents<App>()

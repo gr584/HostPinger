@@ -22,6 +22,7 @@ namespace HostPinger.Core.Services
         private readonly IPingSender _pingSender;
         private readonly UserSettingsStore _settings;
         private readonly DatabasePruner _pruner;
+        private readonly MaintenanceGate _maintenanceGate;
         private readonly ILogger<PingMonitorService> _logger;
         private readonly TimeProvider _timeProvider;
 
@@ -30,6 +31,7 @@ namespace HostPinger.Core.Services
             IPingSender pingSender,
             UserSettingsStore settings,
             DatabasePruner pruner,
+            MaintenanceGate maintenanceGate,
             ILogger<PingMonitorService> logger,
             TimeProvider? timeProvider = null)
         {
@@ -37,6 +39,7 @@ namespace HostPinger.Core.Services
             _pingSender = pingSender;
             _settings = settings;
             _pruner = pruner;
+            _maintenanceGate = maintenanceGate;
             _logger = logger;
             _timeProvider = timeProvider ?? TimeProvider.System;
         }
@@ -93,6 +96,10 @@ namespace HostPinger.Core.Services
         /// </summary>
         public async Task<int> RunRoundAsync(CancellationToken cancellationToken = default)
         {
+            // Taken per round rather than for the loop's lifetime, so a backup or restore holding
+            // the gate waits out at most one round and then has the file to itself.
+            using var maintenanceHold = await _maintenanceGate.AcquireAsync(cancellationToken);
+
             var options = _settings.CurrentPinger;
             await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
             var timestampUtc = _timeProvider.GetUtcNow().UtcDateTime;

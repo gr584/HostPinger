@@ -337,7 +337,32 @@ namespace HostPinger.Test
                     + string.Join(", ", gaps.Select(gap => $"{gap.TotalMilliseconds:F0}ms")));
         }
 
-        private PingMonitorService CreateService(IPingSender sender, PingerOptions? options = null)
+        /// <summary>
+        /// A round must not write while a backup or restore holds the maintenance gate — that is
+        /// the whole contract that lets a restore swap the file under a running monitor.
+        /// </summary>
+        [Test]
+        public async Task RunRound_WaitsWhileMaintenanceHoldsTheGate()
+        {
+            var gate = new MaintenanceGate();
+            var service = CreateService(new FakePingSender(), maintenanceGate: gate);
+
+            var hold = await gate.AcquireAsync();
+            var round = service.RunRoundAsync();
+
+            // Long enough that a round which ignored the gate would have finished several times
+            // over — there are no hosts, so an unblocked round is nearly instant.
+            await Task.Delay(200);
+            Assert.That(round.IsCompleted, Is.False, "the round must wait for the gate");
+
+            hold.Dispose();
+            Assert.That(await round, Is.Zero, "released, the round runs to its usual end");
+        }
+
+        private PingMonitorService CreateService(
+            IPingSender sender,
+            PingerOptions? options = null,
+            MaintenanceGate? maintenanceGate = null)
         {
             // The settings arrive as configured defaults under a store with no rows, which is the
             // state of a fresh install.
@@ -349,6 +374,7 @@ namespace HostPinger.Test
                     new TestOptionsMonitor<PingerOptions>(options ?? new PingerOptions()),
                     new TestOptionsMonitor<SecurityOptions>(new SecurityOptions())),
                 new DatabasePruner(),
+                maintenanceGate ?? new MaintenanceGate(),
                 NullLogger<PingMonitorService>.Instance);
         }
 
