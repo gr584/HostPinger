@@ -380,6 +380,11 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
+      # The checkout exists for exactly one file: the signing public key, served beside the
+      # packages so the gpgkey= line below has something to point at. Shallow is fine — nothing
+      # in this job computes a version.
+      - uses: actions/checkout@v7
+
       - uses: actions/configure-pages@v6
         id: pages
         with:
@@ -427,20 +432,23 @@ jobs:
         run: |
           set -euo pipefail
 
-          # gpgcheck stays off for the moment even though the release job now signs: this index
-          # carries every earlier release too, and those packages are unsigned until re-signed in
-          # place on their releases. Flipping this first would make dnf refuse them — including
-          # the downgrade path that collecting every release exists to preserve. Once the
-          # backfill is done, gpgcheck=1 and a gpgkey= line pointing at the committed
-          # hostpinger.asc land together. Until then what protects the transfer is Pages being
-          # HTTPS.
+          # Every package this index carries is signed: the release job signs new RPMs at the
+          # publishing gate, and the packages on the releases predating it were re-signed in
+          # place on 2026-09-05. The key dnf verifies against is the committed hostpinger.asc,
+          # served beside the packages; its fingerprint is printed on the landing page for the
+          # import prompt. repo_gpgcheck stays off deliberately — signing the metadata would mean
+          # handing this job the private key, and the transfer is already Pages HTTPS; the
+          # packages themselves are what gpgcheck protects end to end.
+          cp HostPinger.LinuxInstaller/hostpinger.asc site/
+
           cat > site/hostpinger.repo <<EOF
           [hostpinger]
           name=HostPinger
           baseurl=$BASE/fedora/x86_64/
           enabled=1
-          gpgcheck=0
+          gpgcheck=1
           repo_gpgcheck=0
+          gpgkey=$BASE/hostpinger.asc
           metadata_expire=1h
           EOF
 
@@ -470,7 +478,14 @@ jobs:
              <code>sudo dnf config-manager --add-repo $BASE/hostpinger.repo</code>.</p>
           <h2>Upgrade</h2>
           <pre>sudo dnf upgrade hostpinger</pre>
-          <p>The packages are unsigned, so the repository sets <code>gpgcheck=0</code>.</p>
+          <h2>Signing</h2>
+          <p>Packages are signed and the repository sets <code>gpgcheck=1</code>, with the key
+             served at <a href="$BASE/hostpinger.asc">hostpinger.asc</a>. When dnf asks to import
+             it, the fingerprint to expect is</p>
+          <pre>D416 D7AA C202 68A1 398D  5DC5 A573 4F40 6392 00AE</pre>
+          <p>A machine that added the repository while it was unsigned still has the old repo
+             file with <code>gpgcheck=0</code>; dnf never refreshes those, so re-run the add
+             step above to pick up verification.</p>
           EOF
 
           cat site/hostpinger.repo
