@@ -290,6 +290,48 @@ jobs:
         with:
           path: artifacts
 
+      # Signing lives here rather than in the rpm job or build-rpm.sh: this job runs only on a
+      # tag, so the key is exposed once per release and never to a push or pull request build —
+      # and the developer script stays runnable on a machine with no key material, producing the
+      # unsigned local build that is correct for anything unpublished. rpmsign rewrites the files
+      # in place, so what the publish step below attaches is the signed set. The public half of
+      # the key is HostPinger.LinuxInstaller/hostpinger.asc.
+      - name: Sign the packages
+        env:
+          PKG_SIGNING_KEY: ${{ secrets.PKG_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y rpm
+
+          gpg --batch --import <<< "$PKG_SIGNING_KEY"
+          keyid=$(gpg --list-secret-keys --with-colons | awk -F: '$1 == "sec" { print $5; exit }')
+
+          # Collected before signing so that an empty match is a failure. A find that feeds
+          # rpmsign directly would sign nothing and succeed, and unsigned packages surface as a
+          # refusal on a user's machine, not anywhere in this workflow.
+          mapfile -t rpms < <(find artifacts -type f -name '*.rpm')
+          if [ "${#rpms[@]}" -eq 0 ]; then
+            echo "::error::no RPMs arrived to be signed"
+            exit 1
+          fi
+
+          # __gpg is spelled out because Ubuntu's rpm points the macro at /usr/bin/gpg2, a path
+          # nothing installed here provides — the gnupg package ships /usr/bin/gpg only.
+          rpmsign --define "_gpg_name $keyid" --define "__gpg /usr/bin/gpg" --addsign "${rpms[@]}"
+
+          # Re-verified against a scratch rpmdb holding only the public key — the same check dnf
+          # makes at install. rpmsign exiting zero is not that check, and this is the last point
+          # where a bad signature is a red run rather than a shipped package.
+          gpg --armor --export "$keyid" > pubkey.asc
+          rpmkeys --dbpath "$PWD/scratch-rpmdb" --import pubkey.asc
+          checked=$(rpmkeys --dbpath "$PWD/scratch-rpmdb" --checksig "${rpms[@]}")
+          echo "$checked"
+          if grep -v ': digests signatures OK$' <<< "$checked"; then
+            echo "::error::a package failed signature verification after signing"
+            exit 1
+          fi
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -385,9 +427,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # gpgcheck is off because build-rpm.sh does not sign. Turning it on here without a key
-          # to verify against would only make dnf refuse every package. What is left protecting
-          # the transfer is Pages being HTTPS.
+          # gpgcheck stays off for the moment even though the release job now signs: this index
+          # carries every earlier release too, and those packages are unsigned until re-signed in
+          # place on their releases. Flipping this first would make dnf refuse them — including
+          # the downgrade path that collecting every release exists to preserve. Once the
+          # backfill is done, gpgcheck=1 and a gpgkey= line pointing at the committed
+          # hostpinger.asc land together. Until then what protects the transfer is Pages being
+          # HTTPS.
           cat > site/hostpinger.repo <<EOF
           [hostpinger]
           name=HostPinger
