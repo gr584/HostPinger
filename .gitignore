@@ -366,3 +366,6 @@ HostPinger/Data/
 
 # Output of HostPinger.LinuxInstaller/build-rpm.sh
 HostPinger.LinuxInstaller/build/
+
+# Output of HostPinger.LinuxInstaller/build-deb.sh
+HostPinger.LinuxInstaller/build-deb/

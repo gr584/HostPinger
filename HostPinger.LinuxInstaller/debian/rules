@@ -1,0 +1,44 @@
+#!/usr/bin/make -f
+
+# The staged tree arrives already published — build-deb.sh runs dotnet publish before it runs
+# dpkg-buildpackage — so rebuilding the package needs no .NET SDK. The same split as the spec,
+# whose %build does nothing for the application either.
+%:
+	dh $@
+
+override_dh_auto_build:
+
+# Explicit rather than debian/install entries: cp -a carries the publish tree over exactly as
+# staged, and the environment file changes name on the way in, which dh_install cannot do. The
+# unit file is not named here — dh_installsystemd installs debian/hostpinger.service itself and
+# generates the enable, start and restart scriptlets from it.
+override_dh_auto_install:
+	install -d debian/hostpinger/usr/lib/hostpinger
+	cp -a publish/. debian/hostpinger/usr/lib/hostpinger/
+	# Normalise modes rather than inheriting whatever the checkout carried: a working tree on a
+	# Windows filesystem presents every file as 0777, which would otherwise put the executable
+	# bit on several hundred stylesheets. dh_fixperms does not undo that later — it preserves an
+	# execute bit that is already set — so this is the only place it is corrected. The launcher
+	# is the one file that needs it; the bundled native libraries are opened with dlopen rather
+	# than executed, and dh_fixperms takes the bit off them again in any case, which is what
+	# Debian expects of a shared library.
+	find debian/hostpinger/usr/lib/hostpinger -type d -exec chmod 0755 {} +
+	find debian/hostpinger/usr/lib/hostpinger -type f -exec chmod 0644 {} +
+	chmod 0755 debian/hostpinger/usr/lib/hostpinger/HostPinger
+	install -D -p -m 0644 hostpinger.default debian/hostpinger/etc/default/hostpinger
+
+# The payload is managed assemblies plus a small native launcher: there is no useful debug
+# information to separate, and dh_strip would only manufacture a dbgsym package out of the
+# bundled SQLite library. The mirror of the spec's "%global debug_package %{nil}", which leaves
+# the RPM unstripped for the same reason.
+#
+# This is what lintian reports as unstripped-binary-or-object, and the tag is expected: it argues
+# for a tidy Debian archive, which is not where this package goes, and stripping a vendored
+# third-party library to satisfy it would only make a future crash harder to read.
+override_dh_strip:
+override_dh_dwz:
+
+# The bundled SQLite library is private to this application. Left to run, dh_makeshlibs would
+# write a shlibs file advertising it to the whole distribution, which is what the spec's
+# __provides_exclude prevents on the RPM side.
+override_dh_makeshlibs:

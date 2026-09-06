@@ -1,0 +1,26 @@
+#!/bin/sh
+set -e
+
+# The account owns nothing but /var/lib/hostpinger, which systemd creates from StateDirectory=
+# on first start. It is created ahead of the block debhelper substitutes in at the end of this
+# script, so that it exists by the time those generated scriptlets enable and start the unit — a
+# unit naming a user that does not exist fails to start, and on a fresh install that is the very
+# next thing that happens.
+#
+# Nothing above that substitution may spell the marker out, comments included: debhelper replaces
+# every occurrence, so a mention in prose becomes a second copy of the scriptlets and leaves the
+# rest of the sentence behind as a command for the shell to run.
+case "$1" in
+    configure)
+        if ! getent group hostpinger >/dev/null; then
+            addgroup --system hostpinger
+        fi
+        if ! getent passwd hostpinger >/dev/null; then
+            adduser --system --ingroup hostpinger --home /var/lib/hostpinger \
+                    --no-create-home --shell /usr/sbin/nologin \
+                    --comment "HostPinger service" hostpinger
+        fi
+        ;;
+esac
+
+#DEBHELPER#

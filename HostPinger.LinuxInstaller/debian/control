@@ -1,0 +1,27 @@
+# The rpm spec is the reference for anything unexplained here: this file is its translation,
+# field for field, into Debian's terms.
+Source: hostpinger
+Section: net
+Priority: optional
+Maintainer: Gleb Romanov <gleb.romanov@outlook.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.0
+Homepage: https://github.com/gr584/HostPinger
+Rules-Requires-Root: no
+
+Package: hostpinger
+# The staged publish is linux-x64, so the package is not portable to other architectures even
+# though most of its content is IL (the spec's ExclusiveArch).
+Architecture: amd64
+# The application is published framework-dependent, so the runtime is patched by its publisher —
+# which on Debian is Microsoft's package repository, since Debian ships no .NET of its own.
+# ASP.NET Core rather than just dotnet-runtime: this is a web application. adduser is named
+# because postinst calls it and it is Priority: important rather than essential.
+Depends: ${misc:Depends}, ${shlibs:Depends}, aspnetcore-runtime-10.0, adduser
+Description: Pings configured hosts on a schedule and serves the HostPinger web UI
+ HostPinger pings a configured list of hosts on a schedule, records every
+ attempt in a local SQLite database, and serves a web UI showing current
+ state, response times and downtime history.
+ .
+ It runs as a systemd service under its own unprivileged account, holding
+ only CAP_NET_RAW so that it can send ICMP echo requests.
