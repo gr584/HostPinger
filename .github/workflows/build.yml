@@ -516,8 +516,21 @@ jobs:
     # hand looked free — but the github-pages environment only accepts a deployment from a tag, so
     # those runs could never do anything except fail on the way out. Gating on release alone is
     # enough: release runs only on a tag, and a push, a pull request or a manual run skips it and
-    # skips this with it. To repair the metadata by hand, re-run this job on the run of the tag
-    # that last released.
+    # skips this with it.
+    #
+    # To repair the metadata by hand, re-run this job on the run of the tag that last released —
+    # after deleting that run's github-pages artifacts. upload-pages-artifact adds another one
+    # rather than replacing what the failed attempt left attached, and deploy-pages refuses to
+    # choose between two of the same name instead of taking the newer:
+    #
+    #   gh api repos/$REPO/actions/runs/$RUN/artifacts \
+    #     --jq '.artifacts[] | select(.name == "github-pages") | .id' |
+    #     xargs -I{} gh api -X DELETE repos/$REPO/actions/artifacts/{}
+    #   gh api -X POST repos/$REPO/actions/runs/$RUN/rerun-failed-jobs
+    #
+    # Only those: the rpm, deb and msi artifacts have nothing to do with the deployment. And the
+    # run rather than this job by id — a job id from an earlier attempt is stale, and the API
+    # answers that it cannot be rerun.
     needs: [release]
     runs-on: ubuntu-latest
     permissions:
