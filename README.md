@@ -18,7 +18,7 @@ and serves a web UI over the history it builds up: what is reachable now, how fa
 answering, and how long it was last unreachable.
 
 It runs as a background service on both Windows and Linux from a single codebase, packaged as an
-MSI and an RPM respectively.
+MSI for Windows and, on Linux, as an RPM for Fedora and a deb for Debian.
 
 ## The web UI
 
@@ -334,9 +334,16 @@ moves with the rest of the system:
 sudo dnf upgrade hostpinger
 ```
 
-The packages are not signed, so the repository sets `gpgcheck=0` and what protects the download is
-Pages being HTTPS. x86_64 only — the spec sets `ExclusiveArch`, since the tarball holds a linux-x64
-publish.
+The packages are signed and the repository sets `gpgcheck=1`, so dnf asks to import the key the
+first time it fetches from it. The fingerprint to expect is
+
+```
+D416 D7AA C202 68A1 398D  5DC5 A573 4F40 6392 00AE
+```
+
+A machine that added the repository before signing was turned on still holds a repo file saying
+`gpgcheck=0`, and dnf never refreshes those — re-run the add step above to pick up verification.
+x86_64 only — the spec sets `ExclusiveArch`, since the tarball holds a linux-x64 publish.
 
 Then carry on from [Install and run](#install-and-run) for the parts the package deliberately
 leaves to you, the firewall among them.
@@ -404,6 +411,110 @@ sudo firewall-cmd --permanent --add-port=8080/tcp && sudo firewall-cmd --reload
 The package requires `aspnetcore-runtime-10.0` from the Fedora repositories, so the runtime is
 patched with the distribution rather than bundled.
 
+## Installing on Debian
+
+Debian 13 (trixie), amd64.
+
+### From the package repository
+
+Debian ships no .NET of its own, so Microsoft's repository comes first — it is where the
+`aspnetcore-runtime-10.0` the package depends on is published:
+
+```bash
+curl -fsSLO https://packages.microsoft.com/config/debian/13/packages-microsoft-prod.deb
+sudo dpkg -i packages-microsoft-prod.deb
+```
+
+Then the HostPinger repository, which is one file: the key travels inside it, so there is no
+keyring to install and nothing is added to apt's global trust store.
+
+```bash
+sudo curl -fsSL -o /etc/apt/sources.list.d/hostpinger.sources \
+  https://gr584.github.io/HostPinger/hostpinger.sources
+sudo apt update
+sudo apt install hostpinger
+```
+
+Installing enables and starts the service, as a Debian package is expected to, so there is no
+`systemctl enable` step to follow. From then on the package moves with the rest of the system:
+
+```bash
+sudo apt upgrade hostpinger
+```
+
+apt does not verify signatures on packages — a deb carries none — it verifies the repository's
+signed `InRelease`, against the key pinned in the sources file above. It is the same key the
+Fedora packages are signed with, so the fingerprint is the same one printed there. Altering a
+published package is caught by the checksum that index carries.
+
+There is no counterpart to `hostpinger-selinux`. Debian confines services with AppArmor, which
+leaves one having no profile unconfined, so nothing extra is needed for the service to run.
+
+Then carry on from [Install and run](#install-and-run-1) for the parts the package deliberately
+leaves to you, the firewall among them.
+
+### Build the package
+
+Needs the .NET SDK, which on Debian means adding Microsoft's repository as above, and the Debian
+build tooling:
+
+```bash
+sudo apt install -y dotnet-sdk-10.0 dpkg-dev debhelper build-essential
+bash HostPinger.LinuxInstaller/build-deb.sh
+```
+
+The version comes from the git history via GitVersion, exactly as the RPM's does, and can be
+supplied directly where that history is not available:
+
+```bash
+VERSION=1.4.0 bash HostPinger.LinuxInstaller/build-deb.sh
+```
+
+One package comes out, in `HostPinger.LinuxInstaller/build-deb/`. It is deliberately unsigned:
+the signature that matters is applied to the repository index when the release is published, not
+to the file.
+
+The unit and the environment file are not maintained twice. `build-deb.sh` derives both from the
+copies the RPM installs — `EnvironmentFile` moves to `/etc/default/hostpinger`, and the firewall
+note stops naming `firewall-cmd` — and fails the build if either edit stops matching, since a
+silently unmodified unit would read a path Debian never installs.
+
+### Install and run
+
+```bash
+sudo apt install ./HostPinger.LinuxInstaller/build-deb/hostpinger_*_amd64.deb
+```
+
+The service is already running by the time that returns, with the UI on port 8080 on every
+interface. Check that it came up cleanly:
+
+```bash
+systemctl status hostpinger
+journalctl -u hostpinger -f
+```
+
+The lines worth looking for are `ICMP is available` and `Now listening on`. If ICMP is *not*
+available the service says so explicitly and explains what to grant — see
+[How ICMP is permitted](#how-icmp-is-permitted).
+
+Debian enables no firewall by default. Where one is running, the port is yours to open:
+
+```bash
+sudo ufw allow 8080/tcp
+```
+
+### Where things live
+
+| Path | Contents |
+| --- | --- |
+| `/usr/lib/hostpinger/` | The application. Replaced wholesale on upgrade. |
+| `/var/lib/hostpinger/` | Database, saved settings, data protection keys. Created by systemd; neither removing nor purging the package deletes it. |
+| `/etc/default/hostpinger` | Port, time zone, runtime diagnostics switch. A conffile, so local edits survive upgrades without being asked about. |
+| `/usr/lib/systemd/system/hostpinger.service` | The unit. |
+
+The package depends on `aspnetcore-runtime-10.0` from Microsoft's repository, so the runtime is
+patched by its publisher rather than bundled here.
+
 ## Installing on Windows
 
 Build the MSI, which publishes the application and packages it in one step:
@@ -454,10 +565,11 @@ edited on the Configuration page, as described above. Everything else is environ
 | `ASPNETCORE_HTTP_PORTS` | Listening port, on every interface. 8080 on Linux, 5000 on Windows. |
 | `TZ` | Time zone for displayed timestamps. They are rendered server-side, so this decides what users see. Linux only — Windows takes the system time zone. |
 | `Pinger__DatabasePath` | Database location. Defaults to `/var/lib/hostpinger/hostpinger.db` on Linux and `%ProgramData%\HostPinger\hostpinger.db` on Windows. |
-| `DOTNET_EnableDiagnostics` | `0` in the shipped Linux sysconfig, which keeps the runtime from opening a debugger transport and a diagnostics socket a service does not need. See below. |
+| `DOTNET_EnableDiagnostics` | `0` in the shipped Linux environment file, which keeps the runtime from opening a debugger transport and a diagnostics socket a service does not need. See below. |
 
-On Linux they live in `/etc/sysconfig/hostpinger` and take effect on `systemctl restart
-hostpinger`. On Windows they live in the service's `Environment` value, which the service control
+On Linux they live in `/etc/sysconfig/hostpinger` on Fedora and `/etc/default/hostpinger` on
+Debian — one file, under the name each distribution expects — and take effect on `systemctl
+restart hostpinger`. On Windows they live in the service's `Environment` value, which the service control
 manager passes to the process, and take effect on `Restart-Service HostPinger`. Setting it replaces
 the whole set, so include the port the installer put there:
 
@@ -466,11 +578,11 @@ Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Services\HostPinger -Name Enviro
   -Value @('ASPNETCORE_HTTP_PORTS=5000', 'Pinger__DatabasePath=D:\HostPinger\hostpinger.db')
 ```
 
-Unlike the sysconfig file, which the RPM leaves alone on upgrade, reinstalling or upgrading the MSI
-writes that value back to the default.
+Unlike that file, which both Linux packages leave alone on upgrade, reinstalling or upgrading the
+MSI writes that value back to the default.
 
-Changing the port on either platform leaves the firewall behind: the RPM never opened one, and the
-rule the MSI adds names port 5000. `Set-NetFirewallRule -DisplayName 'HostPinger web UI' -LocalPort
+Changing the port on either platform leaves the firewall behind: neither Linux package opens one,
+and the rule the MSI adds names port 5000. `Set-NetFirewallRule -DisplayName 'HostPinger web UI' -LocalPort
 <new>` moves it, until the next upgrade puts 5000 back.
 
 ## How ICMP is permitted
@@ -640,6 +752,6 @@ such rather than becoming the current release.
 | `HostPinger.Test/` | NUnit tests over the library and the service logic. |
 | `HostPinger.UITest/` | NUnit tests over the web UI, driving a browser through Playwright. |
 | `HostPinger.WindowsInstaller/` | WiX project producing the MSI. |
-| `HostPinger.LinuxInstaller/` | Spec file, systemd unit, SELinux policy module and build script producing the RPMs. |
+| `HostPinger.LinuxInstaller/` | Systemd unit and environment file, the RPM spec and SELinux policy module, the Debian packaging under `debian/`, and a build script for each package. |
 
-Verified against Fedora 44 and Windows 11.
+Verified against Fedora 44, Debian 13 and Windows 11.
