@@ -277,7 +277,9 @@ service, locked or not.
 ## Storage
 
 - One SQLite file holds the hosts, every ping attempt and every failed lookup. Its schema is
-  migrated automatically at startup, so an upgrade needs no separate step.
+  migrated automatically at startup, so an upgrade needs no separate step. A release that adds an
+  index builds it over the history already recorded, before the service starts answering — on a
+  database near its size limit that is the one kind of upgrade that takes noticeable time.
 - The settings edited on the Configuration page, and the hashed password if one is set, live in a
   small table inside the same file. It holds only what has been changed from the defaults, so a
   default improved by a later release shows through for everything nobody has touched — and a

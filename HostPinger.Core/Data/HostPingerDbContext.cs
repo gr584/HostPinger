@@ -28,7 +28,6 @@ namespace HostPinger.Core.Data
             modelBuilder.Entity<PingAttempt>(attempt =>
             {
                 attempt.HasIndex(a => new { a.HostId, a.TimestampUtc });
-                attempt.HasIndex(a => a.TimestampUtc);
 
                 // Unanswered pings only. Locating a host's last downtime means finding its most
                 // recent unanswered ping, and the index above cannot seek to it: it would have to
@@ -37,6 +36,18 @@ namespace HostPinger.Core.Data
                 // seek stays flat no matter how long the host has been healthy.
                 attempt.HasIndex(a => new { a.HostId, a.TimestampUtc }, "IX_PingAttempts_Unanswered")
                     .HasFilter("\"RoundtripMs\" IS NULL");
+
+                // The other half of that pair, and the same argument the other way round. A host's
+                // status and the start of its last downtime are both the last ping it answered
+                // before a moment, and the composite index cannot seek to that one either: it walks
+                // back over every ping missed since, which is the whole of an outage. That walk is
+                // unbounded for a host that is down and it is paid on every five-second refresh of
+                // the Hosts page — a host unanswered for two million pings cost twelve seconds of
+                // it. Answered pings are the common case rather than the rare one, so this index
+                // costs what the one above saves; the pair is still the cheapest way to have both
+                // ends of an outage be a seek.
+                attempt.HasIndex(a => new { a.HostId, a.TimestampUtc }, "IX_PingAttempts_Answered")
+                    .HasFilter("\"RoundtripMs\" IS NOT NULL");
             });
 
             modelBuilder.Entity<UserSetting>(setting =>

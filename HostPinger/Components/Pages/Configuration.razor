@@ -261,6 +261,18 @@
     private readonly CancellationTokenSource _cts = new();
 
     private DatabaseStats? _stats;
+
+    // The attempt count inside _stats, kept across refreshes. It is the one figure on this page
+    // that costs a scan of the whole attempts table — seconds, on a database near its size limit —
+    // and it only feeds an average over the entire history, which no single ping round moves. So it
+    // is re-taken on its own slow cadence while everything beside it stays live on the 15-second
+    // one. Null until the first load, and after anything that replaces the database wholesale.
+    private long? _attemptCount;
+
+    private int _refreshesSinceAttemptCount;
+
+    // Refreshes between counts, against the 15-second timer below: five minutes.
+    private const int RefreshesPerAttemptCount = 20;
     private string? _databaseStatus;
     private string? _pingerStatus;
 
@@ -326,7 +338,7 @@
             {
                 SyncFromConfiguration();
                 _isUnlocked = await IsUnlockedAsync();
-                await LoadStatsAsync();
+                await LoadStatsAsync(recountAttempts: ++_refreshesSinceAttemptCount >= RefreshesPerAttemptCount);
                 await InvokeAsync(StateHasChanged);
             }
         }
@@ -374,9 +386,26 @@
         _effectiveRetryAttempts = options.RetryAttempts;
     }
 
-    private async Task LoadStatsAsync()
+    /// <summary>
+    /// Reads the figures under the database and pinger sections. Everything here is a pragma or an
+    /// index seek except the attempt count, which is why that one is carried between calls rather
+    /// than re-taken on each — see <see cref="_attemptCount" />.
+    /// </summary>
+    /// <param name="recountAttempts">
+    /// Whether to count the attempts again. The timer passes true every
+    /// <see cref="RefreshesPerAttemptCount" /> refreshes; a caller that has just replaced the
+    /// database passes it too, and otherwise the first load is what takes the count.
+    /// </param>
+    private async Task LoadStatsAsync(bool recountAttempts = false)
     {
         await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);
+
+        if (recountAttempts || _attemptCount is null)
+        {
+            _attemptCount = await DatabaseStats.CountAttemptsAsync(db, _cts.Token);
+            _refreshesSinceAttemptCount = 0;
+        }
+
         _stats = await DatabaseStats.CollectAsync(
             db,
             new PingerOptions
@@ -384,6 +413,7 @@
                 IntervalSeconds = _effectiveIntervalSeconds,
                 MaxDatabaseSizeMb = _effectiveMaxDatabaseSizeMb,
             },
+            _attemptCount,
             _cts.Token);
     }
 
@@ -566,7 +596,10 @@
         // The restore is in force the moment it returns: the store already holds the backup's
         // settings, and the unlock answer below is already being judged against its password.
         SyncFromConfiguration();
-        await LoadStatsAsync();
+
+        // The file underneath is the backup's now, so the carried count is about a database that is
+        // no longer there.
+        await LoadStatsAsync(recountAttempts: true);
         _isUnlocked = await IsUnlockedAsync();
         _restoreStatus = "Restored — the backup's hosts, history, settings and password now apply.";
         _isRestoreRefused = false;

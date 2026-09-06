@@ -17,9 +17,24 @@ namespace HostPinger.Core.Services
         /// table's oldest rows. The hosts and the settings are not history and are never deleted to
         /// make room.
         /// </summary>
+        /// <remarks>
+        /// The attempts are ordered by Id, which is the same order as by TimestampUtc: a round
+        /// stamps one time on every attempt it records (see <c>PingMonitorService</c>) and the ids
+        /// are handed out as those rows go in, so ids ascend with rounds and rounds ascend with the
+        /// clock. Reading them in the key they are already stored in makes the oldest batch the
+        /// first thousand rows of the table, which costs nothing to find, and it is what lets the
+        /// attempts carry no index on TimestampUtc alone — that index was a third of the database
+        /// and this statement was the only thing that ever read it. Insertion order also survives a
+        /// clock that steps backwards, where it still says which rows arrived first and the
+        /// timestamps no longer do.
+        /// <para>
+        /// The resolver errors stay on TimestampUtc. That table indexes it for the retention sweep
+        /// above regardless, so ordering by it here is already free.
+        /// </para>
+        /// </remarks>
         private static readonly string[] DeleteOldestStatements =
         [
-            "DELETE FROM PingAttempts WHERE Id IN (SELECT Id FROM PingAttempts ORDER BY TimestampUtc LIMIT {0})",
+            "DELETE FROM PingAttempts WHERE Id IN (SELECT Id FROM PingAttempts ORDER BY Id LIMIT {0})",
             "DELETE FROM ResolverErrors WHERE Id IN (SELECT Id FROM ResolverErrors ORDER BY TimestampUtc LIMIT {0})",
         ];
 

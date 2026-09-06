@@ -56,19 +56,40 @@ namespace HostPinger.Core.Services
             ? null
             : MaxSizeBytes / GrowthBytesPerDay;
 
+        /// <param name="db">The context to read through.</param>
+        /// <param name="options">The settings the projection is made against.</param>
+        /// <param name="knownAttemptCount">
+        /// An attempt count already taken, or null to take one now. Everything else here is a
+        /// pragma or an index seek; this is the one figure that costs a scan of the whole table,
+        /// because SQLite has no cheap COUNT(*) — seconds, on a database near its size limit. It
+        /// only feeds <see cref="BytesPerAttempt"/>, an average over the whole history that no
+        /// single round moves, so a caller refreshing these figures on a timer should re-take it on
+        /// a far slower one than the rest and pass it in between.
+        /// </param>
+        /// <param name="cancellationToken">Cancels the queries.</param>
         public static async Task<DatabaseStats> CollectAsync(
             HostPingerDbContext db,
             PingerOptions options,
+            long? knownAttemptCount = null,
             CancellationToken cancellationToken = default)
         {
             return new DatabaseStats
             {
                 SizeBytes = await DatabasePruner.GetDatabaseSizeBytesAsync(db, cancellationToken),
                 MaxSizeBytes = options.MaxDatabaseSizeBytes,
-                AttemptCount = await db.PingAttempts.LongCountAsync(cancellationToken),
+                AttemptCount = knownAttemptCount ?? await CountAttemptsAsync(db, cancellationToken),
                 EnabledHostCount = await db.Hosts.CountAsync(h => h.IsEnabled, cancellationToken),
                 IntervalSeconds = options.IntervalSeconds,
             };
         }
+
+        /// <summary>
+        /// The expensive half of <see cref="CollectAsync"/> on its own, so a caller that refreshes
+        /// it on its own cadence has somewhere to ask for it.
+        /// </summary>
+        public static Task<long> CountAttemptsAsync(
+            HostPingerDbContext db,
+            CancellationToken cancellationToken = default) =>
+            db.PingAttempts.LongCountAsync(cancellationToken);
     }
 }
