@@ -141,6 +141,150 @@ jobs:
           path: HostPinger.LinuxInstaller/build/rpmbuild/RPMS/**/*.rpm
           if-no-files-found: error
 
+  deb:
+    name: deb (debian)
+    runs-on: ubuntu-latest
+    # See the rpm job: on a tag push GITHUB_REF names something GitVersion cannot find a branch
+    # for, and it answers with the next patch off the highest tag rather than the tag being built.
+    env:
+      GITHUB_REF: ${{ github.ref_type == 'tag' && 'refs/heads/main' || github.ref }}
+    # Built inside the distribution it targets, as the rpm job is, and against the SDK from the
+    # same repository the installed package resolves its runtime from: Debian ships no .NET at
+    # all, so both come from packages.microsoft.com. That makes this the only job that proves the
+    # dependency users have to satisfy actually exists and is installable.
+    container: debian:13
+    steps:
+      # Before the checkout, for the reason the rpm job gives: without git in the container,
+      # actions/checkout downloads a tarball, which arrives with no .git directory and leaves
+      # GitVersion unable to compute a version. curl and ca-certificates come first because the
+      # repository package below is fetched over HTTPS, and until it is installed there is no
+      # .NET SDK to be found under any name.
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y curl ca-certificates git
+
+          curl -fsSL -o /tmp/packages-microsoft-prod.deb \
+            https://packages.microsoft.com/config/debian/13/packages-microsoft-prod.deb
+          dpkg -i /tmp/packages-microsoft-prod.deb
+          rm -f /tmp/packages-microsoft-prod.deb
+
+          apt-get update
+          apt-get install -y dotnet-sdk-10.0 dpkg-dev debhelper build-essential
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # The checkout is owned by a different uid than the one running the build, which git refuses
+      # to operate on until told the directory is trusted.
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build the deb
+        run: bash HostPinger.LinuxInstaller/build-deb.sh
+
+      # The counterpart to the rpm job's check, guarding the same class of fault: properties that
+      # are invisible in the built artefact and produce a package that installs and then does not
+      # work. The two derived files are the addition — build-deb.sh rewrites the unit and the
+      # environment file out of the RPM's copies, and a sed that stops matching would ship a
+      # service reading a path Debian never installs.
+      - name: Verify package metadata
+        run: |
+          set -euo pipefail
+          deb_file=$(ls HostPinger.LinuxInstaller/build-deb/*.deb | head -1)
+          echo "checking $deb_file"
+
+          rm -rf unpacked control
+          dpkg-deb -x "$deb_file" unpacked
+          dpkg-deb -e "$deb_file" control
+
+          # A tag says what version it is, so nothing downstream should have to derive it.
+          if [ "${GITHUB_REF_TYPE:-}" = tag ]; then
+            expected=${GITHUB_REF_NAME#v}
+            actual=$(dpkg-deb -f "$deb_file" Version)
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::building $GITHUB_REF_NAME produced version $actual, expected $expected"
+              exit 1
+            fi
+          fi
+
+          if ! dpkg-deb -f "$deb_file" Depends | grep -q 'aspnetcore-runtime-10\.0'; then
+            echo "::error::the package no longer depends on aspnetcore-runtime-10.0"
+            exit 1
+          fi
+
+          # Only a self-contained publish brings the runtime's own assemblies along, and it would
+          # satisfy every other check here while quietly shipping a runtime nobody patches.
+          if [ -f unpacked/usr/lib/hostpinger/System.Private.CoreLib.dll ]; then
+            echo "::error::the publish is self-contained; it carries its own copy of the runtime"
+            exit 1
+          fi
+
+          unit=$(find unpacked -name hostpinger.service)
+          if [ -z "$unit" ]; then
+            echo "::error::the package ships no systemd unit"
+            exit 1
+          fi
+          echo "unit: $unit"
+          if ! grep -qx 'EnvironmentFile=-/etc/default/hostpinger' "$unit"; then
+            echo "::error::the packaged unit does not read /etc/default/hostpinger"
+            exit 1
+          fi
+
+          # Registered as a conffile or an upgrade silently overwrites a machine's edited port.
+          if ! grep -qx '/etc/default/hostpinger' control/conffiles; then
+            echo "::error::/etc/default/hostpinger is not a conffile; upgrades would overwrite it"
+            exit 1
+          fi
+
+          if [ ! -x unpacked/usr/lib/hostpinger/HostPinger ]; then
+            echo "::error::the launcher is missing or not executable"
+            exit 1
+          fi
+
+          # dh_installsystemd writes these, and it does so from debian/hostpinger.service being
+          # in the right place. If that ever stops being true the package still installs — it
+          # just never enables or starts anything, on a distribution where it is expected to.
+          if ! grep -q 'deb-systemd-helper' control/postinst; then
+            echo "::error::postinst carries no systemd enablement"
+            exit 1
+          fi
+
+          dpkg-deb -I "$deb_file"
+
+      # Every check above reads the package; this one runs it, and it is the only thing here that
+      # executes the maintainer scripts. Those are half generated and half hand-written, and the
+      # ways they break are invisible to inspection — a debhelper marker mentioned in a comment
+      # was substituted twice and left the prose around it to be run as a command, which every
+      # metadata check passed straight over. Resolving the dependency is the other half: the
+      # runtime this package names is Microsoft's, not Debian's, and nothing else here proves a
+      # machine could actually satisfy it.
+      #
+      # It stops short of starting the service — the container has no systemd, which the generated
+      # scriptlet checks for and skips. The unit is confirmed to have been enabled instead, which
+      # deb-systemd-helper does by writing the symlink whether systemd is running or not.
+      - name: Install the package
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get install -y ./"$(ls HostPinger.LinuxInstaller/build-deb/*.deb | head -1)"
+
+          getent passwd hostpinger
+          test -x /usr/lib/hostpinger/HostPinger
+          if [ ! -L /etc/systemd/system/multi-user.target.wants/hostpinger.service ]; then
+            echo "::error::installing the package did not enable the service"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: deb
+          path: HostPinger.LinuxInstaller/build-deb/*.deb
+          if-no-files-found: error
+
   msi:
     name: msi (windows)
     runs-on: windows-latest
@@ -273,12 +417,12 @@ jobs:
 
   release:
     name: release
-    # The gate sits here rather than between the build jobs. Those three catch disjoint failures —
+    # The gate sits here rather than between the build jobs. Those four catch disjoint failures —
     # and since the test project references only HostPinger.Core, the packaging jobs are the sole
     # compile check for the web project — so making them wait on one another would delay signal
     # without changing whether the run is red. What actually warrants a gate is publishing, and
-    # this job cannot start unless all three passed.
-    needs: [test, rpm, msi]
+    # this job cannot start unless all four passed.
+    needs: [test, rpm, deb, msi]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -296,7 +440,11 @@ jobs:
       # unsigned local build that is correct for anything unpublished. rpmsign rewrites the files
       # in place, so what the publish step below attaches is the signed set. The public half of
       # the key is HostPinger.LinuxInstaller/hostpinger.asc.
-      - name: Sign the packages
+      #
+      # RPMs only, and the deb is not an oversight: apt does not verify a signature on a package
+      # it is handed, it verifies the repository's signed InRelease. The deb's signature is
+      # therefore applied where that index is built, in the repo job, over the same key.
+      - name: Sign the RPMs
         env:
           PKG_SIGNING_KEY: ${{ secrets.PKG_SIGNING_KEY }}
         run: |
@@ -346,8 +494,8 @@ jobs:
           esac
 
           # Found rather than globbed: upload-artifact decides how deeply it nests each artifact
-          # based on the common prefix of what matched, which differs between the two jobs.
-          mapfile -t files < <(find artifacts -type f \( -name '*.rpm' -o -name '*.msi' \))
+          # based on the common prefix of what matched, which differs between the jobs.
+          mapfile -t files < <(find artifacts -type f \( -name '*.rpm' -o -name '*.deb' -o -name '*.msi' \))
           printf 'attaching: %s\n' "${files[@]}"
 
           gh release create "$GITHUB_REF_NAME" \
@@ -359,9 +507,9 @@ jobs:
 
   repo:
     name: repo (pages)
-    # A release attached to a tag is a file to be found and downloaded; dnf needs an index it can
-    # poll. This publishes one to Pages so an installed machine can upgrade with dnf rather than
-    # by being handed a URL each time.
+    # A release attached to a tag is a file to be found and downloaded; dnf and apt need an index
+    # they can poll. This publishes one of each to Pages so an installed machine can upgrade with
+    # its own package manager rather than by being handed a URL each time.
     #
     # Publishing follows a release and nothing else. The content comes from the releases that
     # exist rather than from the run that produced one, so republishing on a push to main or by
@@ -381,8 +529,9 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       # The checkout exists for exactly one file: the signing public key, served beside the
-      # packages so the gpgkey= line below has something to point at. Shallow is fine — nothing
-      # in this job computes a version.
+      # packages so the gpgkey= line below has something to point at, embedded in the apt sources
+      # file, and used to verify this job's own signature. Shallow is fine — nothing in this job
+      # computes a version.
       - uses: actions/checkout@v7
 
       - uses: actions/configure-pages@v6
@@ -394,51 +543,129 @@ jobs:
           # runs. The job fails on this step until that is done.
           enablement: true
 
-      - name: Install createrepo_c
+      - name: Install the indexing tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y createrepo-c
+          # apt-utils is what carries apt-ftparchive, which builds the Debian index.
+          sudo apt-get install -y createrepo-c apt-utils
 
-      - name: Collect every published RPM
+      - name: Collect every published package
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p site/fedora/x86_64
+          # pool/main/h/hostpinger is where apt looks for the files the index points at; the
+          # single-letter level is the conventional fan-out and dpkg tooling assumes it.
+          mkdir -p site/fedora/x86_64 site/debian/pool/main/h/hostpinger
 
           # Every release, not only the one this run produced. A Pages deployment replaces the
           # whole site, so anything not gathered here disappears from the index — and a package
           # that vanishes takes the downgrade path and any pinned install with it.
           #
-          # Releases carrying no RPM are expected rather than exceptional: the tags predating the
-          # packaging workflow have none, so a missing pattern is not a failure.
+          # Releases carrying neither kind of package are expected rather than exceptional: the
+          # tags predating each packaging workflow have none, so a missing pattern is not a
+          # failure. Every tag through v1.11.0 carries RPMs and no deb.
           for tag in $(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName -q '.[].tagName'); do
             gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir site/fedora/x86_64 \
               --pattern '*.rpm' --skip-existing || echo "no rpm attached to $tag"
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+              --dir site/debian/pool/main/h/hostpinger \
+              --pattern '*.deb' --skip-existing || echo "no deb attached to $tag"
           done
 
           if ! ls site/fedora/x86_64/*.rpm >/dev/null 2>&1; then
             echo "::error::no RPMs found across any release; refusing to publish an empty repository"
             exit 1
           fi
-          ls -l site/fedora/x86_64
+          ls -l site/fedora/x86_64 site/debian/pool/main/h/hostpinger
 
-      - name: Build the repository metadata
+      - name: Build the dnf repository metadata
         run: createrepo_c site/fedora/x86_64
 
-      - name: Write the repo file and a landing page
+      # Separate from the dnf index because the two are not symmetrical: apt verifies the index
+      # rather than the packages, so this half is only trustworthy once the step below signs it.
+      # Skipped rather than fatal when no deb was found — the tags before v1.12.0 have none, and
+      # re-running this job on one of them to repair Pages has to stay possible.
+      - name: Build the apt repository metadata
+        run: |
+          set -euo pipefail
+          if ! ls site/debian/pool/main/h/hostpinger/*.deb >/dev/null 2>&1; then
+            echo "::notice::no debs found across any release; skipping the apt repository"
+            exit 0
+          fi
+
+          mkdir -p site/debian/dists/trixie/main/binary-amd64
+
+          # Run from site/debian so that the Filename: fields come out relative to the repository
+          # root, which is what apt resolves them against.
+          cd site/debian
+          apt-ftparchive packages pool > dists/trixie/main/binary-amd64/Packages
+          gzip -9nk dists/trixie/main/binary-amd64/Packages
+
+          # Release lists the checksums of the files above, so it is generated after them and
+          # never includes itself.
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin=HostPinger \
+            -o APT::FTPArchive::Release::Label=HostPinger \
+            -o APT::FTPArchive::Release::Suite=trixie \
+            -o APT::FTPArchive::Release::Codename=trixie \
+            -o APT::FTPArchive::Release::Architectures=amd64 \
+            -o APT::FTPArchive::Release::Components=main \
+            -o APT::FTPArchive::Release::Description="HostPinger for Debian 13" \
+            release dists/trixie > dists/trixie/Release
+
+          cat dists/trixie/Release
+
+      # The apt counterpart to the release job's rpmsign. It has to happen here because the thing
+      # apt checks is this index: a deb carries no signature of its own, so an unsigned InRelease
+      # is an unverifiable repository however the packages inside it were built.
+      - name: Sign the apt repository index
+        env:
+          PKG_SIGNING_KEY: ${{ secrets.PKG_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ ! -f site/debian/dists/trixie/Release ]; then
+            echo "::notice::no apt repository was built; nothing to sign"
+            exit 0
+          fi
+
+          gpg --batch --import <<< "$PKG_SIGNING_KEY"
+          keyid=$(gpg --list-secret-keys --with-colons | awk -F: '$1 == "sec" { print $5; exit }')
+
+          # Both spellings: InRelease is the signed-in-place file every current apt prefers, and
+          # Release.gpg beside it is the detached form older clients still ask for first.
+          gpg --batch --yes --local-user "$keyid" \
+            --clearsign -o site/debian/dists/trixie/InRelease site/debian/dists/trixie/Release
+          gpg --batch --yes --local-user "$keyid" \
+            --detach-sign --armor -o site/debian/dists/trixie/Release.gpg site/debian/dists/trixie/Release
+
+          # Verified against the committed public key rather than the one just imported, which
+          # would only prove gpg agrees with itself. This is the check that the secret still
+          # matches the key users are told to trust — the two halves are stored in different
+          # places and nothing else would notice them drifting apart.
+          gpg --dearmor < HostPinger.LinuxInstaller/hostpinger.asc > verify.gpg
+          gpgv --keyring "$PWD/verify.gpg" site/debian/dists/trixie/InRelease
+          gpgv --keyring "$PWD/verify.gpg" site/debian/dists/trixie/Release.gpg \
+                                           site/debian/dists/trixie/Release
+
+      - name: Write the repo files and a landing page
         env:
           BASE: ${{ steps.pages.outputs.base_url }}
         run: |
           set -euo pipefail
 
-          # Every package this index carries is signed: the release job signs new RPMs at the
-          # publishing gate, and the packages on the releases predating it were re-signed in
-          # place on 2026-09-05. The key dnf verifies against is the committed hostpinger.asc,
-          # served beside the packages; its fingerprint is printed on the landing page for the
-          # import prompt. repo_gpgcheck stays off deliberately — signing the metadata would mean
-          # handing this job the private key, and the transfer is already Pages HTTPS; the
-          # packages themselves are what gpgcheck protects end to end.
+          # Everything published here is signed with the key whose public half is the committed
+          # hostpinger.asc, served beside the packages and embedded in the apt sources file. What
+          # each package manager checks with it differs. dnf verifies the packages: the release
+          # job signs new RPMs at the publishing gate, and the ones on releases predating it were
+          # re-signed in place on 2026-09-05. apt has no such thing to verify — a deb carries no
+          # signature — so it verifies the index this job signs above.
+          #
+          # repo_gpgcheck stays off for dnf even though the private key is now demonstrably
+          # reachable from this job. It buys nothing here: gpgcheck=1 already covers every
+          # package end to end, which is what the metadata would otherwise be vouching for, and
+          # the transfer itself is Pages HTTPS. On the apt side the same signature is not
+          # optional, because there it is the only verification that exists.
           cp HostPinger.LinuxInstaller/hostpinger.asc site/
 
           cat > site/hostpinger.repo <<EOF
@@ -451,6 +678,43 @@ jobs:
           gpgkey=$BASE/hostpinger.asc
           metadata_expire=1h
           EOF
+
+          # Written only when there is an apt repository to point at, and the landing page's
+          # Debian half is held back with it: a sources file advertising an index that is not
+          # there would be worse than saying nothing.
+          apt_section=""
+          if [ -f site/debian/dists/trixie/InRelease ]; then
+            # deb822 rather than a one-line sources.list entry, because it can carry the key
+            # inline: the file below is the whole setup, with no separate keyring to install and
+            # nothing left in apt's global trust store afterwards. Continuation lines are indented
+            # one space and the armor's blank line becomes " .", which is how the format spells an
+            # empty line inside a field.
+            {
+              echo "Types: deb"
+              echo "URIs: $BASE/debian"
+              echo "Suites: trixie"
+              echo "Components: main"
+              echo "Architectures: amd64"
+              echo "Signed-By:"
+              sed -e 's/^/ /' -e 's/^ $/ ./' HostPinger.LinuxInstaller/hostpinger.asc
+            } > site/hostpinger.sources
+
+            apt_section=$(cat <<EOF
+          <h2>Debian 13</h2>
+          <p>Debian ships no .NET of its own, so Microsoft's repository is added first: it is
+             where the <code>aspnetcore-runtime-10.0</code> this package depends on comes from.</p>
+          <pre>curl -fsSLO https://packages.microsoft.com/config/debian/13/packages-microsoft-prod.deb
+          sudo dpkg -i packages-microsoft-prod.deb
+
+          sudo curl -fsSL -o /etc/apt/sources.list.d/hostpinger.sources $BASE/hostpinger.sources
+          sudo apt update
+          sudo apt install hostpinger</pre>
+          <p>Installing enables and starts the service, as a Debian package is expected to, so
+             there is no <code>systemctl enable</code> step to follow. Upgrade with
+             <code>sudo apt upgrade hostpinger</code>.</p>
+          EOF
+            )
+          fi
 
           cat > site/index.html <<EOF
           <!doctype html>
@@ -468,27 +732,37 @@ jobs:
             }
           </style>
           <h1>HostPinger package repository</h1>
-          <p>A dnf repository for <a href="https://github.com/$GITHUB_REPOSITORY">HostPinger</a>,
-             x86_64, framework-dependent against the distribution's aspnetcore-runtime-10.0.</p>
-          <h2>Add it</h2>
+          <p>Package repositories for <a href="https://github.com/$GITHUB_REPOSITORY">HostPinger</a>,
+             64-bit x86, framework-dependent against ASP.NET Core 10 — the runtime comes from the
+             distribution's own packaging and is patched with it.</p>
+          <h2>Fedora</h2>
           <pre>sudo dnf config-manager addrepo --from-repofile=$BASE/hostpinger.repo
           sudo dnf install hostpinger
           sudo systemctl enable --now hostpinger</pre>
           <p>On dnf4 the first line is
-             <code>sudo dnf config-manager --add-repo $BASE/hostpinger.repo</code>.</p>
-          <h2>Upgrade</h2>
-          <pre>sudo dnf upgrade hostpinger</pre>
+             <code>sudo dnf config-manager --add-repo $BASE/hostpinger.repo</code>. Upgrade with
+             <code>sudo dnf upgrade hostpinger</code>.</p>
+          $apt_section
           <h2>Signing</h2>
-          <p>Packages are signed and the repository sets <code>gpgcheck=1</code>, with the key
-             served at <a href="$BASE/hostpinger.asc">hostpinger.asc</a>. When dnf asks to import
-             it, the fingerprint to expect is</p>
+          <p>Everything published here is signed with one key, whose fingerprint is</p>
           <pre>D416 D7AA C202 68A1 398D  5DC5 A573 4F40 6392 00AE</pre>
-          <p>A machine that added the repository while it was unsigned still has the old repo
-             file with <code>gpgcheck=0</code>; dnf never refreshes those, so re-run the add
+          <p>The two package managers verify different things with it. dnf verifies the packages
+             themselves: the repository sets <code>gpgcheck=1</code> and the key is served at
+             <a href="$BASE/hostpinger.asc">hostpinger.asc</a>, which is what dnf shows the
+             fingerprint of when it asks to import it. A deb carries no signature of its own, so
+             apt verifies the repository index instead — signed as <code>InRelease</code>, against
+             the copy of the key carried inside the sources file, which is why nothing needs
+             importing there.</p>
+          <p>A machine that added the Fedora repository while it was unsigned still has the old
+             repo file with <code>gpgcheck=0</code>; dnf never refreshes those, so re-run the add
              step above to pick up verification.</p>
           EOF
 
           cat site/hostpinger.repo
+          if [ -f site/hostpinger.sources ]; then
+            # Without the key block, which is most of the file and none of the interesting part.
+            sed -n '/^Signed-By:/q;p' site/hostpinger.sources
+          fi
 
       - uses: actions/upload-pages-artifact@v5
         with:
