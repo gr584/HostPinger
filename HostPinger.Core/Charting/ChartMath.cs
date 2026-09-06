@@ -203,15 +203,63 @@ namespace HostPinger.Core.Charting
         }
 
         /// <summary>
+        /// The bucket <paramref name="instantUtc"/> falls in, as its index on the grid
+        /// <see cref="Downsample"/> buckets onto: how many whole bucket widths it stands from the
+        /// start of the calendar. <see cref="BucketStart"/> describes that grid and why it is fixed
+        /// in absolute time rather than measured off the range.
+        /// </summary>
+        public static long BucketIndex(DateTime instantUtc, TimeSpan bucketDuration)
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(bucketDuration.Ticks, 1);
+            return instantUtc.Ticks / bucketDuration.Ticks;
+        }
+
+        /// <summary>
         /// The start of the bucket <paramref name="instantUtc"/> falls in, on the same grid
         /// <see cref="Downsample"/> buckets onto. Feeding a bucketed series from here rather than
         /// from the range start is what makes its oldest bucket an average over the whole of itself
         /// rather than over the part of it the range has not yet slid past.
         /// </summary>
-        public static DateTime BucketStart(DateTime instantUtc, TimeSpan bucketDuration)
+        public static DateTime BucketStart(DateTime instantUtc, TimeSpan bucketDuration) =>
+            new(BucketIndex(instantUtc, bucketDuration) * bucketDuration.Ticks, DateTimeKind.Utc);
+
+        /// <summary>
+        /// What one bucket reports, given the pings that landed in it: the average round trip over
+        /// the ones that were answered, or null when none were, because a bucket holding only
+        /// failures is a bucket the host was down for.
+        /// </summary>
+        /// <remarks>
+        /// This and <see cref="BucketIndex"/> are the two rules a reduced series is made of — where
+        /// a bucket reports and what it reports — and they are here, rather than inside
+        /// <see cref="Downsample"/>, because there are two things that reduce a series and they
+        /// have to agree. <see cref="Downsample"/> folds samples it is already holding;
+        /// <c>ChartSeries</c> has the database total them up instead, which is what makes opening
+        /// a chart over a year of history affordable. Where the totals come from is all that
+        /// differs between them.
+        /// </remarks>
+        /// <param name="bucketIndex">Which bucket, from <see cref="BucketIndex"/>.</param>
+        /// <param name="bucketDuration">Its width, from <see cref="BucketDuration"/>.</param>
+        /// <param name="rangeEndUtc">
+        /// The newest instant on the chart. The bucket the range ends in is the one still filling
+        /// and its midpoint may be an instant that has not arrived, so that one reports at the
+        /// range end: on a live chart what is coming in now belongs at the leading edge rather than
+        /// off the end of it.
+        /// </param>
+        /// <param name="answeredSum">Total round trip over the answered pings in the bucket.</param>
+        /// <param name="answeredCount">How many of them there were.</param>
+        public static ChartSample BucketSample(
+            long bucketIndex,
+            TimeSpan bucketDuration,
+            DateTime rangeEndUtc,
+            long answeredSum,
+            long answeredCount)
         {
             ArgumentOutOfRangeException.ThrowIfLessThan(bucketDuration.Ticks, 1);
-            return new DateTime(instantUtc.Ticks / bucketDuration.Ticks * bucketDuration.Ticks, DateTimeKind.Utc);
+            var bucketTicks = bucketDuration.Ticks;
+            var midpoint = Math.Min(bucketIndex * bucketTicks + bucketTicks / 2, rangeEndUtc.Ticks);
+            return new ChartSample(
+                new DateTime(midpoint, DateTimeKind.Utc),
+                answeredCount > 0 ? (int)(answeredSum / answeredCount) : null);
         }
 
         /// <summary>
@@ -252,6 +300,19 @@ namespace HostPinger.Core.Charting
         /// timestamps for the hover readout. Their spacing is then the ping cadence rather than the
         /// bucket width, so a caller splitting on a gap has to allow for both scales.
         /// </para>
+        /// <para>
+        /// Which half of this the application reaches is worth knowing. The chart reads through
+        /// <c>ChartSeries</c>, which has the database total each bucket up rather than fetching the
+        /// attempts to fold them here: measured against a development database, eight times quicker
+        /// over a week of history and eight again over a year, and never more than about ten
+        /// milliseconds behind on the ranges small enough for folding to win — so there is no size
+        /// at which folding is worth choosing, and no threshold between them worth writing. What
+        /// still runs here is the pass-through just above. The fold below it is the reference the
+        /// database path is held to, by <c>ChartSeriesTests</c> reducing the same attempts both
+        /// ways and comparing, and it is kept for that although nothing in the application reaches
+        /// it. The rules the two share are <see cref="BucketIndex"/> and
+        /// <see cref="BucketSample"/>, so what is written twice is only the counting.
+        /// </para>
         /// </remarks>
         public static IReadOnlyList<ChartSample> Downsample(
             IReadOnlyList<ChartSample> samples,
@@ -270,8 +331,8 @@ namespace HostPinger.Core.Charting
                 return samples;
             }
 
-            var bucketTicks = BucketDuration(rangeStartUtc, rangeEndUtc, bucketCount).Ticks;
-            var firstBucket = rangeStartUtc.Ticks / bucketTicks;
+            var bucketDuration = BucketDuration(rangeStartUtc, rangeEndUtc, bucketCount);
+            var firstBucket = BucketIndex(rangeStartUtc, bucketDuration);
             var result = new List<ChartSample>(bucketCount + 1);
 
             // Time-ordered input means bucket indices only ever climb, so one running bucket is
@@ -289,12 +350,7 @@ namespace HostPinger.Core.Charting
                     return;
                 }
 
-                // The bucket the range ends in is the one still filling, and its midpoint may be an
-                // instant that has not arrived; it reports at the range end rather than in the future.
-                var midpoint = Math.Min(openBucket * bucketTicks + bucketTicks / 2, rangeEndUtc.Ticks);
-                result.Add(new ChartSample(
-                    new DateTime(midpoint, DateTimeKind.Utc),
-                    valueCount > 0 ? (int)(valueSum / valueCount) : null));
+                result.Add(BucketSample(openBucket, bucketDuration, rangeEndUtc, valueSum, valueCount));
             }
 
             foreach (var sample in samples)
@@ -304,7 +360,7 @@ namespace HostPinger.Core.Charting
                     continue;
                 }
 
-                var bucket = sample.TimestampUtc.Ticks / bucketTicks;
+                var bucket = BucketIndex(sample.TimestampUtc, bucketDuration);
                 if (bucket < firstBucket)
                 {
                     continue;
