@@ -7,18 +7,25 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Read-only by default, so a job with no business writing to the repository cannot. The two
+# that publish raise it themselves, and a job-level block replaces this rather than merging
+# with it, so each of those still holds exactly what it declares. This guards the signing key
+# at one remove: a build job carrying a writable token could rewrite the workflow holding it.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test (ubuntu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # GitVersion derives the version from the commit history and fails outright on the
           # shallow clone actions/checkout makes by default. Every job here needs this.
           fetch-depth: 0
 
-      - uses: actions/setup-dotnet@v6
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
           dotnet-version: '10.0.x'
 
@@ -67,7 +74,7 @@ jobs:
           dnf install -y git tar findutils bzip2 dotnet-sdk-10.0 rpm-build systemd-rpm-macros \
                          selinux-policy-devel systemd
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -135,7 +142,7 @@ jobs:
       # Every architecture directory, not just x86_64: the policy module is noarch and builds into
       # its own, and an artifact that misses it is a release that ships the application without
       # the thing that lets it run.
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: rpm
           path: HostPinger.LinuxInstaller/build/rpmbuild/RPMS/**/*.rpm
@@ -174,7 +181,7 @@ jobs:
           apt-get update
           apt-get install -y dotnet-sdk-10.0 dpkg-dev debhelper build-essential
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -279,7 +286,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: deb
           path: HostPinger.LinuxInstaller/build-deb/*.deb
@@ -294,11 +301,11 @@ jobs:
     env:
       GITHUB_REF: ${{ github.ref_type == 'tag' && 'refs/heads/main' || github.ref }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-dotnet@v6
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
         with:
           dotnet-version: '10.0.x'
 
@@ -409,7 +416,7 @@ jobs:
             exit 1
           }
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: msi
           path: HostPinger.WindowsInstaller/bin/**/*.msi
@@ -430,7 +437,7 @@ jobs:
       contents: write
     steps:
       # No name filter: this collects every artifact the run produced into one directory per job.
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
 
@@ -452,7 +459,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y rpm
 
-          gpg --batch --import <<< "$PKG_SIGNING_KEY"
+          # Piped rather than fed by a here-string, which bash materialises as a temp file on
+          # disk before gpg ever opens it. The runner is ephemeral, so this is tidiness rather
+          # than defence, but it costs nothing.
+          printf '%s\n' "$PKG_SIGNING_KEY" | gpg --batch --import
           keyid=$(gpg --list-secret-keys --with-colons | awk -F: '$1 == "sec" { print $5; exit }')
 
           # Collected before signing so that an empty match is a failure. A find that feeds
@@ -545,9 +555,9 @@ jobs:
       # packages so the gpgkey= line below has something to point at, embedded in the apt sources
       # file, and used to verify this job's own signature. Shallow is fine — nothing in this job
       # computes a version.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/configure-pages@v6
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
         id: pages
         with:
           # Kept for the case where Pages is turned off again later, not because it can bootstrap
@@ -642,7 +652,10 @@ jobs:
             exit 0
           fi
 
-          gpg --batch --import <<< "$PKG_SIGNING_KEY"
+          # Piped rather than fed by a here-string, which bash materialises as a temp file on
+          # disk before gpg ever opens it. The runner is ephemeral, so this is tidiness rather
+          # than defence, but it costs nothing.
+          printf '%s\n' "$PKG_SIGNING_KEY" | gpg --batch --import
           keyid=$(gpg --list-secret-keys --with-colons | awk -F: '$1 == "sec" { print $5; exit }')
 
           # Both spellings: InRelease is the signed-in-place file every current apt prefers, and
@@ -777,9 +790,9 @@ jobs:
             sed -n '/^Signed-By:/q;p' site/hostpinger.sources
           fi
 
-      - uses: actions/upload-pages-artifact@v5
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: site
 
-      - uses: actions/deploy-pages@v5
+      - uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
         id: deploy

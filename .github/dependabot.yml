@@ -1,14 +1,17 @@
 version: 2
 
 updates:
-  # The action versions pinned in build.yml. Nothing else in the repository updates them, and a
-  # major bump tends to surface only when a runner image finally stops accepting the old one.
+  # The actions pinned in build.yml, which name a commit rather than a tag. A SHA never moves,
+  # so nothing else here would ever update them -- not a patch, not a security fix, not a major,
+  # where a floating tag at least drifted onto fixes on its own. Dependabot rewrites the SHA and
+  # the version comment beside it, which is why those are written as a bare "# v7": it updates a
+  # version only where it ends the comment, taking anything after it for prose rather than a tag.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     groups:
-      # Four actions moving in step; one PR rather than four.
+      # Seven actions moving in step; one PR rather than seven.
       actions:
         patterns: ['*']
 
