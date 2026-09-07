@@ -369,3 +369,16 @@ HostPinger.LinuxInstaller/build/
 
 # Output of HostPinger.LinuxInstaller/build-deb.sh
 HostPinger.LinuxInstaller/build-deb/
+
+# Private key material, which must never be committed. The package signing public key is the
+# one thing here that is deliberately tracked and served to users, so *.asc is ignored and that
+# single file allowed back: any other .asc fails closed rather than relying on a reviewer to
+# notice. An exported secret key, keyring or revocation certificate is then un-committable by
+# accident, which matters because the private half's natural resting place is beside the public.
+*.asc
+!HostPinger.LinuxInstaller/hostpinger.asc
+*.gpg
+*.key
+*.pem
+*.rev
+secring.*
