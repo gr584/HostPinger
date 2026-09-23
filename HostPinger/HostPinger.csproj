@@ -20,7 +20,7 @@
 
   <ItemGroup>
     <!-- Renders the README section above onto the About page. -->
-    <PackageReference Include="Markdig" Version="1.3.2" />
+    <PackageReference Include="Markdig" Version="1.4.0" />
   </ItemGroup>
 
   <ItemGroup>
