@@ -15,10 +15,10 @@ updates:
       actions:
         patterns: ['*']
 
-  # NuGet has no single entry point here to discover. Directory.Build.props carries GitVersion
-  # for every project and each project carries its own references, so the directories are listed
-  # explicitly: HostPinger.slnx is not a solution format Dependabot reads, which is why leaving
-  # it to find the projects from the root would turn up almost nothing.
+  # Every version lives in Directory.Packages.props, but Dependabot only bumps a package there
+  # when it finds a project referencing it, so the project directories are listed explicitly:
+  # HostPinger.slnx is not a solution format Dependabot reads, which is why leaving it to find
+  # the projects from the root would turn up almost nothing.
   #
   # HostPinger.WindowsInstaller is deliberately absent. Dependabot recognises .csproj, .vbproj,
   # .fsproj and .proj, but not .wixproj, and naming a directory it finds no manifest in fails the
@@ -30,6 +30,7 @@ updates:
       - /HostPinger
       - /HostPinger.Core
       - /HostPinger.Test
+      - /HostPinger.UITest
     schedule:
       interval: weekly
     groups:

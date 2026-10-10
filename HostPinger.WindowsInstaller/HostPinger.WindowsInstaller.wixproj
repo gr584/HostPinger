@@ -5,7 +5,7 @@
   <!-- Package.wxs opens the web UI's port in Windows Firewall, which needs this extension; the
        rule is authored declaratively rather than by shelling out to netsh from a custom action. -->
   <ItemGroup>
-    <PackageReference Include="WixToolset.Firewall.wixext" Version="6.0.2" />
+    <PackageReference Include="WixToolset.Firewall.wixext" />
   </ItemGroup>
 
   <PropertyGroup>
