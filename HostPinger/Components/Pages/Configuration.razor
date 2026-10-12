@@ -258,6 +258,7 @@
 
     private readonly DatabaseForm _databaseForm = new();
     private readonly PingerForm _pingerForm = new();
+    private readonly PageReads _reads = new();
     private readonly CancellationTokenSource _cts = new();
 
     private DatabaseStats? _stats;
@@ -398,23 +399,34 @@
     /// </param>
     private async Task LoadStatsAsync(bool recountAttempts = false)
     {
-        await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);
-
-        if (recountAttempts || _attemptCount is null)
+        // Taken here, on the circuit, because the read below is not; see PageReads. A count left
+        // null is taken inside the read.
+        var knownAttemptCount = recountAttempts ? null : _attemptCount;
+        var options = new PingerOptions
         {
-            _attemptCount = await DatabaseStats.CountAttemptsAsync(db, _cts.Token);
+            IntervalSeconds = _effectiveIntervalSeconds,
+            MaxDatabaseSizeMb = _effectiveMaxDatabaseSizeMb,
+        };
+
+        var stats = await _reads.ReadAsync(
+            DbFactory,
+            (db, cancellationToken) => DatabaseStats.CollectAsync(db, options, knownAttemptCount, cancellationToken),
+            _cts.Token);
+
+        // Overtaken by a read sent after it, which has already put something newer on screen. A
+        // count it was taking goes with it, and the next refresh takes one again.
+        if (stats is null)
+        {
+            return;
+        }
+
+        if (knownAttemptCount is null)
+        {
+            _attemptCount = stats.AttemptCount;
             _refreshesSinceAttemptCount = 0;
         }
 
-        _stats = await DatabaseStats.CollectAsync(
-            db,
-            new PingerOptions
-            {
-                IntervalSeconds = _effectiveIntervalSeconds,
-                MaxDatabaseSizeMb = _effectiveMaxDatabaseSizeMb,
-            },
-            _attemptCount,
-            _cts.Token);
+        _stats = stats;
     }
 
     private async Task SaveDatabaseAsync()
@@ -657,11 +669,8 @@
         _ => $"{days / 365.25:0.#} years",
     };
 
-    public void Dispose()
-    {
-        _cts.Cancel();
-        _cts.Dispose();
-    }
+    // Cancelled rather than disposed, because a read can land after the page has gone; see PageReads.
+    public void Dispose() => _cts.Cancel();
 
     private sealed class DatabaseForm
     {

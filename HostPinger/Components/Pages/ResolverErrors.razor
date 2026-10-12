@@ -99,6 +99,7 @@ else
     private static readonly string RetentionDays = ResolverError.Retention.TotalDays.ToString("0");
 
     private List<ResolverErrorSummary> _rows = [];
+    private readonly PageReads _reads = new();
     private readonly CancellationTokenSource _cts = new();
 
     protected override async Task OnInitializedAsync()
@@ -125,10 +126,16 @@ else
         }
     }
 
+    // Off the circuit once the page has drawn anything, and dropped if overtaken; see PageReads.
     private async Task LoadAsync()
     {
-        await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);
-        _rows = await ResolverErrorSummary.LoadAsync(db, DateTime.UtcNow, _cts.Token);
+        if (await _reads.ReadAsync(
+                DbFactory,
+                (db, cancellationToken) => ResolverErrorSummary.LoadAsync(db, DateTime.UtcNow, cancellationToken),
+                _cts.Token) is { } rows)
+        {
+            _rows = rows;
+        }
     }
 
     private static string Count(int count) => count == 0 ? "—" : count.ToString("N0");
@@ -171,9 +178,6 @@ else
         };
     }
 
-    public void Dispose()
-    {
-        _cts.Cancel();
-        _cts.Dispose();
-    }
+    // Cancelled rather than disposed, because a read can land after the page has gone; see PageReads.
+    public void Dispose() => _cts.Cancel();
 }

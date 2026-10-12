@@ -287,6 +287,7 @@
     private bool _pressedInsideForm;
     private bool _isDeletePending;
     private string? _error;
+    private readonly PageReads _reads = new();
     private readonly CancellationTokenSource _cts = new();
 
     protected override async Task OnInitializedAsync()
@@ -328,13 +329,31 @@
         }
     }
 
+    /// <summary>
+    /// Reads the rows again, off the circuit once the page has drawn any; see <see cref="PageReads"/>.
+    /// What the read needs is taken before it is sent, and nothing reaches the screen until it lands.
+    /// </summary>
     private async Task LoadAsync()
     {
         var retryAttempts = Settings.CurrentPinger.RetryAttempts;
+        var isUnlocked = await IsUnlockedAsync();
+        var rows = await _reads.ReadAsync(
+            DbFactory,
+            (db, cancellationToken) => HostSummary.LoadAsync(db, retryAttempts, cancellationToken),
+            _cts.Token);
+
+        // Overtaken by a read sent after it, which has already put something newer on screen.
+        if (rows is null)
+        {
+            return;
+        }
+
         _missesToDown = Math.Max(0, retryAttempts) + 1;
-        _isUnlocked = await IsUnlockedAsync();
-        await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);
-        _rows = Sort.Apply(await HostSummary.LoadAsync(db, retryAttempts, _cts.Token));
+        _isUnlocked = isUnlocked;
+
+        // Ordered as the rows land rather than as they were asked for, so that a heading clicked
+        // while the read was out is the order they arrive in.
+        _rows = Sort.Apply(rows);
     }
 
     /// <summary>
@@ -602,11 +621,8 @@
         };
     }
 
-    public void Dispose()
-    {
-        _cts.Cancel();
-        _cts.Dispose();
-    }
+    // Cancelled rather than disposed, because a read can land after the page has gone; see PageReads.
+    public void Dispose() => _cts.Cancel();
 
     private sealed class HostForm
     {

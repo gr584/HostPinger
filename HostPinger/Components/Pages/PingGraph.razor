@@ -163,6 +163,7 @@ else
     private List<ChartSeriesData> _series = [];
     private DateTime _rangeStart;
     private DateTime _rangeEnd;
+    private readonly PageReads _reads = new();
     private readonly CancellationTokenSource _cts = new();
     private bool _refreshLoopStarted;
     private bool _dropdownOpen;
@@ -171,6 +172,10 @@ else
     private ElementReference _searchInput;
     private TimeSpan _updateInterval;
     private int _pointsPerSeries = DefaultPointsPerSeries;
+
+    // The density of the last read sent rather than of the series on screen: the last read sent is
+    // the one that ends up drawn (see PageReads), so a match means one at this density is already on
+    // its way and need not be asked for again.
     private int _loadedPointsPerSeries = DefaultPointsPerSeries;
     private TimeSpan _bucketDuration;
     private bool _awaitingFirstMeasurement = true;
@@ -342,17 +347,25 @@ else
         }
     }
 
+    /// <summary>
+    /// Reads the hosts and the plotted series again, off the circuit once the page has drawn any;
+    /// see <see cref="PageReads"/>. Everything the read is made from — the range, the density, the
+    /// selection — is taken before it is sent, and the range reaches the screen with the series it
+    /// was read for, so the chart is never laying one read's samples along another read's axis.
+    /// </summary>
     private async Task LoadAsync()
     {
+        DateTime rangeStart;
+        DateTime rangeEnd;
         if (_pinnedRange is (DateTime pinnedStart, DateTime pinnedEnd, _))
         {
-            _rangeStart = pinnedStart;
-            _rangeEnd = pinnedEnd;
+            rangeStart = pinnedStart;
+            rangeEnd = pinnedEnd;
         }
         else
         {
-            _rangeEnd = DateTime.UtcNow;
-            _rangeStart = _rangeEnd - _window;
+            rangeEnd = DateTime.UtcNow;
+            rangeStart = rangeEnd - _window;
         }
 
         // Read once, so a resize partway through cannot leave series in the same load at different
@@ -362,33 +375,57 @@ else
 
         // Derived from the very range and count the series below are built with, so the chart can
         // never be told a bucket width the samples it is holding were not bucketed at.
-        _bucketDuration = ChartMath.BucketDuration(_rangeStart, _rangeEnd, points);
+        var bucketDuration = ChartMath.BucketDuration(rangeStart, rangeEnd, points);
 
-        await using var db = await DbFactory.CreateDbContextAsync(_cts.Token);
-        _allHosts = await db.Hosts.AsNoTracking().OrderBy(h => h.Id).ToListAsync(_cts.Token);
+        // A copy, because the picker goes on ticking hosts in and out of the set while the read is out.
+        var selected = _selected.ToHashSet();
 
-        // A read per plotted host, each already reduced to the points this chart has room for.
-        // One query covering every host would have to sort what it finds back into time order,
-        // where a single host is a range seek straight down IX_PingAttempts_HostId_TimestampUtc;
-        // and reading the attempts themselves to average them here is what made opening the graph
-        // on a long outage cost thirteen seconds. See ChartSeries, which is where both go.
-        var series = new List<ChartSeriesData>();
-        var index = 0;
-        foreach (var host in _allHosts)
-        {
-            if (_selected.Contains(host.Id))
+        var read = await _reads.ReadAsync(
+            DbFactory,
+            async (db, cancellationToken) =>
             {
-                series.Add(new ChartSeriesData(
-                    host.Name,
-                    ChartPalette.GetColor(index),
-                    await ChartSeries.LoadAsync(db, host.Id, _rangeStart, _rangeEnd, points, _cts.Token)));
-            }
+                var hosts = await db.Hosts.AsNoTracking().OrderBy(h => h.Id).ToListAsync(cancellationToken);
 
-            index++;
+                // A read per plotted host, each already reduced to the points this chart has room
+                // for. One query covering every host would have to sort what it finds back into
+                // time order, where a single host is a range seek straight down
+                // IX_PingAttempts_HostId_TimestampUtc; and reading the attempts themselves to
+                // average them here is what made opening the graph on a long outage cost thirteen
+                // seconds. See ChartSeries, which is where both go.
+                var series = new List<ChartSeriesData>();
+                var index = 0;
+                foreach (var host in hosts)
+                {
+                    if (selected.Contains(host.Id))
+                    {
+                        series.Add(new ChartSeriesData(
+                            host.Name,
+                            ChartPalette.GetColor(index),
+                            await ChartSeries.LoadAsync(db, host.Id, rangeStart, rangeEnd, points, cancellationToken)));
+                    }
+
+                    index++;
+                }
+
+                return new GraphRead(hosts, series);
+            },
+            _cts.Token);
+
+        // Overtaken by a read sent after it, which has already put something newer on screen.
+        if (read is null)
+        {
+            return;
         }
 
-        _series = series;
+        _rangeStart = rangeStart;
+        _rangeEnd = rangeEnd;
+        _bucketDuration = bucketDuration;
+        _allHosts = read.Hosts;
+        _series = read.Series;
     }
+
+    /// <summary>What one read of the graph brings back: every host, and the series of those plotted.</summary>
+    private sealed record GraphRead(List<MonitoredHost> Hosts, List<ChartSeriesData> Series);
 
     /// <summary>
     /// Opens on whatever the address asks for. A period pins the chart exactly as dragging one out
@@ -561,9 +598,6 @@ else
         return ids;
     }
 
-    public void Dispose()
-    {
-        _cts.Cancel();
-        _cts.Dispose();
-    }
+    // Cancelled rather than disposed, because a read can land after the page has gone; see PageReads.
+    public void Dispose() => _cts.Cancel();
 }
