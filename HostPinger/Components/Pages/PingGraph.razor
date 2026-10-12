@@ -161,11 +161,22 @@ else
     // cannot leave the other behind.
     private (DateTime StartUtc, DateTime EndUtc, TimeSpan ResumeWindow)? _pinnedRange;
     private List<ChartSeriesData> _series = [];
+
+    // The read behind each plotted host's series, by host id, which is what the next refresh
+    // carries on from; see ChartSeries.RefreshAsync. Replaced whole along with the series, and never
+    // changed in place, so a read that is out can hold it while the page moves on.
+    private IReadOnlyDictionary<int, ChartSeriesRead> _seriesReads = new Dictionary<int, ChartSeriesRead>();
+
     private DateTime _rangeStart;
     private DateTime _rangeEnd;
     private readonly PageReads _reads = new();
     private readonly CancellationTokenSource _cts = new();
     private bool _refreshLoopStarted;
+
+    // Refreshes since the series were last read from scratch rather than carried on, and how many
+    // carry on before the next one is: sixty, against the five-second timer below, is five minutes.
+    private int _refreshesSinceFullRead;
+    private const int RefreshesPerFullRead = 60;
     private bool _dropdownOpen;
     private bool _focusSearchPending;
     private string _search = string.Empty;
@@ -338,7 +349,11 @@ else
                     continue;
                 }
 
-                await LoadAsync();
+                // Carried on from what is on screen, which reads only the buckets still filling,
+                // except once in every RefreshesPerFullRead. A carried-on series cannot see rows
+                // that change behind its newest point — the pruner trimming the oldest history, a
+                // restore — and this bounds how long it can go on showing them.
+                await LoadAsync(carryOn: ++_refreshesSinceFullRead < RefreshesPerFullRead);
                 await InvokeAsync(StateHasChanged);
             }
         }
@@ -353,8 +368,21 @@ else
     /// selection — is taken before it is sent, and the range reaches the screen with the series it
     /// was read for, so the chart is never laying one read's samples along another read's axis.
     /// </summary>
-    private async Task LoadAsync()
+    /// <param name="carryOn">
+    /// Whether each series may be carried on from the read behind what is on screen rather than
+    /// read from scratch, which is what the timer asks for. ChartSeries.RefreshAsync decides per
+    /// host whether it can, so a change the timer did not make — a resize, another window — still
+    /// reads in full, as does a host the screen does not hold yet.
+    /// </param>
+    private async Task LoadAsync(bool carryOn = false)
     {
+        if (!carryOn)
+        {
+            _refreshesSinceFullRead = 0;
+        }
+
+        var earlier = carryOn ? _seriesReads : null;
+
         DateTime rangeStart;
         DateTime rangeEnd;
         if (_pinnedRange is (DateTime pinnedStart, DateTime pinnedEnd, _))
@@ -393,21 +421,23 @@ else
                 // average them here is what made opening the graph on a long outage cost thirteen
                 // seconds. See ChartSeries, which is where both go.
                 var series = new List<ChartSeriesData>();
+                var seriesReads = new Dictionary<int, ChartSeriesRead>();
                 var index = 0;
                 foreach (var host in hosts)
                 {
                     if (selected.Contains(host.Id))
                     {
-                        series.Add(new ChartSeriesData(
-                            host.Name,
-                            ChartPalette.GetColor(index),
-                            await ChartSeries.LoadAsync(db, host.Id, rangeStart, rangeEnd, points, cancellationToken)));
+                        var seriesRead = earlier is not null && earlier.TryGetValue(host.Id, out var held)
+                            ? await ChartSeries.RefreshAsync(db, host.Id, held, rangeStart, rangeEnd, points, cancellationToken)
+                            : await ChartSeries.LoadAsync(db, host.Id, rangeStart, rangeEnd, points, cancellationToken);
+                        seriesReads[host.Id] = seriesRead;
+                        series.Add(new ChartSeriesData(host.Name, ChartPalette.GetColor(index), seriesRead.Samples));
                     }
 
                     index++;
                 }
 
-                return new GraphRead(hosts, series);
+                return new GraphRead(hosts, series, seriesReads);
             },
             _cts.Token);
 
@@ -422,10 +452,17 @@ else
         _bucketDuration = bucketDuration;
         _allHosts = read.Hosts;
         _series = read.Series;
+        _seriesReads = read.SeriesReads;
     }
 
-    /// <summary>What one read of the graph brings back: every host, and the series of those plotted.</summary>
-    private sealed record GraphRead(List<MonitoredHost> Hosts, List<ChartSeriesData> Series);
+    /// <summary>
+    /// What one read of the graph brings back: every host, the series of those plotted, and the
+    /// read behind each of those series for the next refresh to carry on from.
+    /// </summary>
+    private sealed record GraphRead(
+        List<MonitoredHost> Hosts,
+        List<ChartSeriesData> Series,
+        IReadOnlyDictionary<int, ChartSeriesRead> SeriesReads);
 
     /// <summary>
     /// Opens on whatever the address asks for. A period pins the chart exactly as dragging one out
