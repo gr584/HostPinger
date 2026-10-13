@@ -27,7 +27,9 @@ namespace HostPinger.Components
     /// page has nothing of its own to draw, and an empty table drawn in the meantime would replace
     /// the prerendered one the reader is already looking at, while the circuit has no handlers
     /// attached yet for a click to be waiting on. Sent off like the rest, it had every page flash
-    /// its empty state — "No hosts yet" — on every load.
+    /// its empty state — "No hosts yet" — on every load. A page that starts from what its
+    /// prerender read rather than reading again has drawn already, and says so with
+    /// <see cref="HandBackRestored"/>.
     /// </para>
     /// <para>
     /// Off the circuit, reads overlap — a refresh can still be out when a click sends one of its
@@ -59,6 +61,13 @@ namespace HostPinger.Components
     {
         private int _sent;
         private int _handedBack;
+
+        /// <summary>
+        /// Counts what the page was handed from its prerender as a read already handed back. The
+        /// page then has something of its own on screen without having read it, so every read it
+        /// sends from here on goes off the circuit, as it would after its first.
+        /// </summary>
+        public void HandBackRestored() => _handedBack = ++_sent;
 
         /// <summary>
         /// Reads through a context of its own, and returns what <paramref name="read"/> found — or

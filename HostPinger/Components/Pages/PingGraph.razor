@@ -8,6 +8,7 @@
 @inject NavigationManager Navigation
 @inject IJSRuntime JS
 @inject IOptions<PingerOptions> PingerOptions
+@inject PrerenderHandoff Handoff
 @implements IDisposable
 
 <PageTitle>HostPinger - Graph</PageTitle>
@@ -177,6 +178,25 @@ else
     // carry on before the next one is: sixty, against the five-second timer below, is five minutes.
     private int _refreshesSinceFullRead;
     private const int RefreshesPerFullRead = 60;
+
+    /// <summary>
+    /// Where the read the prerender drew the page from is held for the live page, which starts from
+    /// the same picture rather than reading it again: on a two-month outage that second read added
+    /// a third of a second to every opening of the graph. Only the id goes through the page; the
+    /// read stays on the server, see <see cref="PrerenderHandoff"/>. Set only while prerendering,
+    /// and not brought back to a circuit that was paused and resumed, whose read is long gone; see
+    /// <see cref="TakePrerenderRead"/> for how the live page uses it.
+    /// </summary>
+    /// <remarks>
+    /// AllowUpdates, because a page opened by an enhanced navigation is handed its state as an
+    /// update rather than as the value it starts with. The Hosts page's Last downtime cell opens
+    /// the graph that way, and without it the live page never saw the id and read twice as before.
+    /// </remarks>
+    [PersistentState(RestoreBehavior = RestoreBehavior.SkipLastSnapshot, AllowUpdates = true)]
+    public string? PrerenderReadId { get; set; }
+
+    // Whether the live page has had its one chance at the prerender's read.
+    private bool _prerenderReadTaken;
     private bool _dropdownOpen;
     private bool _focusSearchPending;
     private string _search = string.Empty;
@@ -242,12 +262,53 @@ else
         _selected = ParseIds(HostIdsSegment);
         _updateInterval = TimeSpan.FromSeconds(Math.Max(1, PingerOptions.Value.IntervalSeconds));
         ApplyQueryOpening();
-        await LoadAsync();
+        if (TakePrerenderRead() is { } prerendered)
+        {
+            // At the density the prerender read at, which is as good a guess at the chart's width
+            // as the live page has until the chart measures itself.
+            Apply(prerendered);
+            _pointsPerSeries = prerendered.Points;
+            _loadedPointsPerSeries = prerendered.Points;
+            _reads.HandBackRestored();
+        }
+        else
+        {
+            await LoadAsync();
+        }
+
         if (!_refreshLoopStarted)
         {
             _refreshLoopStarted = true;
             _ = AutoRefreshAsync();
         }
+    }
+
+    /// <summary>
+    /// The prerender's read, for the live page's first parameters set and no other, and only while
+    /// it is still the read this page would make: the same hosts, and the same range or window. On
+    /// a page the prerender drew it always is, since both come from one address; the check is what
+    /// keeps a value from anywhere else from being drawn as though it were. An enhanced navigation
+    /// that the live page stays open through hands it the id of that navigation's prerender too;
+    /// the page reads for the new address itself, and that read is left to expire.
+    /// </summary>
+    private GraphRead? TakePrerenderRead()
+    {
+        if (!RendererInfo.IsInteractive || _prerenderReadTaken)
+        {
+            return null;
+        }
+
+        _prerenderReadTaken = true;
+        if (PrerenderReadId is not { } id || Handoff.Take<GraphRead>(id) is not { } read)
+        {
+            return null;
+        }
+
+        var plotted = _selected.Where(selectedId => read.Hosts.Any(h => h.Id == selectedId)).ToHashSet();
+        var sameRange = _pinnedRange is (DateTime start, DateTime end, _)
+            ? read.RangeStartUtc == start && read.RangeEndUtc == end
+            : read.RangeEndUtc - read.RangeStartUtc == _window;
+        return plotted.SetEquals(read.SeriesReads.Keys) && sameRange ? read : null;
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -401,10 +462,6 @@ else
         var points = _pointsPerSeries;
         _loadedPointsPerSeries = points;
 
-        // Derived from the very range and count the series below are built with, so the chart can
-        // never be told a bucket width the samples it is holding were not bucketed at.
-        var bucketDuration = ChartMath.BucketDuration(rangeStart, rangeEnd, points);
-
         // A copy, because the picker goes on ticking hosts in and out of the set while the read is out.
         var selected = _selected.ToHashSet();
 
@@ -420,24 +477,18 @@ else
                 // IX_PingAttempts_HostId_TimestampUtc; and reading the attempts themselves to
                 // average them here is what made opening the graph on a long outage cost thirteen
                 // seconds. See ChartSeries, which is where both go.
-                var series = new List<ChartSeriesData>();
                 var seriesReads = new Dictionary<int, ChartSeriesRead>();
-                var index = 0;
                 foreach (var host in hosts)
                 {
                     if (selected.Contains(host.Id))
                     {
-                        var seriesRead = earlier is not null && earlier.TryGetValue(host.Id, out var held)
+                        seriesReads[host.Id] = earlier is not null && earlier.TryGetValue(host.Id, out var held)
                             ? await ChartSeries.RefreshAsync(db, host.Id, held, rangeStart, rangeEnd, points, cancellationToken)
                             : await ChartSeries.LoadAsync(db, host.Id, rangeStart, rangeEnd, points, cancellationToken);
-                        seriesReads[host.Id] = seriesRead;
-                        series.Add(new ChartSeriesData(host.Name, ChartPalette.GetColor(index), seriesRead.Samples));
                     }
-
-                    index++;
                 }
 
-                return new GraphRead(hosts, series, seriesReads);
+                return new GraphRead(hosts, seriesReads, rangeStart, rangeEnd, points);
             },
             _cts.Token);
 
@@ -447,22 +498,55 @@ else
             return;
         }
 
-        _rangeStart = rangeStart;
-        _rangeEnd = rangeEnd;
-        _bucketDuration = bucketDuration;
-        _allHosts = read.Hosts;
-        _series = read.Series;
-        _seriesReads = read.SeriesReads;
+        Apply(read);
+
+        // Held for the live page while this is the prerender; see PrerenderReadId.
+        if (!RendererInfo.IsInteractive)
+        {
+            PrerenderReadId = Handoff.Hold(read);
+        }
     }
 
     /// <summary>
-    /// What one read of the graph brings back: every host, the series of those plotted, and the
-    /// read behind each of those series for the next refresh to carry on from.
+    /// Puts a read on screen: its range, every host, and a series for each plotted host, coloured
+    /// by the host's place in the list. The one place a read becomes what the chart draws, whether
+    /// it was read here or handed over by the prerender.
+    /// </summary>
+    private void Apply(GraphRead read)
+    {
+        _rangeStart = read.RangeStartUtc;
+        _rangeEnd = read.RangeEndUtc;
+
+        // Derived from the very range and count the series were built with, so the chart can never
+        // be told a bucket width the samples it is holding were not bucketed at.
+        _bucketDuration = ChartMath.BucketDuration(read.RangeStartUtc, read.RangeEndUtc, read.Points);
+        _allHosts = read.Hosts;
+        _seriesReads = read.SeriesReads;
+
+        var series = new List<ChartSeriesData>();
+        for (var index = 0; index < read.Hosts.Count; index++)
+        {
+            var host = read.Hosts[index];
+            if (read.SeriesReads.TryGetValue(host.Id, out var seriesRead))
+            {
+                series.Add(new ChartSeriesData(host.Name, ChartPalette.GetColor(index), seriesRead.Samples));
+            }
+        }
+
+        _series = series;
+    }
+
+    /// <summary>
+    /// What one read of the graph brings back: every host; the read behind the series of each
+    /// plotted one, which is also what the next refresh carries on from; and the range and density
+    /// they were read over.
     /// </summary>
     private sealed record GraphRead(
         List<MonitoredHost> Hosts,
-        List<ChartSeriesData> Series,
-        IReadOnlyDictionary<int, ChartSeriesRead> SeriesReads);
+        Dictionary<int, ChartSeriesRead> SeriesReads,
+        DateTime RangeStartUtc,
+        DateTime RangeEndUtc,
+        int Points);
 
     /// <summary>
     /// Opens on whatever the address asks for. A period pins the chart exactly as dragging one out

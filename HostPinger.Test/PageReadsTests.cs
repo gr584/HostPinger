@@ -73,6 +73,26 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// A page that starts from what its prerender read has drawn without reading, so its first
+        /// read is not the one its first render waits for, and goes off like every later one.
+        /// </summary>
+        [Test]
+        public async Task ReadAsync_SendsTheFirstReadAfterARestoreOffTheThreadThatAsks()
+        {
+            _reads.HandBackRestored();
+
+            using var gate = new ManualResetEventSlim();
+            var first = _reads.ReadAsync(
+                _factory,
+                (_, _) => Task.FromResult(gate.Wait(Patience) ? "first" : "held the caller"),
+                CancellationToken.None);
+
+            Assert.That(first.IsCompleted, Is.False);
+            gate.Set();
+            Assert.That(await first, Is.EqualTo("first"));
+        }
+
+        /// <summary>
         /// A refresh sent before a click's own read, and landing after it, would put back what the
         /// database said before the click. It is dropped instead.
         /// </summary>

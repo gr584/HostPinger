@@ -43,6 +43,11 @@ namespace HostPinger
             builder.Services.AddRazorComponents()
                 .AddInteractiveServerComponents();
 
+            // Where a page's prerender leaves what it read for the live page that follows, so that
+            // opening the page reads once. One for the process, since that is what the prerender
+            // and the circuit have in common.
+            builder.Services.AddSingleton<PrerenderHandoff>();
+
             // The database path has to come from the file and environment configuration alone: the
             // settings stored inside the database cannot be the place that says where it is.
             var paths = PingerPaths.Resolve(
