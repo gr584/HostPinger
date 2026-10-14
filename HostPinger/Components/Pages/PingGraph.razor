@@ -3,11 +3,10 @@
 @rendermode InteractiveServer
 @using HostPinger.Components.Charts
 @using HostPinger.Core.Options
-@using Microsoft.Extensions.Options
 @inject IDbContextFactory<HostPingerDbContext> DbFactory
 @inject NavigationManager Navigation
 @inject IJSRuntime JS
-@inject IOptions<PingerOptions> PingerOptions
+@inject UserSettingsStore Settings
 @inject PrerenderHandoff Handoff
 @implements IDisposable
 
@@ -44,7 +43,7 @@ else
                     }
                 </div>
 
-                <LineChart Series="_series" RangeStartUtc="_rangeStart" RangeEndUtc="_rangeEnd" UpdateInterval="_updateInterval"
+                <LineChart Series="_series" RangeStartUtc="_rangeStart" RangeEndUtc="_rangeEnd" UpdateInterval="UpdateInterval"
                            BucketDuration="_bucketDuration" PlotDeviceWidthChanged="OnPlotDeviceWidthChanged"
                            RangeSelected="OnRangeSelectedAsync" />
             }
@@ -201,7 +200,6 @@ else
     private bool _focusSearchPending;
     private string _search = string.Empty;
     private ElementReference _searchInput;
-    private TimeSpan _updateInterval;
     private int _pointsPerSeries = DefaultPointsPerSeries;
 
     // The density of the last read sent rather than of the series on screen: the last read sent is
@@ -215,6 +213,14 @@ else
     private GraphOpening? _appliedQueryOpening;
 
     private bool IsPaused => _pinnedRange is not null;
+
+    /// <summary>
+    /// How often the pinger records, which is what the chart measures a hole in the line against.
+    /// From the settings store, where the interval has lived since it became editable on the
+    /// Configuration page — appsettings.json holds only the default it overrides — and read at each
+    /// render, so that a change made there reaches an open graph on its next refresh.
+    /// </summary>
+    private TimeSpan UpdateInterval => TimeSpan.FromSeconds(Math.Max(1, Settings.CurrentPinger.IntervalSeconds));
 
     /// <summary>What the range on screen is: a width ending now, or a fixed slice of the past.</summary>
     private string RangeStateText => IsPaused ? "Custom range" : $"Last {WindowText}";
@@ -260,7 +266,6 @@ else
     protected override async Task OnParametersSetAsync()
     {
         _selected = ParseIds(HostIdsSegment);
-        _updateInterval = TimeSpan.FromSeconds(Math.Max(1, PingerOptions.Value.IntervalSeconds));
         ApplyQueryOpening();
         if (TakePrerenderRead() is { } prerendered)
         {
