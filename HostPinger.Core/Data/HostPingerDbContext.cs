@@ -41,11 +41,11 @@ namespace HostPinger.Core.Data
                 // status and the start of its last downtime are both the last ping it answered
                 // before a moment, and the composite index cannot seek to that one either: it walks
                 // back over every ping missed since, which is the whole of an outage. That walk is
-                // unbounded for a host that is down and it is paid on every five-second refresh of
-                // the Hosts page — a host unanswered for two million pings cost twelve seconds of
-                // it. Answered pings are the common case rather than the rare one, so this index
-                // costs what the one above saves; the pair is still the cheapest way to have both
-                // ends of an outage be a seek.
+                // unbounded for a host that is down and it is paid on every read of the Hosts page's
+                // summary, which follows every round — a host unanswered for two million pings cost
+                // twelve seconds a read. Answered pings are the common case rather than the rare
+                // one, so this index costs what the one above saves; the pair is still the cheapest
+                // way to have both ends of an outage be a seek.
                 attempt.HasIndex(a => new { a.HostId, a.TimestampUtc }, "IX_PingAttempts_Answered")
                     .HasFilter("\"RoundtripMs\" IS NOT NULL");
             });

@@ -128,6 +128,12 @@ namespace HostPinger
             builder.Services.AddHostedService<IcmpAvailabilityCheck>();
             builder.Services.AddHostedService<PingMonitorService>();
 
+            // What the Hosts page draws, read once per change by a loop of its own rather than by
+            // every page showing it. One instance, both the service pages ask and the loop that
+            // keeps it current.
+            builder.Services.AddSingleton<HostSummaryCache>();
+            builder.Services.AddHostedService(services => services.GetRequiredService<HostSummaryCache>());
+
             var app = builder.Build();
 
             using (var scope = app.Services.CreateScope())
@@ -139,6 +145,10 @@ namespace HostPinger
 
             // After the migrations, which is what guarantees the table it reads exists.
             app.Services.GetRequiredService<UserSettingsStore>().LoadAsync().GetAwaiter().GetResult();
+
+            // After the settings, whose retry count it reads the hosts with, and before the first page
+            // is served, so that no page ever draws it empty.
+            app.Services.GetRequiredService<HostSummaryCache>().LoadAsync().GetAwaiter().GetResult();
 
             // A download that died with the process or an upload cut off by a restart leaves its
             // temp file beside the database; nothing holds them now, so they go.

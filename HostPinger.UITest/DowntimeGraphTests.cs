@@ -42,7 +42,7 @@ namespace HostPinger.UITest
             var hostId = await SeedAsync(RecoveredName, anchor, lastMissedMinutesAgo: 30, answeredAgainMinutesAgo: 25);
             await GoAsync();
 
-            await ClickUntilAsync(DowntimeCell(RecoveredName), Page.Locator(".range-state"));
+            await OpenDowntimeAsync(RecoveredName);
 
             // The outage ran from 60 minutes back to 25, so it is 35 minutes long: the range is
             // twice that, from 17 minutes 30 seconds before it began to the same after it ended.
@@ -73,7 +73,7 @@ namespace HostPinger.UITest
             var hostId = await SeedAsync(StillDownName, anchor, lastMissedMinutesAgo: 5, answeredAgainMinutesAgo: null);
             await GoAsync();
 
-            await ClickUntilAsync(DowntimeCell(StillDownName), Page.Locator(".range-state"));
+            await OpenDowntimeAsync(StillDownName);
 
             // The outage began 60 minutes back and is still running, so the window is 90 minutes —
             // give or take the seconds the page took to be clicked, which are part of the outage.
@@ -87,6 +87,19 @@ namespace HostPinger.UITest
 
         private ILocator DowntimeCell(string name) =>
             Page.Locator(".host-row", new PageLocatorOptions { HasText = name }).Locator("td.last-downtime");
+
+        /// <summary>
+        /// Clicks the host's Last downtime cell once it shows the outage. The table is drawn from
+        /// the summary the application keeps, which catches up with a seed a moment after it lands,
+        /// and may catch the host before its pings: a cell clicked then has no outage in it and
+        /// opens the row's plain graph. The pings land in one save, so a cell showing the outage
+        /// has them all.
+        /// </summary>
+        private async Task OpenDowntimeAsync(string name)
+        {
+            await Assertions.Expect(DowntimeCell(name).Locator(".ping-value")).ToBeVisibleAsync();
+            await ClickUntilAsync(DowntimeCell(name), Page.Locator(".range-state"));
+        }
 
         /// <summary>
         /// Whole seconds, because that is as fine as the address carries and the expectations above

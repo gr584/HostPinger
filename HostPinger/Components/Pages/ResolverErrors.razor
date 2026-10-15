@@ -108,8 +108,8 @@ else
         _ = AutoRefreshAsync();
     }
 
-    // The same five seconds the Hosts page refreshes on: a new row appears here at the same moment
-    // the round that recorded it shows up there.
+    // Every five seconds. The Hosts page shows a round within a second of it landing, so a row
+    // recorded by that round can appear here a few seconds after it appears there.
     private async Task AutoRefreshAsync()
     {
         try

@@ -97,6 +97,13 @@ namespace HostPinger.UITest
                     }
                 }
 
+                // This process holds the file open too: whatever the fixtures seeded through sits in
+                // its connection pool, still attached to the file the restore is about to retire,
+                // and a seed made afterwards would be written there, where the application never
+                // looks. Let go of it first, so every later connection opens the restored file.
+                // First rather than after, because a connection to a WAL database that closes last
+                // deletes the -wal file by name, and after the swap that name is the new file's.
+                SqliteConnection.ClearAllPools();
                 await confirm.ClickAsync();
 
                 await Assertions.Expect(Page.GetByText(

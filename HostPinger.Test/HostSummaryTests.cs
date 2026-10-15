@@ -621,7 +621,7 @@ namespace HostPinger.Test
         /// <summary>
         /// The run of missed pings is counted no further than the threshold. Without the limit, a
         /// host that has been unreachable for a week costs a count of every ping it missed getting
-        /// there — on every five-second refresh of the page, for every host that is down.
+        /// there — on every read of the summary, for every host that is down.
         /// </summary>
         [Test]
         public void BuildQuery_StopsCountingMissedPingsAtTheThreshold()

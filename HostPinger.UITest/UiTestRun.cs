@@ -52,9 +52,10 @@ namespace HostPinger.UITest
         /// </summary>
         /// <remarks>
         /// The seeds are written from outside a running application, and SQLite locks the whole
-        /// file rather than the row: the pages the tests are driving re-read every five seconds,
-        /// fixtures seed alongside one another, and the application writes what its own rounds
-        /// turn up. A save that lands on one of those is refused there and then rather than made
+        /// file rather than the row: the application reads the hosts again a moment after every
+        /// commit, seeds included, the graphs the tests are driving refresh on their own, fixtures
+        /// seed alongside one another, and the application writes what its own rounds turn up.
+        /// A save that lands on one of those is refused there and then rather than made
         /// to wait, and the lock it collided with is held for a matter of milliseconds, so asking
         /// again is the whole of the recovery. A refused save leaves what it was going to write on
         /// the context, to be tried again as it stands.

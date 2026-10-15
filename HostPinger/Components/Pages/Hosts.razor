@@ -1,11 +1,11 @@
 @page "/"
 @rendermode InteractiveServer
 @using System.ComponentModel.DataAnnotations
-@using HostPinger.Core.Options
+@using HostPinger.Core.Services
 @using HostPinger.Security
 @using Microsoft.AspNetCore.Components.Authorization
 @inject IDbContextFactory<HostPingerDbContext> DbFactory
-@inject UserSettingsStore Settings
+@inject HostSummaryCache Summaries
 @inject NavigationManager Navigation
 @inject PasswordGate Gate
 @inject LockPrompt Prompt
@@ -269,12 +269,13 @@
 
     private List<HostSummary> _rows = [];
 
-    // How many missed pings make a host down, read with each load rather than once so a retry
-    // count changed on the Configuration page reaches the badges on the next refresh.
+    // How many missed pings make a host down, as the rows on screen were read with: it travels with
+    // them, so a retry count changed on the Configuration page reaches the badges along with the
+    // statuses it changes.
     private int _missesToDown = 1;
 
-    // Whether this browser may change anything, re-read with each load like the setting above, so
-    // that a password set or removed elsewhere reaches the controls on the next refresh.
+    // Whether this browser may change anything, asked again on every tick of the timer below, so
+    // that a password set or removed elsewhere reaches the controls within a few seconds.
     private bool _isUnlocked;
 
     // Bumped to have the rows rebuilt rather than diffed; see the key on the row.
@@ -287,18 +288,27 @@
     private bool _pressedInsideForm;
     private bool _isDeletePending;
     private string? _error;
-    private readonly PageReads _reads = new();
     private readonly CancellationTokenSource _cts = new();
 
+    /// <summary>
+    /// Draws the summary in hand, which is never more than a moment old and never needs a read here;
+    /// see <see cref="HostSummaryCache"/>. A live page then follows it as it changes, where a
+    /// prerender draws it once and is done.
+    /// </summary>
     protected override async Task OnInitializedAsync()
     {
-        await LoadAsync();
-        _ = AutoRefreshAsync();
+        Apply(Summaries.Current);
+        _isUnlocked = await IsUnlockedAsync();
+        if (RendererInfo.IsInteractive)
+        {
+            Summaries.Updated += OnSummariesUpdated;
+            _ = AutoRefreshAsync();
+        }
     }
 
     /// <summary>
     /// Re-orders what is already on screen, which is what a click on a heading comes back to: the
-    /// table turns round there and then rather than at the next refresh five seconds later.
+    /// table turns round there and then rather than when the next summary arrives.
     /// </summary>
     protected override void OnParametersSet() => _rows = Sort.Apply(_rows);
 
@@ -313,6 +323,11 @@
         }
     }
 
+    /// <summary>
+    /// Reads nothing: the rows arrive from the summary as it changes. What still moves on its own is
+    /// the clock — "12s ago", an outage that is still counting — and whether this browser is
+    /// unlocked, which a password set or removed elsewhere can change.
+    /// </summary>
     private async Task AutoRefreshAsync()
     {
         try
@@ -320,7 +335,7 @@
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
             while (await timer.WaitForNextTickAsync(_cts.Token))
             {
-                await LoadAsync();
+                _isUnlocked = await IsUnlockedAsync();
                 await InvokeAsync(StateHasChanged);
             }
         }
@@ -329,31 +344,21 @@
         }
     }
 
-    /// <summary>
-    /// Reads the rows again, off the circuit once the page has drawn any; see <see cref="PageReads"/>.
-    /// What the read needs is taken before it is sent, and nothing reaches the screen until it lands.
-    /// </summary>
-    private async Task LoadAsync()
+    // Raised on the summary's own loop, so the new rows are handed to this page's circuit to draw.
+    private void OnSummariesUpdated(HostSummarySnapshot summary) => _ = InvokeAsync(() =>
     {
-        var retryAttempts = Settings.CurrentPinger.RetryAttempts;
-        var isUnlocked = await IsUnlockedAsync();
-        var rows = await _reads.ReadAsync(
-            DbFactory,
-            (db, cancellationToken) => HostSummary.LoadAsync(db, retryAttempts, cancellationToken),
-            _cts.Token);
+        Apply(summary);
+        StateHasChanged();
+    });
 
-        // Overtaken by a read sent after it, which has already put something newer on screen.
-        if (rows is null)
-        {
-            return;
-        }
-
-        _missesToDown = Math.Max(0, retryAttempts) + 1;
-        _isUnlocked = isUnlocked;
-
-        // Ordered as the rows land rather than as they were asked for, so that a heading clicked
-        // while the read was out is the order they arrive in.
-        _rows = Sort.Apply(rows);
+    /// <summary>
+    /// Takes a summary as the rows on screen, in this page's order: the rows are every page's, and
+    /// the order is only this reader's.
+    /// </summary>
+    private void Apply(HostSummarySnapshot summary)
+    {
+        _missesToDown = summary.MissesToDown;
+        _rows = Sort.Apply(summary.Rows);
     }
 
     /// <summary>
@@ -412,8 +417,10 @@
             return;
         }
 
+        // Waited on rather than left to the summary's next turn, so the table the form closes onto
+        // already holds the change.
         CloseForm();
-        await LoadAsync();
+        Apply(await Summaries.RefreshAsync(_cts.Token));
     }
 
     private async Task SetEnabledAsync(int id, bool isEnabled)
@@ -422,7 +429,7 @@
         {
             // The switch has already moved in the browser, so rebuild the rows to put it back.
             _rowGeneration++;
-            await LoadAsync();
+            Apply(Summaries.Current);
             return;
         }
 
@@ -434,7 +441,7 @@
             _form.IsEnabled = isEnabled;
         }
 
-        await LoadAsync();
+        Apply(await Summaries.RefreshAsync(_cts.Token));
     }
 
     private async Task DeleteAsync(int id)
@@ -449,7 +456,7 @@
         await using var db = await DbFactory.CreateDbContextAsync();
         await db.Hosts.Where(h => h.Id == id).ExecuteDeleteAsync();
         CloseForm();
-        await LoadAsync();
+        Apply(await Summaries.RefreshAsync(_cts.Token));
     }
 
     private void BeginAdd() => OpenForm(new HostForm());
@@ -621,8 +628,13 @@
         };
     }
 
-    // Cancelled rather than disposed, because a read can land after the page has gone; see PageReads.
-    public void Dispose() => _cts.Cancel();
+    // Cancelled rather than disposed: a wait on the summary or the timer can still come back after
+    // the page has gone and ask this source for its token, which a disposed one answers by throwing.
+    public void Dispose()
+    {
+        Summaries.Updated -= OnSummariesUpdated;
+        _cts.Cancel();
+    }
 
     private sealed class HostForm
     {

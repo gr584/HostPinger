@@ -3,6 +3,7 @@ using HostPinger.Core.Options;
 using HostPinger.Core.Services;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace HostPinger.Test
 {
@@ -16,6 +17,7 @@ namespace HostPinger.Test
         private string _dbPath = null!;
         private DbContextOptions<HostPingerDbContext> _options = null!;
         private UserSettingsStore _store = null!;
+        private HostSummaryCache _summaries = null!;
         private DatabaseBackup _backup = null!;
 
         [SetUp]
@@ -37,16 +39,19 @@ namespace HostPinger.Test
                 new TestDb.Factory(_options),
                 new TestOptionsMonitor<PingerOptions>(new PingerOptions()),
                 new TestOptionsMonitor<SecurityOptions>(new SecurityOptions()));
+            _summaries = new HostSummaryCache(new TestDb.Factory(_options), _store, NullLogger<HostSummaryCache>.Instance);
             _backup = new DatabaseBackup(
                 new PingerPaths(_dbPath),
                 new TestDb.Factory(_options),
                 _store,
-                new MaintenanceGate());
+                new MaintenanceGate(),
+                _summaries);
         }
 
         [TearDown]
         public void TearDown()
         {
+            _summaries.Dispose();
             SqliteConnection.ClearAllPools();
             Directory.Delete(_directory, recursive: true);
         }
@@ -172,6 +177,34 @@ namespace HostPinger.Test
                     "the settings snapshot must already reflect the restored file");
                 Assert.That(File.Exists(backupPath), Is.False, "the swap consumes the uploaded file");
             });
+        }
+
+        /// <summary>
+        /// The host summary keeps a connection of its own open, which a swap leaves pointing at the
+        /// file it retired. A restore has it let go and read again, so the Hosts page shows the
+        /// backup's hosts rather than the ones that were restored over.
+        /// </summary>
+        [Test]
+        public async Task Restore_HandsTheHostSummaryTheRestoredHosts()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var backupPath = Path.Combine(_directory, "uploaded.db");
+            var backupOptions = OptionsFor(backupPath);
+            await using (var db = new HostPingerDbContext(backupOptions))
+            {
+                await db.Database.MigrateAsync();
+            }
+
+            await SeedHostWithAttemptsAsync(backupOptions, "backup.example", attempts: 1);
+            await _store.LoadAsync();
+            await _summaries.LoadAsync();
+            Assert.That(_summaries.Current.Rows.Select(r => r.Host.Address), Is.EqualTo(new[] { "current.example" }),
+                "the state before the restore");
+
+            await _backup.RestoreAsync(backupPath);
+            await _summaries.PollAsync();
+
+            Assert.That(_summaries.Current.Rows.Select(r => r.Host.Address), Is.EqualTo(new[] { "backup.example" }));
         }
 
         [Test]

@@ -15,7 +15,8 @@ namespace HostPinger.Core.Services
         PingerPaths paths,
         IDbContextFactory<HostPingerDbContext> dbFactory,
         UserSettingsStore settings,
-        MaintenanceGate maintenanceGate)
+        MaintenanceGate maintenanceGate,
+        HostSummaryCache hostSummaries)
     {
         /// <summary>
         /// Room the disk must have beyond the file being written, so a snapshot or an upload
@@ -160,6 +161,22 @@ namespace HostPinger.Core.Services
         {
             using var maintenanceHold = await maintenanceGate.AcquireAsync(cancellationToken);
 
+            // The host summary keeps a connection of its own open, outside the pool that
+            // ClearAllPools empties, so it lets go of the file first and is resumed on whatever sits
+            // at the path afterwards — the restored file, or the old one if the swap never happened.
+            await hostSummaries.SuspendAsync(cancellationToken);
+            try
+            {
+                await ReplaceAsync(candidatePath, cancellationToken);
+            }
+            finally
+            {
+                hostSummaries.Resume();
+            }
+        }
+
+        private async Task ReplaceAsync(string candidatePath, CancellationToken cancellationToken)
+        {
             // Pooled idle connections hold the old file open past their last use; on Windows that
             // is enough to fail the swap.
             SqliteConnection.ClearAllPools();

@@ -34,8 +34,8 @@ can be read either way; the password only decides who can change something.
 ### Hosts — `/`
 
 The list of everything being monitored, one row per host, in name order until a heading is clicked,
-refreshed every five seconds. Clicking a row opens that host's ping graph, and clicking its last
-downtime opens that graph on the outage itself.
+updated within a second of anything changing. Clicking a row opens that host's ping graph, and
+clicking its last downtime opens that graph on the outage itself.
 
 - **Status** — <span class="badge text-bg-success">**Up**</span> when the last ping was answered, <span class="badge text-bg-warning">**Retrying**</span> once pings start going unanswered, <span class="badge text-bg-danger">**Down**</span> once it has used up the *Retry attempts* it is allowed, <span class="badge bg-body-secondary text-body-secondary">**Waiting…**</span> until the first round covers a newly added host, and <span class="badge text-bg-secondary">**Paused**</span> for a host that is not being pinged at all. Hovering **Retrying** says how many pings it has missed so far, and how many make it down.
 - **Last ping** — the round trip in milliseconds, or *no reply*, with how long ago the attempt was
