@@ -56,40 +56,51 @@ namespace HostPinger.Core.Services
             ? null
             : MaxSizeBytes / GrowthBytesPerDay;
 
+        /// <summary>
+        /// How many attempts there are, read off the span of their ids: the last id less the first,
+        /// plus one, which is two seeks on the table's own key, where COUNT(*) is a scan of a whole
+        /// index — most of a minute on a large database the operating system is not holding in
+        /// memory, and a read that long keeps a ping round from committing until it gives up.
+        /// </summary>
+        /// <remarks>
+        /// Each id is taken by a subquery of its own, because SQLite only seeks for a MIN or a MAX
+        /// that stands alone: asked for both side by side, it scans the table for them. The span is
+        /// the count exactly while the ids run unbroken, which they do: they are only ever handed
+        /// out upwards, and the pruner removes the oldest. What it does count that is not there is
+        /// the history of a deleted host, until pruning has passed it: too many by that host's
+        /// share, which makes <see cref="BytesPerAttempt"/> too small by the same.
+        /// </remarks>
+        internal const string AttemptIdSpanSql =
+            "SELECT COALESCE((SELECT MAX(\"Id\") FROM \"PingAttempts\") - (SELECT MIN(\"Id\") FROM \"PingAttempts\") + 1, 0);";
+
         /// <param name="db">The context to read through.</param>
         /// <param name="options">The settings the projection is made against.</param>
-        /// <param name="knownAttemptCount">
-        /// An attempt count already taken, or null to take one now. Everything else here is a
-        /// pragma or an index seek; this is the one figure that costs a scan of the whole table,
-        /// because SQLite has no cheap COUNT(*) — seconds, on a database near its size limit. It
-        /// only feeds <see cref="BytesPerAttempt"/>, an average over the whole history that no
-        /// single round moves, so a caller refreshing these figures on a timer should re-take it on
-        /// a far slower one than the rest and pass it in between.
-        /// </param>
         /// <param name="cancellationToken">Cancels the queries.</param>
         public static async Task<DatabaseStats> CollectAsync(
             HostPingerDbContext db,
             PingerOptions options,
-            long? knownAttemptCount = null,
             CancellationToken cancellationToken = default)
         {
             return new DatabaseStats
             {
                 SizeBytes = await DatabasePruner.GetDatabaseSizeBytesAsync(db, cancellationToken),
                 MaxSizeBytes = options.MaxDatabaseSizeBytes,
-                AttemptCount = knownAttemptCount ?? await CountAttemptsAsync(db, cancellationToken),
+                AttemptCount = await CountAttemptsAsync(db, cancellationToken),
                 EnabledHostCount = await db.Hosts.CountAsync(h => h.IsEnabled, cancellationToken),
                 IntervalSeconds = options.IntervalSeconds,
             };
         }
 
-        /// <summary>
-        /// The expensive half of <see cref="CollectAsync"/> on its own, so a caller that refreshes
-        /// it on its own cadence has somewhere to ask for it.
-        /// </summary>
-        public static Task<long> CountAttemptsAsync(
+        /// <summary>How many attempts are stored, as <see cref="AttemptIdSpanSql"/> reads it.</summary>
+        public static async Task<long> CountAttemptsAsync(
             HostPingerDbContext db,
-            CancellationToken cancellationToken = default) =>
-            db.PingAttempts.LongCountAsync(cancellationToken);
+            CancellationToken cancellationToken = default)
+        {
+            var connection = db.Database.GetDbConnection();
+            await db.Database.OpenConnectionAsync(cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = AttemptIdSpanSql;
+            return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
+        }
     }
 }

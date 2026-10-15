@@ -137,5 +137,74 @@ namespace HostPinger.Test
                 Assert.That(stats.MaxSizeBytes, Is.EqualTo(10L * 1024 * 1024));
             });
         }
+
+        /// <summary>
+        /// The count is the span of the attempt ids, which is exact while they run unbroken: none
+        /// at all is zero, and pruning, which takes the oldest, leaves an exact count of the rest.
+        /// The history of a deleted host is what it still counts once gone, until pruning passes it.
+        /// </summary>
+        [Test]
+        public async Task CountAttempts_IsTheSpanOfTheIds()
+        {
+            await using var db = new HostPingerDbContext(_options);
+            var empty = await DatabaseStats.CountAttemptsAsync(db);
+
+            var host = new MonitoredHost { Name = "host", Address = "host.example" };
+            db.Hosts.Add(host);
+            await db.SaveChangesAsync();
+            var start = new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc);
+            db.PingAttempts.AddRange(Enumerable.Range(0, 30).Select(i => new PingAttempt
+            {
+                HostId = host.Id,
+                TimestampUtc = start.AddMinutes(i),
+                RoundtripMs = i,
+            }));
+            await db.SaveChangesAsync();
+
+            await db.PingAttempts.Where(a => a.TimestampUtc < start.AddMinutes(10)).ExecuteDeleteAsync();
+            var afterPruning = await DatabaseStats.CountAttemptsAsync(db);
+
+            // What a deleted host leaves: rows gone from the middle of the span, interleaved as its
+            // attempts were with everyone else's.
+            await db.PingAttempts
+                .Where(a => a.TimestampUtc >= start.AddMinutes(15) && a.TimestampUtc < start.AddMinutes(20))
+                .ExecuteDeleteAsync();
+            var afterAHoleInTheMiddle = await DatabaseStats.CountAttemptsAsync(db);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(empty, Is.Zero);
+                Assert.That(afterPruning, Is.EqualTo(20), "the ten oldest are gone");
+                Assert.That(afterAHoleInTheMiddle, Is.EqualTo(20), "a hole inside the span is still counted");
+            });
+        }
+
+        /// <summary>
+        /// Both ends of the span are seeks. Asked for in one SELECT, MIN and MAX are found by scanning
+        /// the table, which is the cost the span is there to avoid; so is COUNT(*). On a large
+        /// database that is not in memory, that scan is most of a minute.
+        /// </summary>
+        [Test]
+        public async Task CountAttempts_SeeksBothEndsOfTheIds()
+        {
+            await using var command = _connection.CreateCommand();
+            command.CommandText = "EXPLAIN QUERY PLAN " + DatabaseStats.AttemptIdSpanSql;
+            var plan = new List<string>();
+            await using (var reader = await command.ExecuteReaderAsync())
+            {
+                while (await reader.ReadAsync())
+                {
+                    plan.Add(reader.GetString(3));
+                }
+            }
+
+            var onAttempts = plan.Where(step => step.Contains("PingAttempts")).ToList();
+            var detail = string.Join(" | ", plan);
+            Assert.Multiple(() =>
+            {
+                Assert.That(onAttempts, Has.Count.EqualTo(2), $"One step for each end. Plan was: {detail}");
+                Assert.That(onAttempts, Has.All.StartsWith("SEARCH"), $"Both ends should be seeks. Plan was: {detail}");
+            });
+        }
     }
 }

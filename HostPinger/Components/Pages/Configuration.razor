@@ -262,18 +262,6 @@
     private readonly CancellationTokenSource _cts = new();
 
     private DatabaseStats? _stats;
-
-    // The attempt count inside _stats, kept across refreshes. It is the one figure on this page
-    // that costs a scan of the whole attempts table — seconds, on a database near its size limit —
-    // and it only feeds an average over the entire history, which no single ping round moves. So it
-    // is re-taken on its own slow cadence while everything beside it stays live on the 15-second
-    // one. Null until the first load, and after anything that replaces the database wholesale.
-    private long? _attemptCount;
-
-    private int _refreshesSinceAttemptCount;
-
-    // Refreshes between counts, against the 15-second timer below: five minutes.
-    private const int RefreshesPerAttemptCount = 20;
     private string? _databaseStatus;
     private string? _pingerStatus;
 
@@ -339,7 +327,7 @@
             {
                 SyncFromConfiguration();
                 _isUnlocked = await IsUnlockedAsync();
-                await LoadStatsAsync(recountAttempts: ++_refreshesSinceAttemptCount >= RefreshesPerAttemptCount);
+                await LoadStatsAsync();
                 await InvokeAsync(StateHasChanged);
             }
         }
@@ -388,20 +376,13 @@
     }
 
     /// <summary>
-    /// Reads the figures under the database and pinger sections. Everything here is a pragma or an
-    /// index seek except the attempt count, which is why that one is carried between calls rather
-    /// than re-taken on each — see <see cref="_attemptCount" />.
+    /// Reads the figures under the database and pinger sections: pragmas and index seeks, the
+    /// attempt count among them (see <see cref="DatabaseStats.CountAttemptsAsync" />), so the whole
+    /// set is cheap enough to take again on every refresh and on opening the page.
     /// </summary>
-    /// <param name="recountAttempts">
-    /// Whether to count the attempts again. The timer passes true every
-    /// <see cref="RefreshesPerAttemptCount" /> refreshes; a caller that has just replaced the
-    /// database passes it too, and otherwise the first load is what takes the count.
-    /// </param>
-    private async Task LoadStatsAsync(bool recountAttempts = false)
+    private async Task LoadStatsAsync()
     {
-        // Taken here, on the circuit, because the read below is not; see PageReads. A count left
-        // null is taken inside the read.
-        var knownAttemptCount = recountAttempts ? null : _attemptCount;
+        // Taken here, on the circuit, because the read below is not; see PageReads.
         var options = new PingerOptions
         {
             IntervalSeconds = _effectiveIntervalSeconds,
@@ -410,20 +391,13 @@
 
         var stats = await _reads.ReadAsync(
             DbFactory,
-            (db, cancellationToken) => DatabaseStats.CollectAsync(db, options, knownAttemptCount, cancellationToken),
+            (db, cancellationToken) => DatabaseStats.CollectAsync(db, options, cancellationToken),
             _cts.Token);
 
-        // Overtaken by a read sent after it, which has already put something newer on screen. A
-        // count it was taking goes with it, and the next refresh takes one again.
+        // Overtaken by a read sent after it, which has already put something newer on screen.
         if (stats is null)
         {
             return;
-        }
-
-        if (knownAttemptCount is null)
-        {
-            _attemptCount = stats.AttemptCount;
-            _refreshesSinceAttemptCount = 0;
         }
 
         _stats = stats;
@@ -609,9 +583,8 @@
         // settings, and the unlock answer below is already being judged against its password.
         SyncFromConfiguration();
 
-        // The file underneath is the backup's now, so the carried count is about a database that is
-        // no longer there.
-        await LoadStatsAsync(recountAttempts: true);
+        // The file underneath is the backup's now.
+        await LoadStatsAsync();
         _isUnlocked = await IsUnlockedAsync();
         _restoreStatus = "Restored — the backup's hosts, history, settings and password now apply.";
         _isRestoreRefused = false;
