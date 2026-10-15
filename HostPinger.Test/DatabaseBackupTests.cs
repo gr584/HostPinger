@@ -207,6 +207,87 @@ namespace HostPinger.Test
             Assert.That(_summaries.Current.Rows.Select(r => r.Host.Address), Is.EqualTo(new[] { "backup.example" }));
         }
 
+        /// <summary>
+        /// A backup comes out of VACUUM INTO in rollback-journal mode, where a long read keeps the
+        /// ping rounds from committing. The restore puts it into WAL mode, the mode a new database
+        /// starts in, and leaves the file it retires in rollback-journal mode, whole on its own —
+        /// whichever mode that file was in: a new database is in WAL mode, and one restored before
+        /// this was in the other.
+        /// </summary>
+        [TestCase("wal")]
+        [TestCase("delete")]
+        public async Task Restore_PutsTheRestoredDatabaseInWalMode(string retiredMode)
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var backupPath = await _backup.CreateSnapshotAsync();
+            SqliteConnection.ClearAllPools();
+            await using (var connection = new SqliteConnection($"Data Source={_dbPath};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                await ScalarAsync(connection, $"PRAGMA journal_mode = {retiredMode};");
+            }
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(await JournalModeAsync(_dbPath), Is.EqualTo(retiredMode));
+                Assert.That(await JournalModeAsync(backupPath), Is.EqualTo("delete"), "the mode VACUUM INTO writes");
+            });
+
+            await _backup.RestoreAsync(backupPath);
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(await JournalModeAsync(_dbPath), Is.EqualTo("wal"));
+                Assert.That(await JournalModeAsync(_backup.PreRestorePath), Is.EqualTo("delete"));
+                Assert.That(File.Exists(_backup.PreRestorePath + "-wal"), Is.False, "the undo copy needs nothing beside it");
+
+                // Switching the upload to WAL mode happens on a connection of its own, closed before
+                // the swap; nothing of it may be left under the upload's name.
+                Assert.That(Directory.GetFiles(_directory, Path.GetFileName(backupPath) + "*"), Is.Empty,
+                    "nothing of the upload is left, a -wal or -shm included");
+            });
+        }
+
+        /// <summary>
+        /// A read still running on the file being retired is waited out before the swap. The last
+        /// connection to close on a WAL database deletes the -wal and -shm beside it by name, and
+        /// after the swap those are the restored file's: had the restore gone ahead, closing this
+        /// one would have taken them, and whatever was written to the restored file meanwhile would
+        /// be invisible to every connection opened after.
+        /// </summary>
+        [Test]
+        public async Task Restore_WaitsOutAReadStillOpenOnTheRetiredFile()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var backupPath = await _backup.CreateSnapshotAsync();
+
+            // Outside the pool, the way a read still running is out of ClearAllPools' reach.
+            var reading = new SqliteConnection($"Data Source={_dbPath};Pooling=False");
+            await reading.OpenAsync();
+            await ScalarAsync(reading, "SELECT COUNT(*) FROM Hosts;");
+
+            // On a thread of its own, because the provider waits out a busy file by sleeping.
+            var restore = Task.Run(() => _backup.RestoreAsync(backupPath));
+            await Task.WhenAny(restore, Task.Delay(TimeSpan.FromSeconds(2)));
+            var restoredWhileReading = restore.IsCompleted;
+            await reading.DisposeAsync();
+            await restore.WaitAsync(TimeSpan.FromSeconds(30));
+
+            // Written through the pool, where the restore left connections to the restored file
+            // open, and read back on a connection opened afterwards.
+            await SeedHostWithAttemptsAsync(_options, "after.example", attempts: 1);
+            await using var afterwards = new SqliteConnection($"Data Source={_dbPath};Pooling=False");
+            await afterwards.OpenAsync();
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(restoredWhileReading, Is.False, "the swap waits for the read to finish");
+                Assert.That(
+                    await ScalarAsync(afterwards, "SELECT COUNT(*) FROM Hosts WHERE Address = 'after.example';"),
+                    Is.EqualTo(1L));
+            });
+        }
+
         [Test]
         public async Task DeleteLeftoverTempFiles_SweepsOnlyItsOwn()
         {
@@ -253,6 +334,20 @@ namespace HostPinger.Test
             await using var db = new HostPingerDbContext(options);
             await UserSettingsStore.StageAsync(db, UserSettingsStore.PasswordHashKey, hash);
             await db.SaveChangesAsync();
+        }
+
+        private static async Task<string?> JournalModeAsync(string path)
+        {
+            await using var connection = new SqliteConnection($"Data Source={path};Mode=ReadWrite;Pooling=False");
+            await connection.OpenAsync();
+            return (string?)await ScalarAsync(connection, "PRAGMA journal_mode;");
+        }
+
+        private static async Task<object?> ScalarAsync(SqliteConnection connection, string sql)
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            return await command.ExecuteScalarAsync();
         }
 
         private static async Task<string?> IntegrityCheckAsync(string path)

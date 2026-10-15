@@ -170,9 +170,10 @@ and saved only when it is.
   can lock the browser out — `--remove-password` is the recovery, as ever — or unlock the
   service. The file is checked before anything is replaced: it must be an intact SQLite database
   with HostPinger's schema, and one from a newer version is refused. A backup from an older
-  version is migrated up, the way an old database is at startup. The database being replaced is
-  kept beside the new one as `hostpinger.db.pre-restore`, one restore's worth of undo. Unlock to
-  use it.
+  version is migrated up, the way an old database is at startup. The restored database is put in
+  SQLite's WAL mode, where reading the history never holds up a ping round's write. The database
+  being replaced is kept beside the new one as `hostpinger.db.pre-restore`, one restore's worth of
+  undo, complete in that one file. Unlock to use it.
 - **Security** — whether a password is set, and the way to `/password` to set, change or remove
   one.
 

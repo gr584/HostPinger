@@ -155,7 +155,9 @@ namespace HostPinger.Core.Services
         /// Replaces the database with the validated file at <paramref name="candidatePath"/>,
         /// keeping what it replaced at <see cref="PreRestorePath"/>, then migrates the new file
         /// and reloads the settings snapshot — so when this returns, the backup's settings and
-        /// password are the ones in force. The candidate file is consumed by the swap.
+        /// password are the ones in force. The candidate file is consumed by the swap. The restored
+        /// database is in WAL mode, and the one kept at <see cref="PreRestorePath"/> is in
+        /// rollback-journal mode, whole without a -wal beside it.
         /// </summary>
         public async Task RestoreAsync(string candidatePath, CancellationToken cancellationToken = default)
         {
@@ -181,6 +183,12 @@ namespace HostPinger.Core.Services
             // is enough to fail the swap.
             SqliteConnection.ClearAllPools();
 
+            // A fresh install has no file there to take out of anything.
+            if (File.Exists(paths.DatabasePath))
+            {
+                await LeaveWalAsync(paths.DatabasePath, cancellationToken);
+            }
+
             // A journal left beside the database belongs to the file being retired. SQLite would
             // roll it into whatever sits at the database path, and rolled into the restored file
             // it is corruption, not recovery.
@@ -188,6 +196,7 @@ namespace HostPinger.Core.Services
             File.Delete(paths.DatabasePath + "-wal");
             File.Delete(paths.DatabasePath + "-shm");
 
+            await EnterWalAsync(candidatePath, cancellationToken);
             await SwapIntoPlaceAsync(candidatePath, cancellationToken);
 
             // The restored file is somebody's old database: migrate it up and re-establish
@@ -201,6 +210,60 @@ namespace HostPinger.Core.Services
             // puts the backup's settings and password in force — which also invalidates unlock
             // cookies stamped under the old password, with nothing further to do.
             await settings.LoadAsync(cancellationToken);
+        }
+
+        /// <summary>
+        /// Takes the file about to be retired out of WAL mode. Leaving it, SQLite folds whatever the
+        /// -wal still holds into the file, so the undo copy is whole on its own; and it only leaves
+        /// once no other connection has the file open, so this is also what waits out a read still
+        /// in progress on it, for as long as the provider retries a busy command. That wait is what
+        /// keeps the restored file safe: the last connection to close on a WAL database deletes the
+        /// -wal and -shm beside it by name, and after the swap those names are the restored file's.
+        /// A file already in rollback-journal mode has neither, and is left as it is.
+        /// </summary>
+        private static async Task LeaveWalAsync(string databasePath, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await SetJournalModeAsync(databasePath, "DELETE", cancellationToken);
+            }
+            catch (SqliteException ex) when (ex.SqliteErrorCode is 5 or 6)
+            {
+                // SQLITE_BUSY and SQLITE_LOCKED: something held the file for the whole wait. An
+                // IOException, so the page reports it as a failed restore like any other.
+                throw new IOException(
+                    "The database stayed in use, so nothing was replaced. Try the restore again.", ex);
+            }
+        }
+
+        /// <summary>
+        /// Puts the file about to go into place into WAL mode, the mode a database this application
+        /// creates starts in. A backup is written by VACUUM INTO, which leaves it in rollback-journal
+        /// mode, and there a read keeps a write from committing: a ping round that comes due during
+        /// a long read waits on it, and past the timeout gives up and loses its pings. Done while
+        /// the file is still the candidate, so nothing opens the restored database in the old mode.
+        /// Where the file system cannot do WAL, SQLite says so by keeping the old mode, and the
+        /// restore goes on in it, as a new database does.
+        /// </summary>
+        private static Task EnterWalAsync(string candidatePath, CancellationToken cancellationToken) =>
+            SetJournalModeAsync(candidatePath, "WAL", cancellationToken);
+
+        /// <summary>
+        /// Sets a file's journal mode on a connection of its own, outside the pool so that it is
+        /// closed when this returns rather than kept, holding the file, across the swap.
+        /// </summary>
+        private static async Task SetJournalModeAsync(string path, string mode, CancellationToken cancellationToken)
+        {
+            var connectionString = new SqliteConnectionStringBuilder
+            {
+                DataSource = path,
+                Mode = SqliteOpenMode.ReadWrite,
+                Pooling = false,
+            }.ToString();
+
+            await using var connection = new SqliteConnection(connectionString);
+            await connection.OpenAsync(cancellationToken);
+            await ScalarAsync(connection, $"PRAGMA journal_mode = {mode};", cancellationToken);
         }
 
         /// <summary>What the data directory's disk has free, for the headroom checks.</summary>
