@@ -15,7 +15,7 @@ namespace HostPinger.Core.Migrations
         protected override void BuildModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
-            modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
+            modelBuilder.HasAnnotation("ProductVersion", "10.0.12");
 
             modelBuilder.Entity("HostPinger.Core.Data.MonitoredHost", b =>
                 {
@@ -66,10 +66,10 @@ namespace HostPinger.Core.Migrations
 
                     b.HasIndex("HostId", "TimestampUtc");
 
-                    b.HasIndex(new[] { "HostId", "TimestampUtc" }, "IX_PingAttempts_Answered")
+                    b.HasIndex(new[] { "HostId", "TimestampUtc", "RoundtripMs" }, "IX_PingAttempts_Answered")
                         .HasFilter("\"RoundtripMs\" IS NOT NULL");
 
-                    b.HasIndex(new[] { "HostId", "TimestampUtc" }, "IX_PingAttempts_Unanswered")
+                    b.HasIndex(new[] { "HostId", "TimestampUtc", "RoundtripMs" }, "IX_PingAttempts_Unanswered")
                         .HasFilter("\"RoundtripMs\" IS NULL");
 
                     b.ToTable("PingAttempts");

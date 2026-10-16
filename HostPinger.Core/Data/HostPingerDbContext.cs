@@ -34,7 +34,12 @@ namespace HostPinger.Core.Data
                 // walk back over every successful attempt recorded since, which grows without
                 // bound for a host that stays up. A partial index holds just the failures, so the
                 // seek stays flat no matter how long the host has been healthy.
-                attempt.HasIndex(a => new { a.HostId, a.TimestampUtc }, "IX_PingAttempts_Unanswered")
+                //
+                // RoundtripMs is carried in it, NULL as it always is here, so that a query naming
+                // the column can be answered from this index alone: SQLite does not count a
+                // column the filter pins down as one the index covers. The graph's bucket counts
+                // depend on that; see ChartSeries.BucketSql.
+                attempt.HasIndex(a => new { a.HostId, a.TimestampUtc, a.RoundtripMs }, "IX_PingAttempts_Unanswered")
                     .HasFilter("\"RoundtripMs\" IS NULL");
 
                 // The other half of that pair, and the same argument the other way round. A host's
@@ -46,7 +51,15 @@ namespace HostPinger.Core.Data
                 // twelve seconds a read. Answered pings are the common case rather than the rare
                 // one, so this index costs what the one above saves; the pair is still the cheapest
                 // way to have both ends of an outage be a seek.
-                attempt.HasIndex(a => new { a.HostId, a.TimestampUtc }, "IX_PingAttempts_Answered")
+                //
+                // RoundtripMs is carried in it too, which lets the graph sum a bucket's round trips
+                // from the index alone instead of fetching every attempt from the table: a
+                // two-month graph that took most of a minute to open cold takes two seconds. It
+                // belongs here rather than in the composite index above, which would cover the same
+                // reads: with the composite covering the round trip and this index not, SQLite
+                // seeks the last answered ping through the composite, which is the walk back over
+                // an outage again. Tried, that took the Hosts summary from milliseconds to seconds.
+                attempt.HasIndex(a => new { a.HostId, a.TimestampUtc, a.RoundtripMs }, "IX_PingAttempts_Answered")
                     .HasFilter("\"RoundtripMs\" IS NOT NULL");
             });
 

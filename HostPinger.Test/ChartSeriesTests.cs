@@ -62,6 +62,62 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// A bucket holding answered and missed pings alike averages the answered ones and counts
+        /// as recorded, as the in-memory downsampler has it. The bucket query counts the two kinds
+        /// apart, so a bucket across the edge of an outage is where it would go wrong; seven buckets
+        /// over the thousand seconds are longer than the unanswered stretch, which cannot fill one,
+        /// so every bucket it reaches into holds answered pings as well.
+        /// </summary>
+        [Test]
+        public async Task LoadAsync_AveragesTheAnsweredPingsOfABucketThatAlsoMissedSome()
+        {
+            const int bucketCount = 7;
+            var rangeEnd = BaseTime.AddSeconds(1000);
+            await using var db = new HostPingerDbContext(_options);
+            var hostId = await SeedAsync(db);
+
+            var reduced = (await ChartSeries.LoadAsync(db, hostId, BaseTime, rangeEnd, bucketCount)).Samples;
+            var expected = ChartMath.Downsample(await RawSamplesAsync(db, hostId, BaseTime, rangeEnd, bucketCount), BaseTime, rangeEnd, bucketCount);
+
+            Assert.That(reduced, Is.EqualTo(expected));
+        }
+
+        /// <summary>
+        /// A bucket is counted and summed from the two partial indexes alone. Read from the
+        /// attempts themselves, every round trip in the range was a fetch from the table, which on
+        /// a cold cache is what kept a long graph from opening for most of a minute.
+        /// </summary>
+        [Test]
+        public async Task BucketSql_ReadsNothingButTheTwoPartialIndexes()
+        {
+            await using var connection = new SqliteConnection($"Data Source={_dbPath}");
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "EXPLAIN QUERY PLAN " + ChartSeries.BucketSql;
+            command.Parameters.AddWithValue("@hostId", 1);
+            command.Parameters.AddWithValue("@from", BaseTime);
+            command.Parameters.AddWithValue("@to", BaseTime.AddMinutes(1));
+            var plan = new List<string>();
+            await using (var reader = await command.ExecuteReaderAsync())
+            {
+                while (await reader.ReadAsync())
+                {
+                    plan.Add(reader.GetString(3));
+                }
+            }
+
+            var onAttempts = plan.Where(step => step.Contains("PingAttempts")).ToList();
+            var detail = string.Join(" | ", plan);
+            Assert.Multiple(() =>
+            {
+                Assert.That(onAttempts, Has.Count.EqualTo(2), $"One step for each half. Plan was: {detail}");
+                Assert.That(onAttempts, Has.All.Contains("USING COVERING INDEX"), $"Neither half should touch the table. Plan was: {detail}");
+                Assert.That(detail, Does.Contain("IX_PingAttempts_Answered").And.Contain("IX_PingAttempts_Unanswered"),
+                    $"Each half should read its own partial index. Plan was: {detail}");
+            });
+        }
+
+        /// <summary>
         /// Under the bucket count the attempts are handed back as they were recorded, keeping the
         /// exact ping times the hover readout shows rather than bucket midpoints.
         /// </summary>

@@ -638,7 +638,10 @@ namespace HostPinger.Test
         /// IX_PingAttempts_HostId_TimestampUtc backwards; without the index it scans instead. The
         /// downtime lookups need IX_PingAttempts_Unanswered on top of it: the most recent
         /// unanswered ping is otherwise only reachable by walking back over every attempt answered
-        /// since, which is unbounded for a host that stays up.
+        /// since, which is unbounded for a host that stays up. The last answered ping needs
+        /// IX_PingAttempts_Answered the same way round, and it is the one most easily lost: an
+        /// index covering the round trip where this one does not draws SQLite away from it, back
+        /// into walking a whole outage.
         /// </summary>
         [Test]
         public async Task BuildQuery_SeeksTheHostTimestampIndex()
@@ -663,6 +666,8 @@ namespace HostPinger.Test
                     $"Plan should seek the host/timestamp index. Plan was: {detail}");
                 Assert.That(detail, Does.Contain("IX_PingAttempts_Unanswered"),
                     $"Plan should seek the unanswered-ping index. Plan was: {detail}");
+                Assert.That(detail, Does.Contain("IX_PingAttempts_Answered"),
+                    $"Plan should seek the answered-ping index. Plan was: {detail}");
                 Assert.That(detail, Does.Not.Contain("SCAN PingAttempts"),
                     $"Plan should not scan the attempts table. Plan was: {detail}");
             });

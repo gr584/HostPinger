@@ -47,15 +47,29 @@ namespace HostPinger.Core.Data
     public static class ChartSeries
     {
         /// <summary>
-        /// One aggregate over one bucket. Every column is answered off
-        /// IX_PingAttempts_HostId_TimestampUtc as a range seek, and the sum and the count of
-        /// answered pings are what the bucket's average is made of.
+        /// One aggregate over one bucket: the attempts recorded, the sum of the answered round
+        /// trips and the count of answered pings, which last two are what the bucket's average is
+        /// made of. Taken in two halves that each read an index and nothing else — the answered
+        /// pings off IX_PingAttempts_Answered, the missed ones off IX_PingAttempts_Unanswered, both
+        /// of which carry the round trip for it. Asked of all the attempts at once, the same
+        /// figures come off IX_PingAttempts_HostId_TimestampUtc, which seeks the range but then
+        /// fetches every attempt in it from the table for its round trip: on a cold cache, most of
+        /// a minute to open a graph two months long.
         /// </summary>
-        private const string BucketSql =
+        internal const string BucketSql =
             """
-            SELECT COUNT(*), COALESCE(SUM(RoundtripMs), 0), COUNT(RoundtripMs)
-            FROM PingAttempts
-            WHERE HostId = @hostId AND TimestampUtc >= @from AND TimestampUtc < @to;
+            SELECT answered.Pings + (
+                    SELECT COUNT(*)
+                    FROM PingAttempts
+                    WHERE HostId = @hostId AND TimestampUtc >= @from AND TimestampUtc < @to
+                        AND RoundtripMs IS NULL),
+                answered.RoundtripTotal,
+                answered.Pings
+            FROM (
+                SELECT COUNT(*) AS Pings, COALESCE(SUM(RoundtripMs), 0) AS RoundtripTotal
+                FROM PingAttempts
+                WHERE HostId = @hostId AND TimestampUtc >= @from AND TimestampUtc < @to
+                    AND RoundtripMs IS NOT NULL) AS answered;
             """;
 
         /// <summary>Reads one host's series over a range, from scratch.</summary>
