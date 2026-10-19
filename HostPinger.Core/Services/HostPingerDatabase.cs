@@ -1,14 +1,84 @@
 using HostPinger.Core.Data;
+using HostPinger.Core.Options;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace HostPinger.Core.Services
 {
     /// <summary>
-    /// Prepares the SQLite database: applies migrations and enables incremental auto-vacuum so
-    /// pruning can shrink the file.
+    /// Prepares the SQLite database: says how to open it, applies migrations and enables
+    /// incremental auto-vacuum so pruning can shrink the file, and loads what the application
+    /// reads from it before it serves a page.
     /// </summary>
+    /// <remarks>
+    /// The web project used to do the opening and the ordering itself, building the connection
+    /// string in two places — the service registration and the --remove-password command — and
+    /// keeping the order of the startup steps in comments in Program. Here they are next to the
+    /// services they order, and tested.
+    /// </remarks>
     public static class HostPingerDatabase
     {
+        /// <summary>
+        /// The connection string for the database at <paramref name="databasePath"/>. Built rather
+        /// than written out, so that a path with a semicolon or a quote in it names that file
+        /// instead of breaking the string apart.
+        /// </summary>
+        public static string ConnectionString(string databasePath) =>
+            new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString();
+
+        /// <summary>Options for a context over the database at <paramref name="databasePath"/>.</summary>
+        public static DbContextOptions<HostPingerDbContext> Options(string databasePath) =>
+            new DbContextOptionsBuilder<HostPingerDbContext>()
+                .UseSqlite(ConnectionString(databasePath))
+                .Options;
+
+        /// <summary>
+        /// Registers the context factory every reader and writer of the database takes its contexts
+        /// from, over the database <paramref name="paths"/> names.
+        /// </summary>
+        public static IServiceCollection AddHostPingerDatabase(this IServiceCollection services, PingerPaths paths) =>
+            services.AddDbContextFactory<HostPingerDbContext>(
+                options => options.UseSqlite(ConnectionString(paths.DatabasePath)));
+
+        /// <summary>
+        /// What has to happen before the first page is served, from the services
+        /// <see cref="AddHostPingerDatabase"/> and the application registered; see the overload
+        /// taking them, which is where the order is kept.
+        /// </summary>
+        public static Task OpenAsync(IServiceProvider services, CancellationToken cancellationToken = default) =>
+            OpenAsync(
+                services.GetRequiredService<IDbContextFactory<HostPingerDbContext>>(),
+                services.GetRequiredService<UserSettingsStore>(),
+                services.GetRequiredService<HostSummaryCache>(),
+                cancellationToken);
+
+        /// <summary>
+        /// Brings the database up to date, then loads the settings from it, then the host summary.
+        /// </summary>
+        /// <remarks>
+        /// The order is the point. The migrations come first, because they are what guarantee the
+        /// tables the other two read exist — a database an older build left has no settings table
+        /// yet. The settings come before the summary, whose statuses depend on the retry count:
+        /// read the other way round, a stored count would not be in force for the first page drawn.
+        /// And all of it before the first page is served, so that no page ever draws the summary
+        /// empty.
+        /// </remarks>
+        public static async Task OpenAsync(
+            IDbContextFactory<HostPingerDbContext> dbFactory,
+            UserSettingsStore settings,
+            HostSummaryCache summaries,
+            CancellationToken cancellationToken = default)
+        {
+            await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken))
+            {
+                await InitializeAsync(db, cancellationToken);
+            }
+
+            await settings.LoadAsync(cancellationToken);
+            await summaries.LoadAsync(cancellationToken);
+        }
+
         public static async Task InitializeAsync(HostPingerDbContext db, CancellationToken cancellationToken = default)
         {
             await db.Database.OpenConnectionAsync(cancellationToken);

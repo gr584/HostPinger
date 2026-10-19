@@ -189,7 +189,7 @@ namespace HostPinger.Test
         public async Task Reads_AreOverByTheTimeTheCallReturns(Read read)
         {
             await using var services = new ServiceCollection()
-                .AddDbContextFactory<HostPingerDbContext>(o => o.UseSqlite($"Data Source={_dbPath}"))
+                .AddHostPingerDatabase(PingerPaths.Resolve(_dbPath, Path.GetDirectoryName(_dbPath)!))
                 .BuildServiceProvider();
             var reads = new DatabaseReads(services.GetRequiredService<IDbContextFactory<HostPingerDbContext>>());
 

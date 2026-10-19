@@ -1,5 +1,6 @@
 using System.Globalization;
 using HostPinger.Core.Data;
+using HostPinger.Core.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -25,8 +26,8 @@ namespace HostPinger.Core.Options
         IOptionsMonitor<SecurityOptions> securityDefaults)
     {
         /// <summary>
-        /// The row holding the hash of the web UI password. Public for the --remove-password
-        /// command in Program, which writes it without this store's services being up.
+        /// The row holding the hash of the web UI password, which <see cref="RemovePasswordAsync"/>
+        /// writes without this store's services being up.
         /// </summary>
         public static readonly string PasswordHashKey =
             $"{SecurityOptions.SectionName}:{nameof(SecurityOptions.PasswordHash)}";
@@ -125,9 +126,30 @@ namespace HostPinger.Core.Options
             UpdateAsync(changes => changes[PasswordHashKey] = hash ?? string.Empty, cancellationToken);
 
         /// <summary>
+        /// What <c>HostPinger --remove-password</c> runs instead of the service: the recovery for a
+        /// lost password. It writes the same "explicitly no password" row the Password page writes,
+        /// so it also cancels a hash configured in appsettings.json or the environment — which is
+        /// what somebody who cannot produce the password needs it to do. A service already running
+        /// reads its settings from memory, so this takes effect on its next start.
+        /// </summary>
+        /// <remarks>
+        /// Runs without the application's services, on a context of its own. The migrations run
+        /// first, making it safe against a database a newer build has not opened yet — and against
+        /// no database at all, where it creates one that says no password rather than failing
+        /// somebody who is locked out.
+        /// </remarks>
+        public static async Task RemovePasswordAsync(string databasePath, CancellationToken cancellationToken = default)
+        {
+            await using var db = new HostPingerDbContext(HostPingerDatabase.Options(databasePath));
+            await HostPingerDatabase.InitializeAsync(db, cancellationToken);
+            await StageAsync(db, PasswordHashKey, string.Empty, cancellationToken);
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
+        /// <summary>
         /// Stages one row without saving, adding or updating as the table requires. Shared with
-        /// the --remove-password command in Program, so what a removal writes cannot drift from
-        /// what <see cref="SavePasswordHashAsync"/> writes; the caller saves the changes.
+        /// <see cref="RemovePasswordAsync"/>, so what a removal writes cannot drift from what
+        /// <see cref="SavePasswordHashAsync"/> writes; the caller saves the changes.
         /// </summary>
         public static async Task StageAsync(
             HostPingerDbContext db,

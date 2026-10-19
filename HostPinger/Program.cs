@@ -1,11 +1,9 @@
 using HostPinger.Components;
-using HostPinger.Core.Data;
 using HostPinger.Core.Options;
 using HostPinger.Core.Services;
 using HostPinger.Security;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting.Systemd;
 using Microsoft.Extensions.Hosting.WindowsServices;
 
@@ -70,7 +68,7 @@ namespace HostPinger
             // Settings edited on the Configuration page live in the UserSettings table, read
             // through this store: a save is in force the moment it returns.
             builder.Services.AddSingleton<UserSettingsStore>();
-            builder.Services.AddDbContextFactory<HostPingerDbContext>(options => options.UseSqlite($"Data Source={paths.DatabasePath}"));
+            builder.Services.AddHostPingerDatabase(paths);
 
             // Unlocking the actions that change hosts and settings. There are no accounts: signing
             // in means holding the one password, and the cookie says nothing but that. It is
@@ -144,19 +142,9 @@ namespace HostPinger
 
             var app = builder.Build();
 
-            using (var scope = app.Services.CreateScope())
-            {
-                var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<HostPingerDbContext>>();
-                using var db = dbFactory.CreateDbContext();
-                HostPingerDatabase.InitializeAsync(db).GetAwaiter().GetResult();
-            }
-
-            // After the migrations, which is what guarantees the table it reads exists.
-            app.Services.GetRequiredService<UserSettingsStore>().LoadAsync().GetAwaiter().GetResult();
-
-            // After the settings, whose retry count it reads the hosts with, and before the first page
-            // is served, so that no page ever draws it empty.
-            app.Services.GetRequiredService<HostSummaryCache>().LoadAsync().GetAwaiter().GetResult();
+            // Migrations, then the settings, then the host summary, before the first page is served;
+            // see OpenAsync for why in that order.
+            HostPingerDatabase.OpenAsync(app.Services).GetAwaiter().GetResult();
 
             // A download that died with the process or an upload cut off by a restart leaves its
             // temp file beside the database; nothing holds them now, so they go.
@@ -220,27 +208,12 @@ namespace HostPinger
         }
 
         /// <summary>
-        /// What `HostPinger --remove-password` runs instead of the service: the recovery for a
-        /// lost password. It writes the same "explicitly no password" row the Password page
-        /// writes, so it also cancels a hash configured in appsettings.json or the environment —
-        /// which is what somebody who cannot produce the password needs it to do. The running
-        /// service reads settings from memory, so this takes effect on its next start.
+        /// What `HostPinger --remove-password` runs instead of the service; see
+        /// <see cref="UserSettingsStore.RemovePasswordAsync"/> for what it writes and why.
         /// </summary>
-        /// <remarks>
-        /// Migrations run first, making the command safe against a database a newer build has not
-        /// opened yet — and against no database at all, where it creates one that says no password
-        /// rather than failing somebody who is locked out.
-        /// </remarks>
         private static void RemovePassword(PingerPaths paths)
         {
-            var options = new DbContextOptionsBuilder<HostPingerDbContext>()
-                .UseSqlite($"Data Source={paths.DatabasePath}")
-                .Options;
-            using var db = new HostPingerDbContext(options);
-            HostPingerDatabase.InitializeAsync(db).GetAwaiter().GetResult();
-            UserSettingsStore.StageAsync(db, UserSettingsStore.PasswordHashKey, string.Empty)
-                .GetAwaiter().GetResult();
-            db.SaveChanges();
+            UserSettingsStore.RemovePasswordAsync(paths.DatabasePath).GetAwaiter().GetResult();
 
             Console.WriteLine($"Password removed from {paths.DatabasePath}.");
             Console.WriteLine("Nothing is locked now. Start the service, or restart it if it is running.");
