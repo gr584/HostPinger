@@ -1,11 +1,10 @@
-using HostPinger.Core.Data;
-using Microsoft.EntityFrameworkCore;
-
 namespace HostPinger.Components
 {
     /// <summary>
     /// The reads one page makes of the database: each run where it holds up nothing else on the
-    /// page, and each dropped when it lands if a read sent after it has landed first.
+    /// page, and each dropped when it lands if a read sent after it has landed first. What a read
+    /// does is HostPinger.Core's, through DatabaseReads; where it runs is decided here, since only
+    /// the page knows which of its reads is its first.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -70,20 +69,18 @@ namespace HostPinger.Components
         public void HandBackRestored() => _handedBack = ++_sent;
 
         /// <summary>
-        /// Reads through a context of its own, and returns what <paramref name="read"/> found — or
-        /// null when there is nothing to show it on: a read sent after this one has been handed back
-        /// first, which makes this one older than what the page is already showing, or the page
-        /// cancelled it on its way out.
+        /// Runs <paramref name="read"/> and returns what it found — or null when there is nothing to
+        /// show it on: a read sent after this one has been handed back first, which makes this one
+        /// older than what the page is already showing, or the page cancelled it on its way out.
         /// </summary>
-        /// <param name="dbFactory">Where the context comes from.</param>
-        /// <param name="read">The read itself. Off the circuit it must not touch the page, so
-        /// anything of the page's it needs is taken before the call and closed over.</param>
+        /// <param name="read">The read itself, given the page's token. Off the circuit it must not
+        /// touch the page, so anything of the page's it needs is taken before the call and closed
+        /// over.</param>
         /// <param name="cancellationToken">The page's own, cancelled when it goes away. It stops the
         /// read at its next check rather than in the middle of a statement, which SQLite finishes
         /// regardless.</param>
         public async Task<T?> ReadAsync<T>(
-            IDbContextFactory<HostPingerDbContext> dbFactory,
-            Func<HostPingerDbContext, CancellationToken, Task<T>> read,
+            Func<CancellationToken, Task<T>> read,
             CancellationToken cancellationToken)
             where T : class
         {
@@ -92,8 +89,8 @@ namespace HostPinger.Components
             try
             {
                 found = _handedBack == 0
-                    ? await ReadHereAsync()
-                    : await Task.Run(ReadHereAsync, cancellationToken);
+                    ? await read(cancellationToken)
+                    : await Task.Run(() => read(cancellationToken), cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -107,12 +104,6 @@ namespace HostPinger.Components
 
             _handedBack = number;
             return found;
-
-            async Task<T> ReadHereAsync()
-            {
-                await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-                return await read(db, cancellationToken);
-            }
         }
     }
 }

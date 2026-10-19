@@ -5,7 +5,7 @@
 @using HostPinger.Core.Services
 @using HostPinger.Security
 @using Microsoft.AspNetCore.Components.Authorization
-@inject IDbContextFactory<HostPingerDbContext> DbFactory
+@inject DatabaseReads Reads
 @inject PingerPaths Paths
 @inject UserSettingsStore SettingsStore
 @inject PasswordGate Gate
@@ -390,8 +390,7 @@
         };
 
         var stats = await _reads.ReadAsync(
-            DbFactory,
-            (db, cancellationToken) => DatabaseStats.CollectAsync(db, options, cancellationToken),
+            cancellationToken => Reads.ReadStatsAsync(options, cancellationToken),
             _cts.Token);
 
         // Overtaken by a read sent after it, which has already put something newer on screen.

@@ -1,33 +1,20 @@
 using HostPinger.Components;
-using HostPinger.Core.Data;
-using Microsoft.Data.Sqlite;
-using Microsoft.EntityFrameworkCore;
 
 namespace HostPinger.Test
 {
     /// <summary>
-    /// Where a page's reads run and which of them it gets back. The reads here never touch the
-    /// database: what is under test is the ordering around them, so each one is a gate the test
-    /// opens when it wants that read to land.
+    /// Where a page's reads run and which of them it gets back. What a read does is not this
+    /// class's business, so the reads here never touch a database: what is under test is the
+    /// ordering around them, and each one is a gate the test opens when it wants that read to land.
     /// </summary>
     public class PageReadsTests
     {
         private static readonly TimeSpan Patience = TimeSpan.FromSeconds(10);
 
-        private SqliteConnection _connection = null!;
-        private IDbContextFactory<HostPingerDbContext> _factory = null!;
         private PageReads _reads = null!;
 
         [SetUp]
-        public void SetUp()
-        {
-            (_connection, var options) = TestDb.CreateInMemory();
-            _factory = new TestDb.Factory(options);
-            _reads = new PageReads();
-        }
-
-        [TearDown]
-        public void TearDown() => _connection.Dispose();
+        public void SetUp() => _reads = new PageReads();
 
         /// <summary>
         /// The read a page's first render waits for. It happens inside the call, on the thread that
@@ -39,8 +26,7 @@ namespace HostPinger.Test
         {
             var finishedInsideTheCall = false;
             var read = _reads.ReadAsync(
-                _factory,
-                (_, _) =>
+                _ =>
                 {
                     finishedInsideTheCall = true;
                     return Task.FromResult("first");
@@ -59,12 +45,11 @@ namespace HostPinger.Test
         [Test]
         public async Task ReadAsync_SendsEveryLaterReadOffTheThreadThatAsks()
         {
-            await _reads.ReadAsync(_factory, (_, _) => Task.FromResult("first"), CancellationToken.None);
+            await _reads.ReadAsync(_ => Task.FromResult("first"), CancellationToken.None);
 
             using var gate = new ManualResetEventSlim();
             var later = _reads.ReadAsync(
-                _factory,
-                (_, _) => Task.FromResult(gate.Wait(Patience) ? "later" : "held the caller"),
+                _ => Task.FromResult(gate.Wait(Patience) ? "later" : "held the caller"),
                 CancellationToken.None);
 
             Assert.That(later.IsCompleted, Is.False);
@@ -83,8 +68,7 @@ namespace HostPinger.Test
 
             using var gate = new ManualResetEventSlim();
             var first = _reads.ReadAsync(
-                _factory,
-                (_, _) => Task.FromResult(gate.Wait(Patience) ? "first" : "held the caller"),
+                _ => Task.FromResult(gate.Wait(Patience) ? "first" : "held the caller"),
                 CancellationToken.None);
 
             Assert.That(first.IsCompleted, Is.False);
@@ -99,11 +83,11 @@ namespace HostPinger.Test
         [Test]
         public async Task ReadAsync_DropsAReadOvertakenByOneSentAfterIt()
         {
-            await _reads.ReadAsync(_factory, (_, _) => Task.FromResult("first"), CancellationToken.None);
+            await _reads.ReadAsync(_ => Task.FromResult("first"), CancellationToken.None);
 
             var olderLands = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var older = _reads.ReadAsync(_factory, (_, _) => olderLands.Task, CancellationToken.None);
-            var newer = _reads.ReadAsync(_factory, (_, _) => Task.FromResult("newer"), CancellationToken.None);
+            var older = _reads.ReadAsync(_ => olderLands.Task, CancellationToken.None);
+            var newer = _reads.ReadAsync(_ => Task.FromResult("newer"), CancellationToken.None);
 
             Assert.That(await newer.WaitAsync(Patience), Is.EqualTo("newer"));
             olderLands.SetResult("older");
@@ -117,12 +101,12 @@ namespace HostPinger.Test
         [Test]
         public async Task ReadAsync_HandsBackOverlappingReadsThatLandInOrder()
         {
-            await _reads.ReadAsync(_factory, (_, _) => Task.FromResult("first"), CancellationToken.None);
+            await _reads.ReadAsync(_ => Task.FromResult("first"), CancellationToken.None);
 
             var olderLands = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             var newerLands = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var older = _reads.ReadAsync(_factory, (_, _) => olderLands.Task, CancellationToken.None);
-            var newer = _reads.ReadAsync(_factory, (_, _) => newerLands.Task, CancellationToken.None);
+            var older = _reads.ReadAsync(_ => olderLands.Task, CancellationToken.None);
+            var newer = _reads.ReadAsync(_ => newerLands.Task, CancellationToken.None);
 
             olderLands.SetResult("older");
             Assert.That(await older.WaitAsync(Patience), Is.EqualTo("older"));
@@ -138,12 +122,11 @@ namespace HostPinger.Test
         [Test]
         public async Task ReadAsync_SendsNothingOnceCancelled()
         {
-            await _reads.ReadAsync(_factory, (_, _) => Task.FromResult("first"), CancellationToken.None);
+            await _reads.ReadAsync(_ => Task.FromResult("first"), CancellationToken.None);
 
             var sent = false;
             var after = await _reads.ReadAsync(
-                _factory,
-                (_, _) =>
+                _ =>
                 {
                     sent = true;
                     return Task.FromResult("after");
@@ -162,13 +145,12 @@ namespace HostPinger.Test
         [Test]
         public async Task ReadAsync_DropsAReadCancelledWhileItIsOut()
         {
-            await _reads.ReadAsync(_factory, (_, _) => Task.FromResult("first"), CancellationToken.None);
+            await _reads.ReadAsync(_ => Task.FromResult("first"), CancellationToken.None);
 
             using var pageGoesAway = new CancellationTokenSource();
             var nextCheck = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var last = _reads.ReadAsync(
-                _factory,
-                async (_, cancellationToken) =>
+                async cancellationToken =>
                 {
                     await nextCheck.Task;
                     cancellationToken.ThrowIfCancellationRequested();
@@ -189,12 +171,11 @@ namespace HostPinger.Test
         [Test]
         public async Task ReadAsync_LetsACancellationThatIsNotThePagesOwnThrough()
         {
-            await _reads.ReadAsync(_factory, (_, _) => Task.FromResult("first"), CancellationToken.None);
+            await _reads.ReadAsync(_ => Task.FromResult("first"), CancellationToken.None);
 
             Assert.That(
                 async () => await _reads.ReadAsync<string>(
-                    _factory,
-                    (_, _) => throw new OperationCanceledException("Not the page's."),
+                    _ => throw new OperationCanceledException("Not the page's."),
                     CancellationToken.None),
                 Throws.InstanceOf<OperationCanceledException>());
         }

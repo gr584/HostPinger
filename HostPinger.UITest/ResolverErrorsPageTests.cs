@@ -29,7 +29,9 @@ namespace HostPinger.UITest
         /// Every failure of an address folds into one row: when it last failed, how it failed, and
         /// how often it has lately. The counts are what the row is for — a name that is failing
         /// every round reads differently from one that failed once last week — so the seeded
-        /// failures are spread to give each of the three windows a different number.
+        /// failures are spread to give each of the three windows a different number. One sits just
+        /// outside the last 24 hours, which only a count taken at the present moment leaves out of
+        /// the first.
         /// </summary>
         [Test]
         public async Task Page_FoldsEveryFailureOfAnAddressIntoOneRowWithItsRecentCounts()
@@ -39,6 +41,7 @@ namespace HostPinger.UITest
                 new MonitoredHost { Name = "Seeded host", Address = Address, CreatedUtc = now },
                 new ResolverError { Address = Address, TimestampUtc = now.AddDays(-20), Reason = ResolverFailure.LookupFailed },
                 new ResolverError { Address = Address, TimestampUtc = now.AddDays(-3), Reason = ResolverFailure.LookupFailed },
+                new ResolverError { Address = Address, TimestampUtc = now.AddHours(-30), Reason = ResolverFailure.LookupFailed },
                 new ResolverError { Address = Address, TimestampUtc = now.AddHours(-2), Reason = ResolverFailure.NoAddresses },
                 new ResolverError { Address = Address, TimestampUtc = now.AddMinutes(-2), Reason = ResolverFailure.TimedOut });
 
@@ -54,8 +57,8 @@ namespace HostPinger.UITest
                 await Assertions.Expect(cells.Nth(2)).ToHaveTextAsync("Timed out");
                 await Assertions.Expect(cells.Nth(3)).ToContainTextAsync("2m ago");
                 await Assertions.Expect(cells.Nth(4)).ToHaveTextAsync("2");
-                await Assertions.Expect(cells.Nth(5)).ToHaveTextAsync("3");
-                await Assertions.Expect(cells.Nth(6)).ToHaveTextAsync("4");
+                await Assertions.Expect(cells.Nth(5)).ToHaveTextAsync("4");
+                await Assertions.Expect(cells.Nth(6)).ToHaveTextAsync("5");
             });
         }
 

@@ -138,6 +138,10 @@ namespace HostPinger
             // it, so the page that made a change draws it next.
             builder.Services.AddSingleton<HostStore>();
 
+            // The reads the other pages make when they are asked for, each through a context of its
+            // own, so that no page holds one.
+            builder.Services.AddSingleton<DatabaseReads>();
+
             var app = builder.Build();
 
             using (var scope = app.Services.CreateScope())

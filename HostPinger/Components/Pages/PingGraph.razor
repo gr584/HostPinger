@@ -3,7 +3,8 @@
 @rendermode InteractiveServer
 @using HostPinger.Components.Charts
 @using HostPinger.Core.Options
-@inject IDbContextFactory<HostPingerDbContext> DbFactory
+@using HostPinger.Core.Services
+@inject DatabaseReads Reads
 @inject NavigationManager Navigation
 @inject IJSRuntime JS
 @inject UserSettingsStore Settings
@@ -149,7 +150,7 @@ else
     [SupplyParameterFromQuery(Name = GraphOpening.WindowQuery)]
     private string? WindowWidthQuery { get; set; }
 
-    private List<MonitoredHost> _allHosts = [];
+    private IReadOnlyList<MonitoredHost> _allHosts = [];
     private HashSet<int> _selected = [];
     private TimeSpan _window = TimeSpan.FromHours(1);
 
@@ -470,31 +471,9 @@ else
         // A copy, because the picker goes on ticking hosts in and out of the set while the read is out.
         var selected = _selected.ToHashSet();
 
+        // See GraphRead.LoadAsync for what is read and why each plotted host is a read of its own.
         var read = await _reads.ReadAsync(
-            DbFactory,
-            async (db, cancellationToken) =>
-            {
-                var hosts = await db.Hosts.AsNoTracking().OrderBy(h => h.Id).ToListAsync(cancellationToken);
-
-                // A read per plotted host, each already reduced to the points this chart has room
-                // for. One query covering every host would have to sort what it finds back into
-                // time order, where a single host is a range seek straight down
-                // IX_PingAttempts_HostId_TimestampUtc; and reading the attempts themselves to
-                // average them here is what made opening the graph on a long outage cost thirteen
-                // seconds. See ChartSeries, which is where both go.
-                var seriesReads = new Dictionary<int, ChartSeriesRead>();
-                foreach (var host in hosts)
-                {
-                    if (selected.Contains(host.Id))
-                    {
-                        seriesReads[host.Id] = earlier is not null && earlier.TryGetValue(host.Id, out var held)
-                            ? await ChartSeries.RefreshAsync(db, host.Id, held, rangeStart, rangeEnd, points, cancellationToken)
-                            : await ChartSeries.LoadAsync(db, host.Id, rangeStart, rangeEnd, points, cancellationToken);
-                    }
-                }
-
-                return new GraphRead(hosts, seriesReads, rangeStart, rangeEnd, points);
-            },
+            cancellationToken => Reads.ReadGraphAsync(selected, earlier, rangeStart, rangeEnd, points, cancellationToken),
             _cts.Token);
 
         // Overtaken by a read sent after it, which has already put something newer on screen.
@@ -540,18 +519,6 @@ else
 
         _series = series;
     }
-
-    /// <summary>
-    /// What one read of the graph brings back: every host; the read behind the series of each
-    /// plotted one, which is also what the next refresh carries on from; and the range and density
-    /// they were read over.
-    /// </summary>
-    private sealed record GraphRead(
-        List<MonitoredHost> Hosts,
-        Dictionary<int, ChartSeriesRead> SeriesReads,
-        DateTime RangeStartUtc,
-        DateTime RangeEndUtc,
-        int Points);
 
     /// <summary>
     /// Opens on whatever the address asks for. A period pins the chart exactly as dragging one out

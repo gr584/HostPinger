@@ -1,6 +1,7 @@
 @page "/resolver-errors"
 @rendermode InteractiveServer
-@inject IDbContextFactory<HostPingerDbContext> DbFactory
+@using HostPinger.Core.Services
+@inject DatabaseReads Reads
 @implements IDisposable
 
 <PageTitle>HostPinger - Resolver errors</PageTitle>
@@ -130,8 +131,7 @@ else
     private async Task LoadAsync()
     {
         if (await _reads.ReadAsync(
-                DbFactory,
-                (db, cancellationToken) => ResolverErrorSummary.LoadAsync(db, DateTime.UtcNow, cancellationToken),
+                cancellationToken => Reads.ReadResolverErrorsAsync(DateTime.UtcNow, cancellationToken),
                 _cts.Token) is { } rows)
         {
             _rows = rows;

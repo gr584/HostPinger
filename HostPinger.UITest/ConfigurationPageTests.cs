@@ -4,9 +4,12 @@ using Microsoft.Playwright;
 namespace HostPinger.UITest
 {
     /// <summary>
-    /// Backup and restore, driven the way a person drives them. What <c>DatabaseBackup</c> does
-    /// to files is settled in DatabaseBackupTests; what only a browser can settle is the
-    /// transport around it — that the download button hands over a database, and that the file
+    /// The Configuration page against a real instance: the figures it reads about the database,
+    /// and backup and restore, driven the way a person drives them. What the figures are is settled
+    /// in DatabaseStatsTests and DatabaseReadsTests, and what <c>DatabaseBackup</c> does to files
+    /// in DatabaseBackupTests; what only a browser can settle is that the page shows a figure it
+    /// actually read, and the transport around backup and restore — that the download button hands
+    /// over a database, and that the file
     /// chosen for a restore survives into the confirmation step. That last one is a regression
     /// test: the browser keeps the chosen file on the input element, and a confirm strip that
     /// replaced the input in the DOM lost the upload before it could be read.
@@ -19,6 +22,43 @@ namespace HostPinger.UITest
     [NonParallelizable]
     public class ConfigurationPageTests : BrowserTest
     {
+        /// <summary>
+        /// The size under the database settings is the size of the database the application is
+        /// running on, read the way the page reads it, rather than the dash the page shows until a
+        /// read has landed. Nothing writes while this fixture runs, so the two agree to the byte.
+        /// Formatted in the same culture as the application, which this run passes on to it.
+        /// </summary>
+        [Test]
+        public async Task Page_ShowsTheSizeOfTheDatabaseItRead()
+        {
+            long bytes;
+            await using (var connection = new SqliteConnection($"Data Source={UiTestRun.DatabasePath};Mode=ReadOnly;Pooling=False"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size();";
+                bytes = Convert.ToInt64(await command.ExecuteScalarAsync());
+            }
+
+            await GoAsync("/configuration");
+
+            await Assertions.Expect(Page.Locator(".config-value").First).ToHaveTextAsync(FormatBytes(bytes));
+        }
+
+        /// <summary>The page's way of writing a size, which the assertion above has to match exactly.</summary>
+        private static string FormatBytes(double bytes)
+        {
+            string[] units = ["bytes", "KB", "MB", "GB", "TB"];
+            var unit = 0;
+            while (bytes >= 1024 && unit < units.Length - 1)
+            {
+                bytes /= 1024;
+                unit++;
+            }
+
+            return $"{bytes:0.#} {units[unit]}";
+        }
+
         [Test]
         public async Task Backup_DownloadsAnSqliteDatabase()
         {
