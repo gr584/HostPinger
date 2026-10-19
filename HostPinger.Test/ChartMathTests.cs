@@ -453,5 +453,99 @@ namespace HostPinger.Test
                     "a short range is still drawable as long as the drag covers more than none of it");
             });
         }
+
+        /// <summary>An axis needs a bottom and a top, so fewer than two ticks is a mistake in the caller.</summary>
+        [Test]
+        public void NiceTicks_NeedsRoomForTwoTicks()
+        {
+            Assert.That(() => ChartMath.NiceTicks(100, maxTickCount: 1), Throws.InstanceOf<ArgumentOutOfRangeException>());
+        }
+
+        /// <summary>A chart with nothing above zero on it still gets an axis, from nought to one.</summary>
+        [TestCase(0)]
+        [TestCase(-5)]
+        public void NiceTicks_GivesAnEmptyChartAnAxisFromNoughtToOne(double maxValue)
+        {
+            Assert.That(ChartMath.NiceTicks(maxValue), Is.EqualTo(new[] { 0d, 1d }));
+        }
+
+        /// <summary>
+        /// A range longer than the longest step of its own fits in its ticks is stepped in whole
+        /// weeks, as few of them as keeps the ticks within the count asked for.
+        /// </summary>
+        [Test]
+        public void TimeTicks_StepsAYearInWholeWeeks()
+        {
+            var ticks = ChartMath.TimeTicks(Start, Start.AddDays(365), maxTickCount: 8);
+
+            var gaps = ticks.Zip(ticks.Skip(1), (earlier, later) => later - earlier).Distinct().ToList();
+            Assert.Multiple(() =>
+            {
+                Assert.That(ticks, Has.Count.InRange(2, 8));
+                Assert.That(gaps, Has.Count.EqualTo(1), "evenly spaced");
+                Assert.That(gaps[0].Ticks % TimeSpan.FromDays(7).Ticks, Is.Zero, "a whole number of weeks");
+                Assert.That(ticks, Has.All.InRange(Start, Start.AddDays(365)));
+            });
+        }
+
+        /// <summary>A range that ends where it starts has no width to draw across, and is refused rather than drawn as NaN.</summary>
+        [Test]
+        public void BuildGeometry_RefusesARangeThatIsNoRange()
+        {
+            Assert.That(
+                () => ChartMath.BuildGeometry([], Start, Start, 100, 100, 100),
+                Throws.ArgumentException.With.Property(nameof(ArgumentException.ParamName)).EqualTo("rangeEndUtc"));
+        }
+
+        /// <summary>
+        /// A chart whose highest value is nought — every ping answered in under a millisecond — is
+        /// scaled as though its top were one, so its line lies along the bottom rather than at NaN.
+        /// </summary>
+        [Test]
+        public void BuildGeometry_DrawsAChartOfNoughtsAlongTheBottom()
+        {
+            var samples = new[] { new ChartSample(Start.AddMinutes(1), 0), new ChartSample(Start.AddMinutes(2), 0) };
+
+            var geometry = ChartMath.BuildGeometry(samples, Start, Start.AddMinutes(10), maxY: 0, width: 100, height: 50);
+
+            Assert.That(geometry.Segments.SelectMany(s => s).Select(p => p.Y), Is.All.EqualTo(50d));
+        }
+
+        /// <summary>Reducing to no points, or over a range that is no range, is a mistake in the caller.</summary>
+        [Test]
+        public void Downsample_RefusesNoPointsAndNoRange()
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(() => ChartMath.Downsample([], Start, Start.AddMinutes(1), 0), Throws.InstanceOf<ArgumentOutOfRangeException>());
+                Assert.That(
+                    () => ChartMath.Downsample([], Start, Start, 10),
+                    Throws.ArgumentException.With.Property(nameof(ArgumentException.ParamName)).EqualTo("rangeEndUtc"));
+            });
+        }
+
+        /// <summary>
+        /// Samples from before the range or after its end, which a caller holding a wider read can
+        /// pass in, are left out of the reduction rather than folded into its first or last point.
+        /// </summary>
+        [Test]
+        public void Downsample_LeavesOutSamplesOutsideTheRange()
+        {
+            var end = Start.AddMinutes(10);
+            var inside = Enumerable.Range(0, 60).Select(i => new ChartSample(Start.AddSeconds(i * 10), 20 + i % 3)).ToList();
+            var outside = new[]
+            {
+                new ChartSample(Start.AddHours(-1), 999),
+                new ChartSample(end.AddMinutes(5), 999),
+            };
+
+            var reduced = ChartMath.Downsample([outside[0], .. inside, outside[1]], Start, end, 5);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(reduced, Is.EqualTo(ChartMath.Downsample(inside, Start, end, 5)));
+                Assert.That(reduced.Select(s => s.RoundtripMs), Has.None.EqualTo(999));
+            });
+        }
     }
 }

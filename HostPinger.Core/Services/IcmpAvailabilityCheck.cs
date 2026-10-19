@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using Microsoft.Extensions.Hosting;
@@ -20,11 +21,16 @@ namespace HostPinger.Core.Services
     /// fall back to anything usable, the send is accepted and simply never answered, so a
     /// non-<see cref="IPStatus.Success"/> reply from loopback is treated as conclusive rather than as
     /// a lesser warning.
+    ///
+    /// The echo goes through <see cref="IIcmpEcho"/>, as <see cref="PingSender"/>'s do, so that the
+    /// three verdicts can be tested without a machine that denies ICMP.
     /// </remarks>
-    public sealed class IcmpAvailabilityCheck(ILogger<IcmpAvailabilityCheck> logger) : IHostedService
+    public sealed class IcmpAvailabilityCheck(ILogger<IcmpAvailabilityCheck> logger, IIcmpEcho? echo = null) : IHostedService
     {
         /// <summary>Loopback always answers when the socket itself is permitted.</summary>
-        private const string ProbeAddress = "127.0.0.1";
+        private static readonly IPAddress ProbeAddress = IPAddress.Loopback;
+
+        private readonly IIcmpEcho _echo = echo ?? new SystemIcmpEcho();
 
         private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(2);
 
@@ -44,8 +50,7 @@ namespace HostPinger.Core.Services
 
             try
             {
-                using var ping = new Ping();
-                var reply = await ping.SendPingAsync(ProbeAddress, ProbeTimeout, cancellationToken: cancellationToken);
+                var reply = await _echo.SendAsync(ProbeAddress, ProbeTimeout, cancellationToken);
                 status = reply.Status;
             }
             catch (OperationCanceledException)
