@@ -7,7 +7,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Lets the tests assert on the SQL shape of internal queries. -->
+    <!-- Lets the tests assert on the SQL shape of internal queries, and take one turn of
+         HostSummaryCache's loop at a time (PollAsync) instead of racing its once-a-second poll. -->
     <InternalsVisibleTo Include="HostPinger.Test" />
   </ItemGroup>
 

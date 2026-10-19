@@ -4,7 +4,7 @@
 @using HostPinger.Core.Services
 @using HostPinger.Security
 @using Microsoft.AspNetCore.Components.Authorization
-@inject IDbContextFactory<HostPingerDbContext> DbFactory
+@inject HostStore Store
 @inject HostSummaryCache Summaries
 @inject NavigationManager Navigation
 @inject PasswordGate Gate
@@ -182,7 +182,7 @@
                     <DataAnnotationsValidator />
                     <div class="modal-header">
                         <h5 class="modal-title">@(_form.Id is null ? "Add host" : "Edit host")</h5>
-                        <button type="button" class="btn-close" aria-label="Close" @onclick="CloseForm"></button>
+                        <button type="button" class="btn-close" aria-label="Close" disabled="@_isChanging" @onclick="CloseForm"></button>
                     </div>
                     <div class="modal-body">
                         @if (_error is not null)
@@ -220,8 +220,8 @@
                         {
                             <span class="text-danger">Delete this host and its ping history?</span>
                             <div class="d-flex gap-2">
-                                <button type="button" class="btn btn-outline-secondary btn-sm" @onclick="() => _isDeletePending = false">Cancel</button>
-                                <button type="button" class="btn btn-danger btn-sm" @onclick="() => DeleteAsync(deleteId)">Confirm delete</button>
+                                <button type="button" class="btn btn-outline-secondary btn-sm" disabled="@_isChanging" @onclick="() => _isDeletePending = false">Cancel</button>
+                                <button type="button" class="btn btn-danger btn-sm" disabled="@_isChanging" @onclick="() => DeleteAsync(deleteId)">Confirm delete</button>
                             </div>
                         }
                         else
@@ -229,12 +229,12 @@
                             <div>
                                 @if (_form.Id is not null)
                                 {
-                                    <button type="button" class="btn btn-outline-danger btn-sm" @onclick="() => _isDeletePending = true">Delete</button>
+                                    <button type="button" class="btn btn-outline-danger btn-sm" disabled="@_isChanging" @onclick="() => _isDeletePending = true">Delete</button>
                                 }
                             </div>
                             <div class="d-flex gap-2">
-                                <button type="button" class="btn btn-outline-secondary btn-sm" @onclick="CloseForm">Cancel</button>
-                                <button type="submit" class="btn btn-primary btn-sm">@(_form.Id is null ? "Add host" : "Save changes")</button>
+                                <button type="button" class="btn btn-outline-secondary btn-sm" disabled="@_isChanging" @onclick="CloseForm">Cancel</button>
+                                <button type="submit" class="btn btn-primary btn-sm" disabled="@_isChanging">@(_form.Id is null ? "Add host" : "Save changes")</button>
                             </div>
                         }
                     </div>
@@ -287,6 +287,11 @@
     private bool _focusNameInput;
     private bool _pressedInsideForm;
     private bool _isDeletePending;
+
+    // Set while a save or a delete is out: the store waits for the summary to be read again before
+    // it answers, and the dialog stays on screen meanwhile, so this is what keeps a second click,
+    // Escape or a click away from acting on a form whose change is already under way.
+    private bool _isChanging;
     private string? _error;
     private readonly CancellationTokenSource _cts = new();
 
@@ -374,53 +379,52 @@
 
     private async Task SaveAsync()
     {
+        if (_isChanging)
+        {
+            return;
+        }
+
         if (!await IsUnlockedAsync())
         {
             _error = "HostPinger is locked. Unlock it to change hosts.";
             return;
         }
 
-        var name = _form.Name.Trim();
-        var address = _form.Address.Trim();
-        await using var db = await DbFactory.CreateDbContextAsync();
+        var form = _form;
+        HostChange change;
+        _isChanging = true;
         try
         {
-            if (_form.Id is int id)
-            {
-                var host = await db.Hosts.FindAsync(id);
-                if (host is null)
-                {
-                    _error = "This host no longer exists.";
-                    return;
-                }
-
-                host.Name = name;
-                host.Address = address;
-                host.IsEnabled = _form.IsEnabled;
-            }
-            else
-            {
-                db.Hosts.Add(new MonitoredHost
-                {
-                    Name = name,
-                    Address = address,
-                    IsEnabled = _form.IsEnabled,
-                    CreatedUtc = DateTime.UtcNow,
-                });
-            }
-
-            await db.SaveChangesAsync();
+            change = form.Id is int id
+                ? await Store.UpdateAsync(id, form.Name, form.Address, form.IsEnabled, _cts.Token)
+                : await Store.AddAsync(form.Name, form.Address, form.IsEnabled, _cts.Token);
         }
-        catch (DbUpdateException)
+        catch (IOException ex)
         {
-            _error = $"A host with address \"{address}\" already exists.";
+            _error = ex.Message;
             return;
         }
+        finally
+        {
+            _isChanging = false;
+        }
 
-        // Waited on rather than left to the summary's next turn, so the table the form closes onto
-        // already holds the change.
-        CloseForm();
-        Apply(await Summaries.RefreshAsync(_cts.Token));
+        switch (change.Outcome)
+        {
+            case HostChangeOutcome.NotFound:
+                _error = "This host no longer exists.";
+                return;
+            case HostChangeOutcome.AddressTaken:
+                // Trimmed, because that is the address the store compared.
+                _error = $"A host with address \"{form.Address.Trim()}\" already exists.";
+                return;
+        }
+
+        // The summary the store hands back was read after the change, so the table the form
+        // closes onto normally holds it already; when that read could not be made, the change
+        // arrives with the next one that can.
+        CloseFormOf(form);
+        Apply(change.Summary);
     }
 
     private async Task SetEnabledAsync(int id, bool isEnabled)
@@ -433,19 +437,22 @@
             return;
         }
 
-        await using var db = await DbFactory.CreateDbContextAsync();
-        await db.Hosts.Where(h => h.Id == id)
-            .ExecuteUpdateAsync(s => s.SetProperty(h => h.IsEnabled, isEnabled));
+        var summary = await Store.SetEnabledAsync(id, isEnabled, _cts.Token);
         if (_form.Id == id)
         {
             _form.IsEnabled = isEnabled;
         }
 
-        Apply(await Summaries.RefreshAsync(_cts.Token));
+        Apply(summary);
     }
 
     private async Task DeleteAsync(int id)
     {
+        if (_isChanging)
+        {
+            return;
+        }
+
         if (!await IsUnlockedAsync())
         {
             _isDeletePending = false;
@@ -453,10 +460,27 @@
             return;
         }
 
-        await using var db = await DbFactory.CreateDbContextAsync();
-        await db.Hosts.Where(h => h.Id == id).ExecuteDeleteAsync();
-        CloseForm();
-        Apply(await Summaries.RefreshAsync(_cts.Token));
+        var form = _form;
+        HostSummarySnapshot summary;
+        _isChanging = true;
+        try
+        {
+            summary = await Store.DeleteAsync(id, _cts.Token);
+        }
+        catch (IOException ex)
+        {
+            // The confirmation sits in the dialog, so the dialog is where the refusal goes.
+            _isDeletePending = false;
+            _error = ex.Message;
+            return;
+        }
+        finally
+        {
+            _isChanging = false;
+        }
+
+        CloseFormOf(form);
+        Apply(summary);
     }
 
     private void BeginAdd() => OpenForm(new HostForm());
@@ -487,9 +511,21 @@
         _isFormOpen = false;
     }
 
+    /// <summary>
+    /// Closes the form a change was made from, and only that one: by the time the change comes
+    /// back, the form on screen could be another.
+    /// </summary>
+    private void CloseFormOf(HostForm form)
+    {
+        if (ReferenceEquals(_form, form))
+        {
+            CloseForm();
+        }
+    }
+
     private void OnFormKeyDown(KeyboardEventArgs e)
     {
-        if (e.Key == "Escape")
+        if (e.Key == "Escape" && !_isChanging)
         {
             CloseForm();
         }
@@ -502,7 +538,7 @@
     /// </summary>
     private void OnOverlayClick()
     {
-        if (!_pressedInsideForm)
+        if (!_pressedInsideForm && !_isChanging)
         {
             CloseForm();
         }

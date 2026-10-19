@@ -3,7 +3,9 @@ namespace HostPinger.Core.Services
     /// <summary>
     /// Makes the ping rounds and the operations that copy or replace the database file take
     /// turns. A round holds it while it writes; a backup snapshot holds it so the copy is of a
-    /// settled file; a restore holds it so nothing writes to the file it is about to swap out.
+    /// settled file; a restore holds it so nothing writes to the file it is about to swap out; and
+    /// deleting a host holds it so that no round is between reading the hosts and saving their
+    /// attempts when one of them goes.
     /// </summary>
     /// <remarks>
     /// A gate rather than stopping the monitor service: stopping a <c>BackgroundService</c> is

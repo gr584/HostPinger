@@ -134,6 +134,10 @@ namespace HostPinger
             builder.Services.AddSingleton<HostSummaryCache>();
             builder.Services.AddHostedService(services => services.GetRequiredService<HostSummaryCache>());
 
+            // Adding, editing, pausing and deleting hosts, each handing back the summary read after
+            // it, so the page that made a change draws it next.
+            builder.Services.AddSingleton<HostStore>();
+
             var app = builder.Build();
 
             using (var scope = app.Services.CreateScope())

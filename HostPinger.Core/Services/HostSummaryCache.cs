@@ -31,9 +31,9 @@ namespace HostPinger.Core.Services
     /// </para>
     /// <para>
     /// RetryAttempts changes what the same rows mean, so a change to it is a reason to read again as
-    /// well. A page that has just written asks for a read and waits for it, see
-    /// <see cref="RefreshAsync"/>, so that what it draws next includes its own change rather than
-    /// catching up a second later.
+    /// well. <see cref="HostStore"/>, having changed a host, asks for a read and waits for it, see
+    /// <see cref="RefreshAsync"/>, so that the summary it hands the page that made the change
+    /// already includes it rather than catching up a second later.
     /// </para>
     /// <para>
     /// The connection holds the file open outside the pool, where a restore's ClearAllPools cannot
@@ -53,7 +53,7 @@ namespace HostPinger.Core.Services
         // The open connection is used by one thing at a time: a read, or suspending.
         private readonly SemaphoreSlim _connectionLock = new(1, 1);
 
-        // Released to wake the loop before its second is up, when a page asks for a read.
+        // Released to wake the loop before its second is up, when HostStore or Resume asks for a read.
         private readonly SemaphoreSlim _wake = new(0, 1);
 
         // Guards the pending request and the wake-up.
@@ -95,9 +95,11 @@ namespace HostPinger.Core.Services
         /// <summary>
         /// Has the loop look now rather than at its next second, and hands back the summary as it
         /// stands after the asking: read again if anything has been committed since the last read,
-        /// which a page's own write always has, since it was made on a connection other than this
-        /// one. A read that fails hands back the summary in hand instead, so the page has something
-        /// to draw rather than an error to pass up; the loop says what went wrong and tries again.
+        /// which a change HostStore has just made always has, since it was made on a connection
+        /// other than this one. A read that fails hands back the summary in hand instead, so the
+        /// caller has a summary to hand on rather than an error to pass up; the loop says what went
+        /// wrong and tries again. The loop is what answers, so while it is not running only
+        /// cancelling ends the wait.
         /// </summary>
         public Task<HostSummarySnapshot> RefreshAsync(CancellationToken cancellationToken = default)
         {

@@ -135,8 +135,8 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// What a page waits on after writing: a read taken after it asked, which is what makes the
-        /// table it draws next hold its own change.
+        /// What HostStore waits on after a change: a read taken after it asked, which is what makes
+        /// the summary it hands the page hold that change.
         /// </summary>
         [Test]
         public async Task RefreshAsync_HandsBackAReadTakenAfterItWasAsked()
@@ -153,8 +153,9 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// A read that fails leaves the summary in hand standing, and a page waiting on a read is
-        /// given that rather than an error to pass up; the failure goes to the loop, which logs it.
+        /// A read that fails leaves the summary in hand standing, and HostStore, waiting on a read
+        /// after a change, is given that rather than an error to pass up; the failure goes to the
+        /// loop, which logs it.
         /// </summary>
         [Test]
         public async Task PollAsync_KeepsTheSummaryInHandWhenAReadFails()
