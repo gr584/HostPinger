@@ -306,6 +306,183 @@ namespace HostPinger.Test
             });
         }
 
+        /// <summary>
+        /// Where an upload lands: beside the database, where the hardened services can write, under
+        /// a name of its own each time, and one the sweep at startup recognises as its own.
+        /// </summary>
+        [Test]
+        public void CreateRestoreTempPath_IsBesideTheDatabaseFreshEachTimeAndSweptAtStartup()
+        {
+            var first = _backup.CreateRestoreTempPath();
+            var second = _backup.CreateRestoreTempPath();
+            File.WriteAllText(first, "an upload cut off by a restart");
+
+            DatabaseBackup.DeleteLeftoverTempFiles(new PingerPaths(_dbPath));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(Path.GetDirectoryName(first), Is.EqualTo(_directory));
+                Assert.That(first, Is.Not.EqualTo(second));
+                Assert.That(File.Exists(first), Is.False, "swept as a leftover");
+            });
+        }
+
+        /// <summary>What the headroom checks compare against: the free space of the disk the database is on.</summary>
+        [Test]
+        public void AvailableFreeBytes_IsWhatTheDatabasesDiskHasFree()
+        {
+            var expected = new DriveInfo(_directory).AvailableFreeSpace;
+
+            Assert.That(_backup.AvailableFreeBytes(), Is.Positive.And.EqualTo(expected).Within(256L * 1024 * 1024));
+        }
+
+        /// <summary>
+        /// A snapshot that fails partway leaves nothing behind for a retried download to find.
+        /// The attempts table is damaged in the middle, so the copy has begun writing the snapshot
+        /// by the time it reaches the damage and gives up.
+        /// </summary>
+        [Test]
+        public async Task CreateSnapshot_LeavesNothingBehindWhenItFails()
+        {
+            await SeedHostWithAttemptsAsync(_options, "damaged.example", attempts: 5000);
+            var brokenPath = Path.Combine(_directory, "broken.db");
+            File.Copy(await _backup.CreateSnapshotAsync(), brokenPath);
+            await using (var connection = new SqliteConnection($"Data Source={brokenPath};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                var pageSize = Convert.ToInt64(await ScalarAsync(connection, "PRAGMA page_size;"));
+                var pages = Convert.ToInt64(await ScalarAsync(connection, "PRAGMA page_count;"));
+                await connection.CloseAsync();
+                await using var file = new FileStream(brokenPath, FileMode.Open, FileAccess.Write);
+                file.Position = pages / 2 * pageSize;
+                await file.WriteAsync(Enumerable.Repeat((byte)0x7F, (int)pageSize * 4).ToArray());
+            }
+
+            foreach (var leftover in Directory.EnumerateFiles(_directory, "hostpinger-backup-*"))
+            {
+                File.Delete(leftover);
+            }
+
+            var backup = new DatabaseBackup(
+                new PingerPaths(brokenPath),
+                new TestDb.Factory(OptionsFor(brokenPath)),
+                _store,
+                new MaintenanceGate(),
+                _summaries);
+
+            Assert.That(async () => await backup.CreateSnapshotAsync(), Throws.InstanceOf<SqliteException>());
+            Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-backup-*"), Is.Empty);
+        }
+
+        /// <summary>
+        /// A file that starts like a database and is damaged after its header is refused, whether
+        /// the damage is somewhere SQLite only notices when it checks — an index no longer matching
+        /// its table — or somewhere it cannot read past at all, the schema itself.
+        /// </summary>
+        [TestCase("index")]
+        [TestCase("schema")]
+        public async Task ValidateBackup_RejectsAFileDamagedAfterItsHeader(string damaged)
+        {
+            await SeedHostWithAttemptsAsync(_options, "damaged.example", attempts: 2000);
+            var copy = await _backup.CreateSnapshotAsync();
+            long offset;
+            int length;
+            await using (var connection = new SqliteConnection($"Data Source={copy};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                var pageSize = Convert.ToInt64(await ScalarAsync(connection, "PRAGMA page_size;"));
+                if (damaged == "schema")
+                {
+                    // The rest of the first page, after the file header, is where the schema lives.
+                    offset = 100;
+                    length = (int)pageSize - 100;
+                }
+                else
+                {
+                    // The tail of an index page holds its entries' keys; changing them leaves rows
+                    // the index no longer finds.
+                    var root = Convert.ToInt64(await ScalarAsync(
+                        connection, "SELECT rootpage FROM sqlite_master WHERE name = 'IX_PingAttempts_HostId_TimestampUtc';"));
+                    offset = (root - 1) * pageSize + pageSize - 64;
+                    length = 48;
+                }
+            }
+
+            await using (var file = new FileStream(copy, FileMode.Open, FileAccess.Write))
+            {
+                file.Position = offset;
+                await file.WriteAsync(Enumerable.Repeat((byte)0x7F, length).ToArray());
+            }
+
+            Assert.That(await _backup.ValidateBackupAsync(copy), Is.EqualTo("The file failed SQLite's integrity check."));
+        }
+
+        /// <summary>
+        /// Restoring onto an install that has no database yet moves the backup into place, with no
+        /// undo copy to keep, since there was nothing to undo.
+        /// </summary>
+        [Test]
+        public async Task Restore_IntoAFreshInstallMovesTheBackupIntoPlace()
+        {
+            await SeedHostWithAttemptsAsync(_options, "backed-up.example", attempts: 1);
+            var backupPath = await _backup.CreateSnapshotAsync();
+            SqliteConnection.ClearAllPools();
+            foreach (var suffix in new[] { "", "-wal", "-shm" })
+            {
+                File.Delete(_dbPath + suffix);
+            }
+
+            await _backup.RestoreAsync(backupPath);
+
+            await using var db = new HostPingerDbContext(_options);
+            Assert.Multiple(async () =>
+            {
+                Assert.That(await db.Hosts.Select(h => h.Address).ToListAsync(), Is.EqualTo(new[] { "backed-up.example" }));
+                Assert.That(File.Exists(_backup.PreRestorePath), Is.False);
+                Assert.That(File.Exists(backupPath), Is.False, "consumed by the move");
+            });
+        }
+
+        /// <summary>
+        /// A connection that holds the database open for the whole of the restore's wait stops the
+        /// restore before it replaces anything, with a reason the page can show, rather than a swap
+        /// that would let that connection delete the restored file's -wal as it closed.
+        /// </summary>
+        [Test]
+        public async Task Restore_RefusesWhileTheRetiredFileStaysInUse()
+        {
+            await SeedHostWithAttemptsAsync(_options, "kept.example", attempts: 1);
+            var backupPath = await _backup.CreateSnapshotAsync();
+            await SeedHostWithAttemptsAsync(_options, "since.example", attempts: 1);
+            var backup = new DatabaseBackup(
+                new PingerPaths(_dbPath),
+                new TestDb.Factory(_options),
+                _store,
+                new MaintenanceGate(),
+                _summaries)
+            {
+                BusyTimeoutSeconds = 1,
+            };
+
+            await using (var holding = new SqliteConnection($"Data Source={_dbPath};Pooling=False"))
+            {
+                await holding.OpenAsync();
+                await ScalarAsync(holding, "PRAGMA journal_mode = WAL;");
+
+                var refusal = Assert.ThrowsAsync<IOException>(() => backup.RestoreAsync(backupPath));
+                Assert.That(refusal!.Message, Is.EqualTo("The database stayed in use, so nothing was replaced. Try the restore again."));
+            }
+
+            SqliteConnection.ClearAllPools();
+            await using var db = new HostPingerDbContext(_options);
+            Assert.Multiple(async () =>
+            {
+                Assert.That(await db.Hosts.CountAsync(h => h.Address == "since.example"), Is.EqualTo(1), "the database was not replaced");
+                Assert.That(File.Exists(backupPath), Is.True, "the backup was not consumed");
+                Assert.That(File.Exists(backup.PreRestorePath), Is.False);
+            });
+        }
+
         private static DbContextOptions<HostPingerDbContext> OptionsFor(string path) =>
             new DbContextOptionsBuilder<HostPingerDbContext>()
                 .UseSqlite($"Data Source={path}")

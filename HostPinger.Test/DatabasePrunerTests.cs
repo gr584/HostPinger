@@ -224,5 +224,22 @@ namespace HostPinger.Test
                 db.ChangeTracker.Clear();
             }
         }
+
+        /// <summary>
+        /// A limit smaller than an empty database can ever be is met by deleting what there is and
+        /// then stopping, rather than going round for ever finding nothing more to delete.
+        /// </summary>
+        [Test]
+        public async Task EnforceSizeLimit_StopsWhenThereIsNothingLeftToDelete()
+        {
+            await using var db = new HostPingerDbContext(_options);
+
+            // Sent off, because SQLite does its work on the calling thread: a pruner going round for
+            // ever would otherwise never hand back a task for the bound to apply to.
+            var deleted = await Task.Run(() => new DatabasePruner().EnforceSizeLimitAsync(db, maxSizeBytes: 1))
+                .WaitAsync(TimeSpan.FromSeconds(30));
+
+            Assert.That(deleted, Is.Zero);
+        }
     }
 }

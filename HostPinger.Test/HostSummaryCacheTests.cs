@@ -3,6 +3,7 @@ using HostPinger.Core.Options;
 using HostPinger.Core.Services;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace HostPinger.Test
@@ -244,6 +245,81 @@ namespace HostPinger.Test
             finally
             {
                 await _cache.StopAsync(CancellationToken.None);
+            }
+        }
+
+        /// <summary>
+        /// A run of failed reads is reported once rather than once a second for as long as it
+        /// lasts, and its end is reported too, so that the log says when the summary was stale.
+        /// The table is renamed away and back, which is a read failing until it is put right.
+        /// </summary>
+        [Test]
+        public async Task Loop_ReportsARunOfFailuresOnceAndSaysWhenReadingWorksAgain()
+        {
+            var logger = new TestLogger<HostSummaryCache>();
+            var store = new UserSettingsStore(
+                new TestDb.Factory(_options),
+                _pinger,
+                new TestOptionsMonitor<SecurityOptions>(new SecurityOptions()));
+            using var cache = new HostSummaryCache(new TestDb.Factory(_options), store, logger);
+            await cache.LoadAsync();
+
+            await cache.StartAsync(CancellationToken.None);
+            try
+            {
+                await RenameAttemptsAsync("PingAttempts", "PingAttemptsAway");
+                await WaitUntilAsync(() => logger.Entries.Any(e => e.Level == LogLevel.Warning));
+
+                // Long enough for several more turns of the loop, each of which fails.
+                await Task.Delay(TimeSpan.FromSeconds(2.5));
+                await RenameAttemptsAsync("PingAttemptsAway", "PingAttempts");
+                await WaitUntilAsync(() => logger.Entries.Any(e => e.Level == LogLevel.Information));
+
+                // And several more after it, each reading fine, none of which reports it again.
+                await Task.Delay(TimeSpan.FromSeconds(2.5));
+            }
+            finally
+            {
+                await cache.StopAsync(CancellationToken.None);
+            }
+
+            Assert.That(
+                logger.Entries.Select(e => e.Level),
+                Is.EqualTo(new[] { LogLevel.Warning, LogLevel.Information }));
+            Assert.That(logger.Entries[0].Exception, Is.InstanceOf<SqliteException>());
+        }
+
+        /// <summary>
+        /// A turn of the loop that is cancelled — the service stopping — cancels the wait of a page
+        /// that asked for a read, rather than leaving it waiting on a loop that has gone.
+        /// </summary>
+        [Test]
+        public async Task PollAsync_CancelledWhileAPageWaits_CancelsTheWait()
+        {
+            await _cache.LoadAsync();
+            var refresh = _cache.RefreshAsync();
+
+            Assert.That(
+                async () => await _cache.PollAsync(new CancellationToken(canceled: true)),
+                Throws.InstanceOf<OperationCanceledException>());
+            Assert.That(async () => await refresh.WaitAsync(Patience), Throws.InstanceOf<OperationCanceledException>());
+        }
+
+        private async Task RenameAttemptsAsync(string from, string to)
+        {
+            await using var db = new HostPingerDbContext(_options);
+#pragma warning disable EF1002 // Two fixed table names of this test's own, not input.
+            await db.Database.ExecuteSqlRawAsync($"ALTER TABLE \"{from}\" RENAME TO \"{to}\";");
+#pragma warning restore EF1002
+        }
+
+        private static async Task WaitUntilAsync(Func<bool> condition)
+        {
+            var deadline = DateTime.UtcNow + Patience;
+            while (!condition())
+            {
+                Assert.That(DateTime.UtcNow, Is.LessThan(deadline), "gave up waiting");
+                await Task.Delay(25);
             }
         }
 

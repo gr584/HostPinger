@@ -42,6 +42,30 @@ namespace HostPinger.Test
         /// a stretch nothing was recorded over, and a stretch that was recorded and never answered.
         /// Those last two look identical in a row count and must not look identical on a chart.
         /// </summary>
+        /// <summary>
+        /// A range that ends where it starts, or before, and a chart with no room for a point, are
+        /// mistakes in the caller rather than empty charts, and are said to be.
+        /// </summary>
+        [Test]
+        public async Task LoadAsync_RefusesARangeThatIsNoRangeAndAChartWithNoPoints()
+        {
+            await using var db = new HostPingerDbContext(_options);
+            var hostId = await SeedAsync(db);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(
+                    async () => await ChartSeries.LoadAsync(db, hostId, BaseTime, BaseTime, 20),
+                    Throws.ArgumentException.With.Property(nameof(ArgumentException.ParamName)).EqualTo("rangeEndUtc"));
+                Assert.That(
+                    async () => await ChartSeries.LoadAsync(db, hostId, BaseTime.AddSeconds(10), BaseTime, 20),
+                    Throws.ArgumentException.With.Property(nameof(ArgumentException.ParamName)).EqualTo("rangeEndUtc"));
+                Assert.That(
+                    async () => await ChartSeries.LoadAsync(db, hostId, BaseTime, BaseTime.AddSeconds(10), 0),
+                    Throws.InstanceOf<ArgumentOutOfRangeException>());
+            });
+        }
+
         [Test]
         public async Task LoadAsync_ReducesExactlyAsTheInMemoryDownsamplerDoes()
         {

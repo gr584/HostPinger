@@ -3,6 +3,7 @@ using HostPinger.Core.Options;
 using HostPinger.Core.Services;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace HostPinger.Test
@@ -359,10 +360,100 @@ namespace HostPinger.Test
             Assert.That(await round, Is.Zero, "released, the round runs to its usual end");
         }
 
+        /// <summary>
+        /// A round that fails is logged and the loop goes on: the next round runs on time and
+        /// records as usual. A loop that let the failure out would stop monitoring for good on one
+        /// bad round — a database locked past its wait, a resolver throwing.
+        /// </summary>
+        [Test]
+        public async Task ExecuteAsync_LogsAFailedRoundAndGoesOnToTheNext()
+        {
+            await using (var db = new HostPingerDbContext(_options))
+            {
+                db.Hosts.Add(new MonitoredHost { Name = "up", Address = "up.example" });
+                await db.SaveChangesAsync();
+            }
+
+            var sender = new FakePingSender { FailFirstCalls = 1, Results = { ["up.example"] = PingResult.Answered(5) } };
+            var logger = new TestLogger<PingMonitorService>();
+            var service = CreateService(sender, new PingerOptions { IntervalSeconds = 1 }, logger: logger);
+
+            await service.StartAsync(CancellationToken.None);
+            try
+            {
+                await WaitUntilAsync(async () =>
+                {
+                    await using var db = new HostPingerDbContext(_options);
+                    return await db.PingAttempts.AnyAsync();
+                });
+            }
+            finally
+            {
+                await service.StopAsync(CancellationToken.None);
+            }
+
+            var failures = logger.Entries.Where(e => e.Level == LogLevel.Error).ToList();
+            Assert.Multiple(() =>
+            {
+                Assert.That(failures, Has.Count.EqualTo(1));
+                Assert.That(failures[0].Exception, Is.InstanceOf<InvalidOperationException>());
+                Assert.That(sender.CallCount, Is.AtLeast(2), "the round after the failure ran");
+            });
+        }
+
+        /// <summary>
+        /// An interval saved on the Configuration page while the loop runs is taken up from the
+        /// round after next: here a one-second loop is told to wait a day, and the rounds stop.
+        /// </summary>
+        [Test]
+        public async Task ExecuteAsync_TakesUpAnIntervalChangedWhileItRuns()
+        {
+            await using (var db = new HostPingerDbContext(_options))
+            {
+                db.Hosts.Add(new MonitoredHost { Name = "up", Address = "up.example" });
+                await db.SaveChangesAsync();
+            }
+
+            var sender = new FakePingSender { Results = { ["up.example"] = PingResult.Answered(5) } };
+            var pinger = new TestOptionsMonitor<PingerOptions>(new PingerOptions { IntervalSeconds = 1 });
+            var service = CreateService(sender, pinger: pinger);
+
+            await service.StartAsync(CancellationToken.None);
+            try
+            {
+                await WaitUntilAsync(() => Task.FromResult(sender.CallCount >= 2));
+                pinger.CurrentValue = new PingerOptions { IntervalSeconds = 86_400 };
+
+                // The tick already counting down at the old period still comes, and the round it
+                // starts is the one that reads the new interval.
+                await Task.Delay(TimeSpan.FromSeconds(1.5));
+                var settled = sender.CallCount;
+                await Task.Delay(TimeSpan.FromSeconds(2.5));
+
+                Assert.That(sender.CallCount, Is.EqualTo(settled), "no round at the old one-second interval");
+            }
+            finally
+            {
+                await service.StopAsync(CancellationToken.None);
+            }
+        }
+
+        private static async Task WaitUntilAsync(Func<Task<bool>> condition)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(30);
+            while (!await condition())
+            {
+                Assert.That(DateTime.UtcNow, Is.LessThan(deadline), "gave up waiting");
+                await Task.Delay(25);
+            }
+        }
+
         private PingMonitorService CreateService(
             IPingSender sender,
             PingerOptions? options = null,
-            MaintenanceGate? maintenanceGate = null)
+            MaintenanceGate? maintenanceGate = null,
+            TestOptionsMonitor<PingerOptions>? pinger = null,
+            ILogger<PingMonitorService>? logger = null)
         {
             // The settings arrive as configured defaults under a store with no rows, which is the
             // state of a fresh install.
@@ -371,11 +462,11 @@ namespace HostPinger.Test
                 sender,
                 new UserSettingsStore(
                     new TestDb.Factory(_options),
-                    new TestOptionsMonitor<PingerOptions>(options ?? new PingerOptions()),
+                    pinger ?? new TestOptionsMonitor<PingerOptions>(options ?? new PingerOptions()),
                     new TestOptionsMonitor<SecurityOptions>(new SecurityOptions())),
                 new DatabasePruner(),
                 maintenanceGate ?? new MaintenanceGate(),
-                NullLogger<PingMonitorService>.Instance);
+                logger ?? NullLogger<PingMonitorService>.Instance);
         }
 
         private sealed class FakePingSender : IPingSender
@@ -391,6 +482,9 @@ namespace HostPinger.Test
 
             /// <summary>How long each ping takes, which is what gives a round its duration.</summary>
             public TimeSpan Delay { get; init; }
+
+            /// <summary>How many of the first pings throw, standing in for a round that fails.</summary>
+            public int FailFirstCalls { get; init; }
 
             /// <summary>Safe to read while the monitor loop is still pinging.</summary>
             public int CallCount
@@ -410,11 +504,18 @@ namespace HostPinger.Test
                 int resolveTimeoutMilliseconds,
                 CancellationToken cancellationToken = default)
             {
+                bool fail;
                 lock (Calls)
                 {
                     Calls.Add(address);
                     Timeouts.Add(timeoutMilliseconds);
                     ResolveTimeouts.Add(resolveTimeoutMilliseconds);
+                    fail = Calls.Count <= FailFirstCalls;
+                }
+
+                if (fail)
+                {
+                    throw new InvalidOperationException("A round that fails.");
                 }
 
                 if (Delay > TimeSpan.Zero)

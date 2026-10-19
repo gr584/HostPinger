@@ -31,6 +31,13 @@ namespace HostPinger.Core.Services
         private static readonly byte[] SqliteHeader = "SQLite format 3\0"u8.ToArray();
 
         /// <summary>
+        /// How long a restore waits for the file it is retiring to be let go of before it gives up:
+        /// the provider's own default. Settable for the tests, which would otherwise spend half a
+        /// minute holding a file open to see the restore refuse.
+        /// </summary>
+        internal int BusyTimeoutSeconds { get; init; } = 30;
+
+        /// <summary>
         /// Where the previous database goes when a restore replaces it: the undo, kept until the
         /// next restore overwrites it. Deliberately not the live file name plus a numbered scheme —
         /// one undo that is always current beats a directory that fills with stale ones.
@@ -186,7 +193,7 @@ namespace HostPinger.Core.Services
             // A fresh install has no file there to take out of anything.
             if (File.Exists(paths.DatabasePath))
             {
-                await LeaveWalAsync(paths.DatabasePath, cancellationToken);
+                await LeaveWalAsync(paths.DatabasePath, BusyTimeoutSeconds, cancellationToken);
             }
 
             // A journal left beside the database belongs to the file being retired. SQLite would
@@ -196,7 +203,7 @@ namespace HostPinger.Core.Services
             File.Delete(paths.DatabasePath + "-wal");
             File.Delete(paths.DatabasePath + "-shm");
 
-            await EnterWalAsync(candidatePath, cancellationToken);
+            await EnterWalAsync(candidatePath, BusyTimeoutSeconds, cancellationToken);
             await SwapIntoPlaceAsync(candidatePath, cancellationToken);
 
             // The restored file is somebody's old database: migrate it up and re-establish
@@ -221,11 +228,11 @@ namespace HostPinger.Core.Services
         /// -wal and -shm beside it by name, and after the swap those names are the restored file's.
         /// A file already in rollback-journal mode has neither, and is left as it is.
         /// </summary>
-        private static async Task LeaveWalAsync(string databasePath, CancellationToken cancellationToken)
+        private static async Task LeaveWalAsync(string databasePath, int busyTimeoutSeconds, CancellationToken cancellationToken)
         {
             try
             {
-                await SetJournalModeAsync(databasePath, "DELETE", cancellationToken);
+                await SetJournalModeAsync(databasePath, "DELETE", busyTimeoutSeconds, cancellationToken);
             }
             catch (SqliteException ex) when (ex.SqliteErrorCode is 5 or 6)
             {
@@ -245,20 +252,21 @@ namespace HostPinger.Core.Services
         /// Where the file system cannot do WAL, SQLite says so by keeping the old mode, and the
         /// restore goes on in it, as a new database does.
         /// </summary>
-        private static Task EnterWalAsync(string candidatePath, CancellationToken cancellationToken) =>
-            SetJournalModeAsync(candidatePath, "WAL", cancellationToken);
+        private static Task EnterWalAsync(string candidatePath, int busyTimeoutSeconds, CancellationToken cancellationToken) =>
+            SetJournalModeAsync(candidatePath, "WAL", busyTimeoutSeconds, cancellationToken);
 
         /// <summary>
         /// Sets a file's journal mode on a connection of its own, outside the pool so that it is
         /// closed when this returns rather than kept, holding the file, across the swap.
         /// </summary>
-        private static async Task SetJournalModeAsync(string path, string mode, CancellationToken cancellationToken)
+        private static async Task SetJournalModeAsync(string path, string mode, int busyTimeoutSeconds, CancellationToken cancellationToken)
         {
             var connectionString = new SqliteConnectionStringBuilder
             {
                 DataSource = path,
                 Mode = SqliteOpenMode.ReadWrite,
                 Pooling = false,
+                DefaultTimeout = busyTimeoutSeconds,
             }.ToString();
 
             await using var connection = new SqliteConnection(connectionString);

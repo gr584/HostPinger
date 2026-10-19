@@ -338,14 +338,14 @@ namespace HostPinger.Test
                     "CREATE TRIGGER refuse_update BEFORE UPDATE ON Hosts BEGIN SELECT RAISE(ABORT, 'refused by the test'); END;");
             }
 
-            var log = new ListLogger();
+            var log = new TestLogger<HostStore>();
             var store = new HostStore(new TestDb.Factory(_options), _summaries, _gate, log, new StubClock(Now));
 
             var failure = Assert.ThrowsAsync<IOException>(() => MakeWith(store, change, id).WaitAsync(Patience));
 
             Assert.That(failure!.Message, Is.EqualTo("The change was not saved: SQLite Error 19: 'refused by the test'."));
             Assert.That(
-                log.Entries,
+                log.Entries.Select(e => (e.Level, e.Exception)),
                 Is.EqualTo(new[] { (LogLevel.Warning, (Exception?)failure.InnerException) }),
                 "logged, with the database's own exception, since the page only shows the message");
             Assert.That((await HostsAsync()).Select(h => (h.Name, h.Address)), Is.EqualTo(new[] { ("alpha", "alpha.example") }));
@@ -529,20 +529,6 @@ namespace HostPinger.Test
         {
             await using var db = new HostPingerDbContext(_options);
             return await db.Hosts.AsNoTracking().OrderBy(h => h.Id).ToListAsync();
-        }
-
-        /// <summary>What the store logs, as level and exception.</summary>
-        private sealed class ListLogger : ILogger<HostStore>
-        {
-            public List<(LogLevel Level, Exception? Exception)> Entries { get; } = [];
-
-            public IDisposable? BeginScope<TState>(TState state)
-                where TState : notnull => null;
-
-            public bool IsEnabled(LogLevel logLevel) => true;
-
-            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
-                Entries.Add((logLevel, exception));
         }
 
         private sealed class StubClock(DateTimeOffset now) : TimeProvider
