@@ -1,8 +1,10 @@
+using System.Data.Common;
 using HostPinger.Core.Data;
 using HostPinger.Core.Options;
 using HostPinger.Core.Services;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -339,6 +341,175 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// A host deleted while the round is pinging it costs the round that host's attempt and
+        /// nothing more. The round read its hosts before the pings, which take seconds, and the
+        /// Hosts page does not wait for it to finish; saving an attempt for a host that has gone
+        /// would have the foreign key refuse the whole save, and every other host's ping with it.
+        /// </summary>
+        [Test]
+        public async Task RunRound_AHostDeletedWhileItIsPinged_LosesOnlyItsOwnAttempt()
+        {
+            int keptId;
+            await using (var db = new HostPingerDbContext(_options))
+            {
+                var kept = new MonitoredHost { Name = "kept", Address = "kept.example" };
+                var deleted = new MonitoredHost { Name = "deleted", Address = "deleted.example" };
+                db.Hosts.AddRange(kept, deleted);
+                await db.SaveChangesAsync();
+                keptId = kept.Id;
+            }
+
+            var sender = new FakePingSender
+            {
+                Results = { ["kept.example"] = PingResult.Answered(3), ["deleted.example"] = PingResult.Answered(4) },
+                WhilePinging = async address =>
+                {
+                    if (address == "deleted.example")
+                    {
+                        await using var db = new HostPingerDbContext(_options);
+                        await db.Hosts.Where(h => h.Address == address).ExecuteDeleteAsync();
+                    }
+                },
+            };
+
+            var recorded = await CreateService(sender).RunRoundAsync();
+
+            await using var verify = new HostPingerDbContext(_options);
+            Assert.Multiple(async () =>
+            {
+                Assert.That(recorded, Is.EqualTo(1));
+                Assert.That(await verify.PingAttempts.Select(a => a.HostId).ToListAsync(), Is.EqualTo(new[] { keptId }));
+            });
+        }
+
+        /// <summary>
+        /// A host paused while the round is pinging it keeps the attempt it was pinged for: it was
+        /// asked, and what it answered is history like any other attempt. Only a host that has gone
+        /// has nothing for its attempt to point at.
+        /// </summary>
+        [Test]
+        public async Task RunRound_AHostPausedWhileItIsPinged_KeepsItsAttempt()
+        {
+            int pausedId;
+            await using (var db = new HostPingerDbContext(_options))
+            {
+                var paused = new MonitoredHost { Name = "paused", Address = "paused.example" };
+                db.Hosts.Add(paused);
+                await db.SaveChangesAsync();
+                pausedId = paused.Id;
+            }
+
+            var sender = new FakePingSender
+            {
+                Results = { ["paused.example"] = PingResult.Answered(4) },
+                WhilePinging = async address =>
+                {
+                    await using var db = new HostPingerDbContext(_options);
+                    await db.Hosts.Where(h => h.Address == address)
+                        .ExecuteUpdateAsync(s => s.SetProperty(h => h.IsEnabled, false));
+                },
+            };
+
+            var recorded = await CreateService(sender).RunRoundAsync();
+
+            await using var verify = new HostPingerDbContext(_options);
+            Assert.Multiple(async () =>
+            {
+                Assert.That(recorded, Is.EqualTo(1));
+                Assert.That(await verify.PingAttempts.Select(a => a.HostId).ToListAsync(), Is.EqualTo(new[] { pausedId }));
+            });
+        }
+
+        /// <summary>
+        /// The round asks which hosts are still there under the same write lock it saves with, so
+        /// that a delete coming between the asking and the saving waits for the round rather than
+        /// landing in between, where it would have the foreign key refuse the save just the same.
+        /// The delete is tried the moment the answer comes back, from a connection of its own that
+        /// gives up after a second. In WAL mode, the one a database this application creates starts
+        /// in, a read keeps no writer out, so only the round's write lock can: asked outside the
+        /// transaction, or inside one that takes the lock only when it first writes, the delete
+        /// lands and the save fails.
+        /// </summary>
+        [Test]
+        public async Task RunRound_AsksWhichHostsRemainUnderTheLockItSavesWith()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), $"hostpinger-round-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(directory);
+            try
+            {
+                var path = Path.Combine(directory, "hostpinger.db");
+                var options = new DbContextOptionsBuilder<HostPingerDbContext>().UseSqlite($"Data Source={path}").Options;
+                int keptId, deletedId;
+                await using (var db = new HostPingerDbContext(options))
+                {
+                    await db.Database.EnsureCreatedAsync();
+                    await db.Database.ExecuteSqlRawAsync("PRAGMA journal_mode = WAL;");
+                    var kept = new MonitoredHost { Name = "kept", Address = "kept.example" };
+                    var deleted = new MonitoredHost { Name = "deleted", Address = "deleted.example" };
+                    db.Hosts.AddRange(kept, deleted);
+                    await db.SaveChangesAsync();
+                    (keptId, deletedId) = (kept.Id, deleted.Id);
+                }
+
+                // Armed by the pings, so the read it goes off after is the first one past them: the
+                // round's question about which hosts remain, not its reading of the hosts to ping.
+                var armed = false;
+                bool? refused = null;
+                var afterRead = new AfterReadInterceptor(() =>
+                {
+                    if (!armed)
+                    {
+                        return;
+                    }
+
+                    armed = false;
+                    using var other = new SqliteConnection($"Data Source={path};Pooling=False;Default Timeout=1");
+                    other.Open();
+                    using var delete = other.CreateCommand();
+                    delete.CommandText = $"DELETE FROM Hosts WHERE Id = {deletedId};";
+                    try
+                    {
+                        delete.ExecuteNonQuery();
+                        refused = false;
+                    }
+                    catch (SqliteException ex) when (ex.SqliteErrorCode == 5)
+                    {
+                        refused = true;
+                    }
+                });
+                var roundOptions = new DbContextOptionsBuilder<HostPingerDbContext>()
+                    .UseSqlite($"Data Source={path}")
+                    .AddInterceptors(afterRead)
+                    .Options;
+                var sender = new FakePingSender
+                {
+                    WhilePinging = _ =>
+                    {
+                        armed = true;
+                        return Task.CompletedTask;
+                    },
+                };
+
+                var recorded = await CreateService(sender, dbFactory: new TestDb.Factory(roundOptions)).RunRoundAsync();
+
+                await using var verify = new HostPingerDbContext(options);
+                Assert.Multiple(async () =>
+                {
+                    Assert.That(refused, Is.True, "the delete was kept out until the round had saved");
+                    Assert.That(recorded, Is.EqualTo(2));
+                    Assert.That(
+                        await verify.PingAttempts.Select(a => a.HostId).OrderBy(id => id).ToListAsync(),
+                        Is.EqualTo(new[] { keptId, deletedId }));
+                });
+            }
+            finally
+            {
+                SqliteConnection.ClearAllPools();
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        /// <summary>
         /// A round must not write while a backup or restore holds the maintenance gate — that is
         /// the whole contract that lets a restore swap the file under a running monitor.
         /// </summary>
@@ -381,23 +552,24 @@ namespace HostPinger.Test
             await service.StartAsync(CancellationToken.None);
             try
             {
-                await WaitUntilAsync(async () =>
-                {
-                    await using var db = new HostPingerDbContext(_options);
-                    return await db.PingAttempts.AnyAsync();
-                });
+                // Waited on through the pinger rather than the database, whose one in-memory
+                // connection the loop is using: a query from here could land inside a round's
+                // transaction. A ping is counted as it starts, so the round after the failure has
+                // certainly been written once the one after that has begun.
+                await WaitUntilAsync(() => Task.FromResult(sender.CallCount >= 3));
             }
             finally
             {
                 await service.StopAsync(CancellationToken.None);
             }
 
+            await using var verify = new HostPingerDbContext(_options);
             var failures = logger.Entries.Where(e => e.Level == LogLevel.Error).ToList();
-            Assert.Multiple(() =>
+            Assert.Multiple(async () =>
             {
                 Assert.That(failures, Has.Count.EqualTo(1));
                 Assert.That(failures[0].Exception, Is.InstanceOf<InvalidOperationException>());
-                Assert.That(sender.CallCount, Is.AtLeast(2), "the round after the failure ran");
+                Assert.That(await verify.PingAttempts.AnyAsync(), Is.True, "the round after the failure recorded");
             });
         }
 
@@ -453,12 +625,13 @@ namespace HostPinger.Test
             PingerOptions? options = null,
             MaintenanceGate? maintenanceGate = null,
             TestOptionsMonitor<PingerOptions>? pinger = null,
-            ILogger<PingMonitorService>? logger = null)
+            ILogger<PingMonitorService>? logger = null,
+            IDbContextFactory<HostPingerDbContext>? dbFactory = null)
         {
             // The settings arrive as configured defaults under a store with no rows, which is the
             // state of a fresh install.
             return new PingMonitorService(
-                new TestDb.Factory(_options),
+                dbFactory ?? new TestDb.Factory(_options),
                 sender,
                 new UserSettingsStore(
                     new TestDb.Factory(_options),
@@ -467,6 +640,32 @@ namespace HostPinger.Test
                 new DatabasePruner(),
                 maintenanceGate ?? new MaintenanceGate(),
                 logger ?? NullLogger<PingMonitorService>.Instance);
+        }
+
+        /// <summary>
+        /// Runs <paramref name="afterRead"/> each time a query's reader comes back, before its rows
+        /// are read: the moment between a question and whatever the round does with the answer.
+        /// </summary>
+        private sealed class AfterReadInterceptor(Action afterRead) : DbCommandInterceptor
+        {
+            public override DbDataReader ReaderExecuted(
+                DbCommand command,
+                CommandExecutedEventData eventData,
+                DbDataReader result)
+            {
+                afterRead();
+                return result;
+            }
+
+            public override ValueTask<DbDataReader> ReaderExecutedAsync(
+                DbCommand command,
+                CommandExecutedEventData eventData,
+                DbDataReader result,
+                CancellationToken cancellationToken = default)
+            {
+                afterRead();
+                return ValueTask.FromResult(result);
+            }
         }
 
         private sealed class FakePingSender : IPingSender
@@ -485,6 +684,12 @@ namespace HostPinger.Test
 
             /// <summary>How many of the first pings throw, standing in for a round that fails.</summary>
             public int FailFirstCalls { get; init; }
+
+            /// <summary>
+            /// Run with each address while it is being pinged, after the round has read its hosts
+            /// and before it saves anything: what happens to the database during a round.
+            /// </summary>
+            public Func<string, Task>? WhilePinging { get; init; }
 
             /// <summary>Safe to read while the monitor loop is still pinging.</summary>
             public int CallCount
@@ -521,6 +726,11 @@ namespace HostPinger.Test
                 if (Delay > TimeSpan.Zero)
                 {
                     await Task.Delay(Delay, cancellationToken);
+                }
+
+                if (WhilePinging is { } whilePinging)
+                {
+                    await whilePinging(address);
                 }
 
                 return Results.GetValueOrDefault(address, PingResult.Unanswered);

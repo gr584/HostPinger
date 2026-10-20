@@ -31,10 +31,15 @@ namespace HostPinger.Core.Services
     /// of a save as the address being taken.
     /// </para>
     /// <para>
-    /// A delete takes turns with the ping rounds through <see cref="MaintenanceGate"/>. A round
-    /// reads the hosts, pings them for seconds and then saves an attempt for each in one go; a host
-    /// deleted in between would leave one of those attempts pointing at nothing, the foreign key
-    /// would refuse the whole save, and the round would lose every host's ping.
+    /// A delete does not wait for a ping round, although a round reads the hosts, pings them for
+    /// seconds and only then saves an attempt for each: the round asks which of them are still
+    /// there as it saves, and leaves out the attempt of one deleted meanwhile, see
+    /// <see cref="PingMonitorService"/>. Taking turns with the rounds through
+    /// <see cref="MaintenanceGate"/> instead had a confirmed delete wait out the slowest ping of
+    /// the round under way, which with a host down is the whole ping timeout, or a backup's whole
+    /// snapshot, with the dialog on screen and nothing to say why; the page leaving meanwhile
+    /// dropped it, and a restore finishing meanwhile had it delete by an id read from the file
+    /// that restore had just retired.
     /// </para>
     /// <para>
     /// Each change runs on the thread that asks for it, for as long as its statement takes:
@@ -45,7 +50,6 @@ namespace HostPinger.Core.Services
     public sealed class HostStore(
         IDbContextFactory<HostPingerDbContext> dbFactory,
         HostSummaryCache summaries,
-        MaintenanceGate maintenanceGate,
         ILogger<HostStore> logger,
         TimeProvider? timeProvider = null)
     {
@@ -169,13 +173,12 @@ namespace HostPinger.Core.Services
         }
 
         /// <summary>
-        /// Deletes a host and, through the cascade on its attempts, its whole ping history, once any
-        /// ping round, backup or restore under way has finished. A host that is not there any more
-        /// is already gone.
+        /// Deletes a host and, through the cascade on its attempts, its whole ping history. A host
+        /// that is not there any more is already gone. A ping round under way is not waited for;
+        /// see the remarks on this class.
         /// </summary>
         public async Task<HostSummarySnapshot> DeleteAsync(int id, CancellationToken cancellationToken = default)
         {
-            using (await maintenanceGate.AcquireAsync(cancellationToken))
             await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken))
             {
                 try

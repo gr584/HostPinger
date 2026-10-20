@@ -3,6 +3,7 @@ using HostPinger.Core.Options;
 using HostPinger.Core.Services;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -27,8 +28,8 @@ namespace HostPinger.Test
         private string _directory = null!;
         private string _databasePath = null!;
         private DbContextOptions<HostPingerDbContext> _options = null!;
+        private UserSettingsStore _settings = null!;
         private HostSummaryCache _summaries = null!;
-        private MaintenanceGate _gate = null!;
         private HostStore _store = null!;
 
         /// <summary>The ways a host is changed, for what holds of all of them.</summary>
@@ -52,13 +53,12 @@ namespace HostPinger.Test
                 await db.Database.EnsureCreatedAsync();
             }
 
-            var settings = new UserSettingsStore(
+            _settings = new UserSettingsStore(
                 new TestDb.Factory(_options),
                 new TestOptionsMonitor<PingerOptions>(new PingerOptions { RetryAttempts = 3 }),
                 new TestOptionsMonitor<SecurityOptions>(new SecurityOptions()));
-            _summaries = new HostSummaryCache(new TestDb.Factory(_options), settings, NullLogger<HostSummaryCache>.Instance);
+            _summaries = new HostSummaryCache(new TestDb.Factory(_options), _settings, NullLogger<HostSummaryCache>.Instance);
             await _summaries.LoadAsync();
-            _gate = new MaintenanceGate();
             _store = Store(_options);
         }
 
@@ -339,7 +339,7 @@ namespace HostPinger.Test
             }
 
             var log = new TestLogger<HostStore>();
-            var store = new HostStore(new TestDb.Factory(_options), _summaries, _gate, log, new StubClock(Now));
+            var store = new HostStore(new TestDb.Factory(_options), _summaries, log, new StubClock(Now));
 
             var failure = Assert.ThrowsAsync<IOException>(() => MakeWith(store, change, id).WaitAsync(Patience));
 
@@ -403,25 +403,53 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// A delete waits for a ping round, backup or restore holding the maintenance gate. A round
-        /// reads the hosts and saves an attempt for each at the end, so a host deleted in between
-        /// would have the foreign key refuse the round's whole save.
+        /// A delete does not wait for a ping round, which holds the maintenance gate from reading
+        /// the hosts until it has saved what it found: with a host down, that is the whole ping
+        /// timeout. A delete that waited it out did so with its dialog on screen and nothing to say
+        /// why, and was dropped if the page went away meanwhile. The round, which read the host
+        /// before it was deleted, still records the host that is left.
         /// </summary>
+        /// <remarks>
+        /// The store and the round come from one container, as in the application, so that a store
+        /// which took turns with the rounds again would be handed the very gate this round holds.
+        /// </remarks>
         [Test]
-        public async Task DeleteAsync_WaitsForTheMaintenanceGate()
+        public async Task DeleteAsync_DoesNotWaitForAPingRoundUnderWay()
         {
-            var id = await AddHostAsync("alpha", "alpha.example");
-            var round = await _gate.AcquireAsync();
+            var deletedId = await AddHostAsync("alpha", "alpha.example");
+            var keptId = await AddHostAsync("bravo", "bravo.example");
+            var pinger = new HeldPingSender();
+            await using var services = new ServiceCollection()
+                .AddSingleton<IDbContextFactory<HostPingerDbContext>>(new TestDb.Factory(_options))
+                .AddSingleton(_settings)
+                .AddSingleton(_summaries)
+                .AddSingleton<MaintenanceGate>()
+                .AddSingleton<DatabasePruner>()
+                .AddSingleton<IPingSender>(pinger)
+                .AddSingleton<TimeProvider>(new StubClock(Now))
+                .AddSingleton(typeof(ILogger<>), typeof(NullLogger<>))
+                .AddSingleton<PingMonitorService>()
+                .AddSingleton<HostStore>()
+                .BuildServiceProvider();
 
-            var deleting = _store.DeleteAsync(id);
-            Assert.That(deleting.IsCompleted, Is.False, "the round still holds the gate");
-            Assert.That((await HostsAsync()).Select(h => h.Name), Is.EqualTo(new[] { "alpha" }), "nothing deleted yet");
+            var round = services.GetRequiredService<PingMonitorService>().RunRoundAsync();
+            await pinger.Asked.WaitAsync(Patience);
 
-            round.Dispose();
-            await WaitUntilAsync(async () => (await HostsAsync()).Count == 0);
-            await _summaries.PollAsync();
+            var summary = await MakeAsync(() => services.GetRequiredService<HostStore>().DeleteAsync(deletedId));
 
-            Assert.That(Names(await deleting.WaitAsync(Patience)), Is.Empty);
+            Assert.Multiple(() =>
+            {
+                Assert.That(round.IsCompleted, Is.False, "the round is still out pinging");
+                Assert.That(Names(summary), Is.EqualTo(new[] { "bravo" }));
+            });
+
+            pinger.Answer();
+            await using var db = new HostPingerDbContext(_options);
+            Assert.Multiple(async () =>
+            {
+                Assert.That(await round.WaitAsync(Patience), Is.EqualTo(1), "the round records the host that is left");
+                Assert.That(await db.PingAttempts.Select(a => a.HostId).ToListAsync(), Is.EqualTo(new[] { keptId }));
+            });
         }
 
         /// <summary>
@@ -462,7 +490,7 @@ namespace HostPinger.Test
         }
 
         private HostStore Store(DbContextOptions<HostPingerDbContext> options) =>
-            new(new TestDb.Factory(options), _summaries, _gate, NullLogger<HostStore>.Instance, new StubClock(Now));
+            new(new TestDb.Factory(options), _summaries, NullLogger<HostStore>.Instance, new StubClock(Now));
 
         /// <summary>One of each kind of change to the host <paramref name="id"/>, or a new host for an addition.</summary>
         private static Task MakeWith(HostStore store, Change change, int id) => change switch
@@ -472,16 +500,6 @@ namespace HostPinger.Test
             Change.SetEnabled => store.SetEnabledAsync(id, isEnabled: false),
             _ => store.DeleteAsync(id),
         };
-
-        private static async Task WaitUntilAsync(Func<Task<bool>> condition)
-        {
-            var deadline = DateTime.UtcNow + Patience;
-            while (!await condition())
-            {
-                Assert.That(DateTime.UtcNow, Is.LessThan(deadline), "gave up waiting");
-                await Task.Delay(20);
-            }
-        }
 
         private static DbContextOptions<HostPingerDbContext> Options(string connectionString) =>
             new DbContextOptionsBuilder<HostPingerDbContext>().UseSqlite(connectionString).Options;
@@ -534,6 +552,32 @@ namespace HostPinger.Test
         private sealed class StubClock(DateTimeOffset now) : TimeProvider
         {
             public override DateTimeOffset GetUtcNow() => now;
+        }
+
+        /// <summary>
+        /// Every host answers, but only once the test says so: until then the round that asked is
+        /// out pinging, holding the maintenance gate, as a round waiting on a host that is down is.
+        /// </summary>
+        private sealed class HeldPingSender : IPingSender
+        {
+            private readonly TaskCompletionSource _asked = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            private readonly TaskCompletionSource _answer = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            /// <summary>Done once a round has asked for a ping, which it does after reading the hosts.</summary>
+            public Task Asked => _asked.Task;
+
+            public void Answer() => _answer.TrySetResult();
+
+            public async Task<PingResult> SendPingAsync(
+                string address,
+                int timeoutMilliseconds,
+                int resolveTimeoutMilliseconds,
+                CancellationToken cancellationToken = default)
+            {
+                _asked.TrySetResult();
+                await _answer.Task.WaitAsync(cancellationToken);
+                return PingResult.Answered(5);
+            }
         }
     }
 }

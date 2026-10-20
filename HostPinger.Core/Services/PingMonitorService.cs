@@ -91,8 +91,9 @@ namespace HostPinger.Core.Services
         /// <summary>
         /// Pings all enabled hosts once, stores the attempts, and prunes the database. Hosts whose
         /// address did not resolve are left out of the ping history rather than stored as
-        /// unanswered — they are recorded as resolver errors instead — so the number returned can
-        /// be smaller than the number of enabled hosts.
+        /// unanswered — they are recorded as resolver errors instead — and so are hosts deleted
+        /// while the round was pinging them, so the number returned can be smaller than the number
+        /// of enabled hosts.
         /// </summary>
         public async Task<int> RunRoundAsync(CancellationToken cancellationToken = default)
         {
@@ -170,9 +171,24 @@ namespace HostPinger.Core.Services
                 })
                 .ToList();
 
+            // The hosts were read before the pings, and those take seconds, long enough for one of
+            // them to be deleted: the Hosts page does not wait for a round, since a delete that did
+            // would sit behind the slowest ping in it. An attempt for a host that has gone has no
+            // row to point at, and the foreign key would refuse the whole save with it, losing every
+            // other host's ping too. So the round asks which hosts are still there and saves the
+            // attempts of those. It asks inside the transaction that saves them, which
+            // Microsoft.Data.Sqlite begins IMMEDIATE, taking the write lock before the question, so
+            // that no delete can land between the answer and the save; a deferred one would take it
+            // only at the first write, too late. The failed lookups are recorded against the address
+            // rather than the host, and stay.
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            var remaining = (await db.Hosts.Select(h => h.Id).ToListAsync(cancellationToken)).ToHashSet();
+            attempts.RemoveAll(attempt => !remaining.Contains(attempt.HostId));
+
             db.PingAttempts.AddRange(attempts);
             db.ResolverErrors.AddRange(resolverErrors);
             await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
             return attempts.Count;
         }
     }
