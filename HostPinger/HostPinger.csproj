@@ -36,11 +36,52 @@
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Keeps Entity Framework and SQLite out of this project: a use of anything BannedSymbols.txt
+         lists is reported as RS0030 in the editor as it is typed, and fails the build. The file
+         says what it covers and what it leaves to WebProjectTests and to the package list below. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <AdditionalFiles Include="BannedSymbols.txt" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Every package this project may reference; the target below fails restore and build on any
+         other. BannedSymbols.txt can only ban what the compilation already contains, so a new data
+         package (System.Data.SQLite, sqlite-net-pcl, Dapper and the like) would arrive with nothing
+         banning its types. GitVersion.MsBuild is here because Directory.Build.props adds it to
+         every project. -->
+    <PermittedPackageReference Include="GitVersion.MsBuild" />
+    <PermittedPackageReference Include="Markdig" />
+    <PermittedPackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" />
+    <PermittedPackageReference Include="Microsoft.Extensions.Hosting.Systemd" />
+    <PermittedPackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
+  </ItemGroup>
+
+  <!-- Ahead of restore as well as build, so a package that is not on the list never reaches the
+       project. It also runs before the SDK adds packages of its own, such as the trimmer's when
+       trimming is on, so those are not held to the list. -->
+  <Target Name="RejectUnpermittedPackageReferences" BeforeTargets="CollectPackageReferences">
+    <ItemGroup>
+      <_UnpermittedPackageReference Include="@(PackageReference)" Exclude="@(PermittedPackageReference)" />
+    </ItemGroup>
+    <Error Condition="'@(_UnpermittedPackageReference)' != ''"
+           Text="HostPinger.csproj references a package that is not on its PermittedPackageReference list: @(_UnpermittedPackageReference->'%(Identity)', ', '). A package that reads or writes the database belongs in HostPinger.Core, behind a method the pages call; any other package, add to the list." />
+  </Target>
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
+    <!-- RS0030 is a use of a banned symbol, which as the analyzer's default warning would build.
+         CS9057 and CS8032 are the compiler failing to load an analyzer, CS9057 because it was
+         built for a newer compiler than the one running. Either way the ban stops being checked
+         while the build still passes, and the Fedora job builds with the distribution's SDK,
+         which can be a band behind the analyzer Dependabot moves this to. -->
+    <WarningsAsErrors>$(WarningsAsErrors);RS0030;CS9057;CS8032</WarningsAsErrors>
   </PropertyGroup>
 
 </Project>

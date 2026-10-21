@@ -737,6 +737,30 @@ failing.
 The development profile keeps its database and settings inside the working tree, so a local run
 never touches an installed service's data.
 
+The web project does not touch the database itself. Every read and write lives in
+`HostPinger.Core`, behind a named method the pages call — `HostStore`, `DatabaseReads`,
+`UserSettingsStore`, `HostPingerDatabase` — for two reasons. Microsoft.Data.Sqlite does no
+asynchronous I/O, so a query a component runs holds the page's circuit for as long as it takes,
+and a page that refreshes on a timer stops answering altogether once a read outlasts the period;
+`HostPinger/Components/PageReads.cs` describes what that looked like against a production-sized
+database. And a write made from a page is one only a browser can test, where the same write in
+Core has unit tests of its own.
+
+The build holds that line, so a page that reaches for a context fails instead of relying on review
+to notice:
+
+- `HostPinger/BannedSymbols.txt` lists Entity Framework, Microsoft.Data.Sqlite, SQLitePCL and
+  Core's own context and migrations, and the banned-API analyzer reports any use of them as error
+  RS0030 — in the editor as it is typed, and in every build and publish.
+- `WebProjectTests` reads the same list against the compiled web project and fails on any
+  reference to what it names. That covers what the analyzer does not see, such as a context
+  injected only to be handed on to a method in Core.
+- `HostPinger.csproj` names every package the web project may reference, and restore and build
+  fail on any other. A ban list can only ban what the project already contains, so this is what
+  keeps a new data package — System.Data.SQLite, Dapper and the like — out. A package with nothing
+  to do with the database is one line added to that list; one that reads or writes it belongs in
+  Core.
+
 CI builds and tests on every push. The RPM job runs inside a `fedora:44` container using the .NET
 SDK that Fedora packages, rather than on a generic runner with the SDK from Microsoft: the two are
 different feature bands and do not accept identical source. Building on the target distribution is

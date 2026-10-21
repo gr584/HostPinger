@@ -30,6 +30,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- For WebProjectTests, which holds the compiled web project to the list its build enforces.
+         Copied rather than read in place so the test does not have to guess where the checkout is
+         from its output directory. -->
+    <Content Include="..\HostPinger\BannedSymbols.txt" Link="BannedSymbols.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\HostPinger.Core\HostPinger.Core.csproj" />
     <!-- For PasswordGateTests. Anything about the web UI itself lives in HostPinger.UITest, which
          is where the reference would otherwise be pulling this project. -->
