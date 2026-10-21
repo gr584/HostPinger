@@ -45,3 +45,14 @@ Known gaps, which neither check covers:
   both checks. Nobody writes them by accident; don't write them on purpose either.
 - **The database file.** Reading, copying or streaming the file at `PingerPaths.DatabasePath`
   isn't guarded. Anything that copies or serves the file goes through `DatabaseBackup` in Core.
+
+## Subagent effort
+
+Workflow agents and subagents run at `high` effort at most, whatever effort the session runs at.
+Set `effort` on every `agent()` call in a workflow script and on every Agent tool call. An agent
+with no `effort` inherits the session's level.
+
+- `high` for verify, judge and synthesis stages, and for agents that write code.
+- `medium` for scouting, searching and other mechanical fan-out.
+
+A prompt that asks for a different level for a particular task overrides this.
