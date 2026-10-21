@@ -726,6 +726,7 @@ adding the line by hand and restarting comes to the same thing.
 dotnet run --project HostPinger        # http://localhost:5041, database under HostPinger/Data
 dotnet test HostPinger.Test            # the library and the service logic
 dotnet test HostPinger.UITest          # the web UI, some of it through a real browser
+dotnet run -c Release --project HostPinger.Benchmarks   # the database calls the pages make, timed
 ```
 
 `HostPinger.UITest` drives Chrome or Chromium against an instance of the application it starts
@@ -771,6 +772,42 @@ Pushing a `v*` tag additionally runs a release job, which requires all three to 
 attaches the RPM and MSI to a GitHub release — a tag carrying a prerelease suffix is marked as
 such rather than becoming the current release.
 
+### Benchmarks
+
+`HostPinger.Benchmarks` times the calls the pages make into `HostPinger.Core` with BenchmarkDotNet:
+the Hosts summary, opening and refreshing the graph, the Configuration and Resolver errors reads,
+the changes `HostStore` and `UserSettingsStore` make, and opening the database at startup. Each
+benchmark starts from a fresh copy of a seeded database shaped like the production one the page
+freezes were found on: 21 hosts pinged every ten seconds for 48 days, 8.3 million attempts, with two
+hosts in outages still running after 41 and 20 days, outages of hours that ended, network-wide
+outages shared across hosts, and flapping and lossy links. Only the counts and patterns come from
+production; every host is named for its pattern, at an address that reaches nothing. The resolver
+errors are the one addition: production's had been pruned away, so the seed writes the ones the
+current build records for the gaps its network outages left.
+
+```bash
+dotnet run -c Release --project HostPinger.Benchmarks -- seed           # seed the database only
+dotnet run -c Release --project HostPinger.Benchmarks                   # every benchmark
+dotnet run -c Release --project HostPinger.Benchmarks -- --anyCategories Graph --iterationCount 3
+```
+
+Seeding takes about a minute, and the result is kept under `HostPinger.Benchmarks/bin/BenchmarkData`,
+named for a hash of the planned history and the latest migration, so a change to either seeds it
+again; `-- seed --rebuild` forces that, and `HOSTPINGER_BENCHMARK_DATA` moves it. Keep it on disk
+rather than on a tmpfs, which holds the gigabyte in memory and makes every read look free.
+
+The page reads and writes land a ping round before each iteration, as one would land between two
+clicks; startup and the delete with its history start from an unchanged copy instead. The reads also
+run with the file dropped from the page cache, which is how they behave on a service whose database
+the rest of the machine has pushed out of memory. Those cold cases need Linux and are left out
+elsewhere. The delete with its history runs one warmup and five iterations, since each needs a fresh
+copy of the database, so `--iterationCount` does not apply to it. The results land in
+`BenchmarkDotNet.Artifacts/results`, with every table together in `summary.md`.
+
+CI runs them on every push to main and every pull request and puts `summary.md` on the run's summary
+page, with the full reports attached as the `benchmarks` artifact. A runner is a shared virtual
+machine, so read differences of a few tens of percent between runs as noise.
+
 ## Repository layout
 
 | Project | Purpose |
@@ -779,6 +816,7 @@ such rather than becoming the current release.
 | `HostPinger.Core/` | Pinging, storage, pruning, settings. |
 | `HostPinger.Test/` | NUnit tests over the library and the service logic. |
 | `HostPinger.UITest/` | NUnit tests over the web UI, driving a browser through Playwright. |
+| `HostPinger.Benchmarks/` | BenchmarkDotNet benchmarks of the database calls the pages make, over a seeded production-shaped database. |
 | `HostPinger.WindowsInstaller/` | WiX project producing the MSI. |
 | `HostPinger.LinuxInstaller/` | Systemd unit and environment file, the RPM spec and SELinux policy module, the Debian packaging under `debian/`, and a build script for each package. |
 

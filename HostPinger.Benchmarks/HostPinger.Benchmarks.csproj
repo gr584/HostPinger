@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- The same collector the web application runs with, since what these measure is what its
+         pages wait for: the Web SDK turns server GC on, and the plain SDK this project uses does not. -->
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Core only. What is measured is the methods the pages call, which all live there; the web
+         project is not allowed near the database, and nothing here needs it to be. -->
+    <ProjectReference Include="..\HostPinger.Core\HostPinger.Core.csproj" />
+  </ItemGroup>
+
+</Project>

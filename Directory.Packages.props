@@ -33,6 +33,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Has to match the WixToolset.Sdk version in HostPinger.WindowsInstaller.wixproj, which an
          MSBuild SDK reference keeps in the project file rather than here. See the note there for
          why both stay on 6. -->

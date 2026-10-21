@@ -38,6 +38,56 @@ jobs:
       # report that and are ignored rather than failing, so this stays green either way.
       - run: dotnet test HostPinger.UITest/HostPinger.UITest.csproj -c Release
 
+  benchmark:
+    name: benchmark (ubuntu)
+    runs-on: ubuntu-latest
+    # Times the database calls the pages make through HostPinger.Core, each against a fresh copy of
+    # a database seeded to the shape of the production one the page freezes were found on, and puts
+    # the tables on this run's summary page. It reports rather than judges: a benchmark that breaks
+    # fails the job, a slow one does not, and the release does not wait for it. A tag is a commit
+    # that was already benchmarked when it reached main, so it is not run again for one.
+    if: github.ref_type != 'tag'
+    # About twenty minutes in all: a minute to seed, the rest the benchmarks, each of which copies
+    # the gigabyte file before it starts.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - run: dotnet build HostPinger.Benchmarks/HostPinger.Benchmarks.csproj -c Release
+
+      # Seeded on every run rather than restored from a cache: the gigabyte would take about as long
+      # to download as it does to write, and a database written by the commit under test cannot be
+      # one an older seeder left behind.
+      - name: Seed the benchmark database
+        run: dotnet run --project HostPinger.Benchmarks/HostPinger.Benchmarks.csproj -c Release --no-build -- seed
+
+      - name: Run the benchmarks
+        run: dotnet run --project HostPinger.Benchmarks/HostPinger.Benchmarks.csproj -c Release --no-build
+
+      # Whatever finished, so that one broken benchmark still leaves the others' numbers to read.
+      - name: Put the results on the run's summary page
+        if: always()
+        run: |
+          if [ -f BenchmarkDotNet.Artifacts/results/summary.md ]; then
+            cat BenchmarkDotNet.Artifacts/results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::the benchmarks wrote no summary"
+          fi
+
+      # The full reports and logs, the JSON among them, for comparing one run with another.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: benchmarks
+          path: BenchmarkDotNet.Artifacts/
+          if-no-files-found: warn
+
   rpm:
     name: rpm (fedora)
     runs-on: ubuntu-latest
