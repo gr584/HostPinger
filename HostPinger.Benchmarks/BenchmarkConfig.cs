@@ -17,8 +17,8 @@ namespace HostPinger.Benchmarks
         /// One call per iteration, timed on its own, after two to warm up: BenchmarkDotNet's monitoring
         /// strategy, meant for operations long enough that the timer's overhead is nothing beside them,
         /// and the only sensible one for calls that need a round landed or the cache dropped before each.
-        /// Fifteen iterations keep the whole run near a quarter of an hour on a CI runner. A class can
-        /// ask for fewer, as the delete with its history does.
+        /// Fifteen iterations make the whole run take substantial time, currently about 5-10 minutes
+        /// on GitHub's runners. A class can ask for fewer, as the delete with its history does.
         /// </summary>
         /// <remarks>
         /// The median, minimum and maximum beside the mean, because a disk is not a steady thing to time

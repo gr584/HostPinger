@@ -47,8 +47,8 @@ jobs:
     # fails the job, a slow one does not, and the release does not wait for it. A tag is a commit
     # that was already benchmarked when it reached main, so it is not run again for one.
     if: github.ref_type != 'tag'
-    # About twenty minutes in all: a minute to seed, the rest the benchmarks, each of which copies
-    # the gigabyte file before it starts.
+    # Takes substantial time: seeding the database, then the benchmarks, each of which copies the
+    # gigabyte file before it starts. Currently about 5-10 minutes on GitHub's runners.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
