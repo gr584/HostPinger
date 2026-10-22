@@ -469,7 +469,7 @@ namespace HostPinger.Test
                 await holding.OpenAsync();
                 await ScalarAsync(holding, "PRAGMA journal_mode = WAL;");
 
-                var refusal = Assert.ThrowsAsync<IOException>(() => backup.RestoreAsync(backupPath));
+                var refusal = await Assert.ThrowsAsync<IOException>(() => backup.RestoreAsync(backupPath));
                 Assert.That(refusal!.Message, Is.EqualTo("The database stayed in use, so nothing was replaced. Try the restore again."));
             }
 

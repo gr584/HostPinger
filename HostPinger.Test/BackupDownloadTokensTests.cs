@@ -84,7 +84,7 @@ namespace HostPinger.Test
             Assert.Multiple(() =>
             {
                 Assert.That(issued, Is.Unique);
-                Assert.That(issued, Has.All.Matches<string>(t => t.Length == 64 && t.All(Uri.IsHexDigit)));
+                Assert.That(issued, Has.All.Matches<string>(t => t is { Length: 64 } && t.All(Uri.IsHexDigit)));
             });
         }
 

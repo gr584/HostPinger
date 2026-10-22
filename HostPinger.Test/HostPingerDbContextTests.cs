@@ -30,7 +30,7 @@ namespace HostPinger.Test
 
             db.Hosts.Add(new MonitoredHost { Name = "two", Address = "dup.example" });
 
-            Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+            await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
         }
 
         [Test]

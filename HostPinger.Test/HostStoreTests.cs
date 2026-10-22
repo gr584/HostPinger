@@ -298,7 +298,7 @@ namespace HostPinger.Test
                 await holder.OpenAsync();
                 await ExecuteAsync(holder, "BEGIN IMMEDIATE;");
 
-                var failure = Assert.ThrowsAsync<IOException>(() => MakeWith(store, change, id).WaitAsync(Patience));
+                var failure = await Assert.ThrowsAsync<IOException>(() => MakeWith(store, change, id).WaitAsync(Patience));
 
                 Assert.Multiple(() =>
                 {
@@ -341,7 +341,7 @@ namespace HostPinger.Test
             var log = new TestLogger<HostStore>();
             var store = new HostStore(new TestDb.Factory(_options), _summaries, log, new StubClock(Now));
 
-            var failure = Assert.ThrowsAsync<IOException>(() => MakeWith(store, change, id).WaitAsync(Patience));
+            var failure = await Assert.ThrowsAsync<IOException>(() => MakeWith(store, change, id).WaitAsync(Patience));
 
             Assert.That(failure!.Message, Is.EqualTo("The change was not saved: SQLite Error 19: 'refused by the test'."));
             Assert.That(
