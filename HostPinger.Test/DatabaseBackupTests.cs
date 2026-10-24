@@ -575,6 +575,32 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// A restore checks for triggers and views itself rather than trusting its caller to have
+        /// validated the file: migrating it would run a trigger, and swapped in, one on the settings
+        /// table outlasts both ways back from a password. Restored here without validating first.
+        /// </summary>
+        [Test]
+        public async Task Restore_RefusesAFileDefiningATrigger_EvenUnvalidated()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            await StagePasswordAsync(_options, "current-hash");
+            await _store.LoadAsync();
+            var backupPath = await BackupWithAsync("backup.example", "backup-hash");
+            await using (var db = new HostPingerDbContext(OptionsFor(backupPath)))
+            {
+                await db.Database.ExecuteSqlRawAsync(
+                    "CREATE TRIGGER keep_password AFTER UPDATE ON UserSettings BEGIN "
+                    + "UPDATE UserSettings SET Value = 'backup-hash' WHERE Key = 'Security:PasswordHash'; END;");
+            }
+
+            SqliteConnection.ClearAllPools();
+            var failure = await Assert.ThrowsAsync<IOException>(() => _backup.RestoreAsync(backupPath));
+
+            await AssertNothingWasReplacedAsync(
+                failure!, "This file defines triggers or views, which a HostPinger database never has. Nothing was replaced.");
+        }
+
+        /// <summary>
         /// A restored file that will not open once it is in place — standing in for the settings
         /// failing to load, or the disk filling as it is opened — is taken out again, and the
         /// database it replaced goes back.

@@ -31,6 +31,10 @@ namespace HostPinger.Core.Services
 
         private static readonly byte[] SqliteHeader = "SQLite format 3\0"u8.ToArray();
 
+        private const string DefinesCodeRefusal = "This file defines triggers or views, which a HostPinger database never has.";
+
+        private const string DefinesCodeQuery = "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('trigger', 'view');";
+
         /// <summary>
         /// How long a restore waits for the file it is retiring to be let go of before it gives up:
         /// the provider's own default. Settable for the tests, which would otherwise spend half a
@@ -161,13 +165,9 @@ namespace HostPinger.Core.Services
                 // shaped by something else, and a trigger runs inside this application whenever
                 // its table is written: one on the settings table can write its own password back
                 // after every change, outlasting both the Password page and --remove-password.
-                var definitions = await ScalarAsync(
-                    connection,
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('trigger', 'view');",
-                    cancellationToken);
-                if (Convert.ToInt64(definitions) > 0)
+                if (Convert.ToInt64(await ScalarAsync(connection, DefinesCodeQuery, cancellationToken)) > 0)
                 {
-                    return "This file defines triggers or views, which a HostPinger database never has.";
+                    return DefinesCodeRefusal;
                 }
 
                 applied = [];
@@ -278,6 +278,24 @@ namespace HostPinger.Core.Services
                     .Options;
                 await using (var db = new HostPingerDbContext(options))
                 {
+                    // Validation refuses these already. Asked again because migrating the file writes
+                    // to it, which would run a trigger, and because a restore that relied on its
+                    // caller having validated would let the next caller that forgot plant one.
+                    await db.Database.OpenConnectionAsync(cancellationToken);
+                    try
+                    {
+                        await using var command = db.Database.GetDbConnection().CreateCommand();
+                        command.CommandText = DefinesCodeQuery;
+                        if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken)) > 0)
+                        {
+                            throw new InvalidDataException(DefinesCodeRefusal);
+                        }
+                    }
+                    finally
+                    {
+                        await db.Database.CloseConnectionAsync();
+                    }
+
                     await HostPingerDatabase.InitializeAsync(db, cancellationToken);
                     if (await FindMissingSchemaAsync(db, cancellationToken) is { } missing)
                     {
