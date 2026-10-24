@@ -67,6 +67,44 @@ namespace HostPinger.UITest
         }
 
         /// <summary>
+        /// A pause the database refuses is reported above the table, and the switch goes back to
+        /// where the host still is. It used to throw out of the page and end its circuit, so the
+        /// same switch is then used again, once the database takes it, and the report goes. A
+        /// trigger stands in for the refusal, for this host alone.
+        /// </summary>
+        [Test]
+        public async Task Switch_ShowsWhyAPauseWasNotSaved()
+        {
+            const string name = "change-switch-refused";
+            await SeedAsync(name);
+            await ExecuteAsync(
+                $"CREATE TRIGGER refuse_switch BEFORE UPDATE ON Hosts WHEN OLD.Name = '{name}' "
+                + "BEGIN SELECT RAISE(ABORT, 'held by the test'); END;");
+            try
+            {
+                await UnlockAsync();
+
+                // A click rather than UncheckAsync, which would fail on the switch coming back.
+                await Switch(name).ClickAsync();
+
+                await Assertions.Expect(SwitchError)
+                    .ToHaveTextAsync("The change was not saved: SQLite Error 19: 'held by the test'.");
+                await Assertions.Expect(Switch(name)).ToBeCheckedAsync();
+                await Assertions.Expect(Status(name)).ToHaveTextAsync("Up");
+
+                await ExecuteAsync("DROP TRIGGER refuse_switch;");
+                await Switch(name).UncheckAsync();
+
+                await Assertions.Expect(Status(name)).ToHaveTextAsync("Paused");
+                await Assertions.Expect(SwitchError).ToHaveCountAsync(0);
+            }
+            finally
+            {
+                await ExecuteAsync("DROP TRIGGER IF EXISTS refuse_switch;");
+            }
+        }
+
+        /// <summary>
         /// The form adds a host, and the table it closes onto lists it under the name and address
         /// typed, never pinged yet and so waiting for its first round.
         /// </summary>
@@ -248,6 +286,8 @@ namespace HostPinger.UITest
         private ILocator Cell(string text, int column) => Row(text).Locator("td").Nth(column);
 
         private ILocator Switch(string name) => Row(name).GetByRole(AriaRole.Switch);
+
+        private ILocator SwitchError => Page.Locator(".switch-error");
 
         /// <summary>
         /// Unlocks this browser and comes back to a live Hosts page, which is where every change

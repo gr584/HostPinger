@@ -40,6 +40,14 @@
     }
 </div>
 
+@if (_switchError is not null)
+{
+    <div class="alert alert-danger alert-dismissible py-2 switch-error" role="alert">
+        @_switchError
+        <button type="button" class="btn-close py-2" aria-label="Close" @onclick="() => _switchError = null"></button>
+    </div>
+}
+
 @if (_rows.Count > 0)
 {
     <div class="table-responsive">
@@ -293,6 +301,9 @@
     // Escape or a click away from acting on a form whose change is already under way.
     private bool _isChanging;
     private string? _error;
+
+    // Why the last pause or resume was not saved, until the next one is or the reader closes it.
+    private string? _switchError;
     private readonly CancellationTokenSource _cts = new();
 
     /// <summary>
@@ -437,7 +448,22 @@
             return;
         }
 
-        var summary = await Store.SetEnabledAsync(id, isEnabled, _cts.Token);
+        HostSummarySnapshot summary;
+        try
+        {
+            summary = await Store.SetEnabledAsync(id, isEnabled, _cts.Token);
+        }
+        catch (IOException ex)
+        {
+            // There is no dialog to put the reason in, so it goes above the table, and the switch
+            // goes back the way the locked case above puts it back.
+            _switchError = ex.Message;
+            _rowGeneration++;
+            Apply(Summaries.Current);
+            return;
+        }
+
+        _switchError = null;
         if (_form.Id == id)
         {
             _form.IsEnabled = isEnabled;
