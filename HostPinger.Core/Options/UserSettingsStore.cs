@@ -137,6 +137,11 @@ namespace HostPinger.Core.Options
         /// first, making it safe against a database a newer build has not opened yet — and against
         /// no database at all, where it creates one that says no password rather than failing
         /// somebody who is locked out.
+        /// <para>
+        /// Not for a page: it writes past the running service's settings, which go on holding the
+        /// old hash until the next start. A page removes the password with
+        /// <see cref="SavePasswordHashAsync"/> and null, which updates them as it writes.
+        /// </para>
         /// </remarks>
         /// <returns>
         /// Whether the migrations first had to clear a lock that a migration stopped partway through
@@ -148,12 +153,12 @@ namespace HostPinger.Core.Options
             var clearedLock = await HostPingerDatabase.InitializeAsync(db, cancellationToken);
             await StageAsync(db, PasswordHashKey, string.Empty, cancellationToken);
             await db.SaveChangesAsync(cancellationToken);
+            return clearedLock;
         }
 
         /// <summary>
         /// Stages one row without saving, adding or updating as the table requires. Shared with
         /// <see cref="RemovePasswordAsync"/>, so what a removal writes cannot drift from what
-            return clearedLock;
         /// <see cref="SavePasswordHashAsync"/> writes; the caller saves the changes.
         /// </summary>
         public static async Task StageAsync(

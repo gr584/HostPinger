@@ -755,17 +755,20 @@ Core has unit tests of its own.
 The build holds that line, so a page that reaches for a context fails instead of relying on review
 to notice:
 
-- `HostPinger/BannedSymbols.txt` lists Entity Framework, Microsoft.Data.Sqlite, SQLitePCL and
-  Core's own context and migrations, and the banned-API analyzer reports any use of them as error
-  RS0030 — in the editor as it is typed, and in every build and publish.
+- `HostPinger/BannedSymbols.txt` lists Entity Framework, Microsoft.Data.Sqlite, SQLitePCL, the
+  ADO.NET base types every provider's connection derives from, and Core's own context and
+  migrations, and the banned-API analyzer reports any use of them as error RS0030 — in the editor
+  as it is typed, and in every build and publish.
 - `WebProjectTests` reads the same list against the compiled web project and fails on any
   reference to what it names. That covers what the analyzer does not see, such as a context
   injected only to be handed on to a method in Core.
 - `HostPinger.csproj` names every package the web project may reference, and restore and build
-  fail on any other. A ban list can only ban what the project already contains, so this is what
-  keeps a new data package — System.Data.SQLite, Dapper and the like — out. A package with nothing
-  to do with the database is one line added to that list; one that reads or writes it belongs in
-  Core.
+  fail on any other, as they do on a DLL referenced by its path or a reference to any project but
+  Core. A ban list can only ban what the project already contains, so this is what keeps a new
+  data library — System.Data.SQLite, Dapper and the like — out. A package with nothing to do with
+  the database is one line added to that list; one that reads or writes it belongs in Core.
+  `WebProjectTests` holds the compiled assembly's references to the same list, the shared
+  frameworks and Core, which also catches a library reached through Core's own references.
 
 CI builds and tests on every push. The RPM job runs inside a `fedora:44` container using the .NET
 SDK that Fedora packages, rather than on a generic runner with the SDK from Microsoft: the two are

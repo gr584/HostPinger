@@ -30,10 +30,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- For WebProjectTests, which holds the compiled web project to the list its build enforces.
+    <!-- For WebProjectTests, which holds the compiled web project to the lists its build enforces.
          Copied rather than read in place so the test does not have to guess where the checkout is
          from its output directory. -->
     <Content Include="..\HostPinger\BannedSymbols.txt" Link="BannedSymbols.txt" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Its PermittedPackageReference list, for the same tests. Renamed so that nothing takes the
+         copy for a project. -->
+    <Content Include="..\HostPinger\HostPinger.csproj" Link="HostPinger.csproj.xml" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

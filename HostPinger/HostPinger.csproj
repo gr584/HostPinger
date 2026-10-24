@@ -62,13 +62,25 @@
 
   <!-- Ahead of restore as well as build, so a package that is not on the list never reaches the
        project. It also runs before the SDK adds packages of its own, such as the trimmer's when
-       trimming is on, so those are not held to the list. -->
+       trimming is on, so those are not held to the list.
+
+       The two other ways a library arrives are refused here too: a DLL referenced by its path,
+       and a reference to a project other than Core. Neither would pass through the list above,
+       and either could bring a data library whose types the ban list knows nothing of.
+       WebProjectTests checks the compiled assembly's references as well, which also catches a
+       library reached through Core's own references. -->
   <Target Name="RejectUnpermittedPackageReferences" BeforeTargets="CollectPackageReferences">
     <ItemGroup>
       <_UnpermittedPackageReference Include="@(PackageReference)" Exclude="@(PermittedPackageReference)" />
+      <_ReferenceByPath Include="@(Reference)" Condition="'%(Reference.HintPath)' != ''" />
+      <_OtherProjectReference Include="@(ProjectReference)" Condition="'%(ProjectReference.Filename)' != 'HostPinger.Core'" />
     </ItemGroup>
     <Error Condition="'@(_UnpermittedPackageReference)' != ''"
            Text="HostPinger.csproj references a package that is not on its PermittedPackageReference list: @(_UnpermittedPackageReference->'%(Identity)', ', '). A package that reads or writes the database belongs in HostPinger.Core, behind a method the pages call; any other package, add to the list." />
+    <Error Condition="'@(_ReferenceByPath)' != ''"
+           Text="HostPinger.csproj references an assembly by its path: @(_ReferenceByPath->'%(Identity)', ', '). Reference it as a package on the PermittedPackageReference list instead, or, if it reads or writes the database, from HostPinger.Core." />
+    <Error Condition="'@(_OtherProjectReference)' != ''"
+           Text="HostPinger.csproj references a project other than HostPinger.Core: @(_OtherProjectReference->'%(Identity)', ', '). Database code belongs in HostPinger.Core, behind a method the pages call." />
   </Target>
 
   <PropertyGroup>

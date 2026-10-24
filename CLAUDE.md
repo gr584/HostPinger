@@ -17,7 +17,7 @@ Why:
 - **Testing.** A write in Core is unit-tested in `HostPinger.Test` (`HostStoreTests`,
   `UserSettingsStoreTests`). The same write in a page could only be tested through a browser.
 
-The analyzer, `WebProjectTests` and a package list in `HostPinger.csproj` enforce this. When one
+The analyzer, `WebProjectTests` and the reference checks in `HostPinger.csproj` enforce this. When one
 of them fires, fix the code rather than the check:
 
 - **RS0030 build error.** The banned-API analyzer reads `HostPinger/BannedSymbols.txt`. Don't
@@ -34,6 +34,12 @@ of them fires, fix the code rather than the check:
     the same file.
   - If it reads or writes data, it belongs in `HostPinger.Core`. Examples are System.Data.SQLite,
     sqlite-net-pcl, Dapper and the QuickGrid EF adapter.
+- **"references an assembly by its path" or "a project other than HostPinger.Core" at restore.**
+  The same rule for the two other ways a library arrives. Reference it as a permitted package, or
+  put the code that needs it in Core.
+- **`WebProject_ReferencesOnlyTheFrameworksCoreAndItsPermittedPackages` fails.** The compiled web
+  project references an assembly that is neither the shared frameworks', Core, nor a permitted
+  package's, usually a data library reached through Core's own references. Same fix.
 
 Don't add `N:` or `T:` entries for packages the web project doesn't reference. The analyzer
 silently ignores names the compilation doesn't contain, and the staleness test then fails on them.

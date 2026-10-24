@@ -8,15 +8,17 @@
 // through it goes unreported: an injected context only handed on to a method in Core, a type
 // argument such as GetRequiredService<HostPingerDbContext>(), a caught exception type.
 // WebProjectTests reads this same list against the compiled assembly, where those leave a
-// reference too, and fails on them.
+// reference too, and fails on them. So does a `using static` of a listed type or an alias for
+// one, even with nothing going through it: it is a reference all the same, and it opens the
+// type's members to the file.
 //
 // A namespace entry covers every namespace under it as well. An entry for a package this project
 // does not reference bans nothing, since the analyzer ignores a name the compilation does not
 // contain; new packages are kept out by the PermittedPackageReference list in HostPinger.csproj.
 
-N:Microsoft.EntityFrameworkCore;give the read or write a method in HostPinger.Core (HostStore, DatabaseReads, HostPingerDatabase) and call that instead
-N:Microsoft.Data.Sqlite;give the read or write a method in HostPinger.Core (HostStore, DatabaseReads, HostPingerDatabase) and call that instead
-N:SQLitePCL;give the read or write a method in HostPinger.Core (HostStore, DatabaseReads, HostPingerDatabase) and call that instead
+N:Microsoft.EntityFrameworkCore;give the read or write a method in HostPinger.Core (HostStore, DatabaseReads, UserSettingsStore, HostPingerDatabase) and call that instead
+N:Microsoft.Data.Sqlite;give the read or write a method in HostPinger.Core (HostStore, DatabaseReads, UserSettingsStore, HostPingerDatabase) and call that instead
+N:SQLitePCL;give the read or write a method in HostPinger.Core (HostStore, DatabaseReads, UserSettingsStore, HostPingerDatabase) and call that instead
 
 // The registrations Entity Framework and its SQLite provider declare in the namespaces they
 // extend rather than in their own, so the entries above miss them: AddDbContext,
@@ -24,10 +26,19 @@ N:SQLitePCL;give the read or write a method in HostPinger.Core (HostStore, Datab
 // AddHostPingerDatabase.
 T:Microsoft.Extensions.DependencyInjection.EntityFrameworkServiceCollectionExtensions;register the database with AddHostPingerDatabase, which HostPinger.Core declares
 T:Microsoft.Extensions.DependencyInjection.SqliteServiceCollectionExtensions;register the database with AddHostPingerDatabase, which HostPinger.Core declares
-T:System.Transactions.TransactionsDatabaseFacadeExtensions;give the read or write a method in HostPinger.Core (HostStore, DatabaseReads, HostPingerDatabase) and call that instead
+T:System.Transactions.TransactionsDatabaseFacadeExtensions;give the read or write a method in HostPinger.Core (HostStore, DatabaseReads, UserSettingsStore, HostPingerDatabase) and call that instead
+
+// ADO.NET's own base types, which every provider's connection and command derive from. The
+// provider's namespace above covers a SqliteConnection only for what SqliteConnection declares
+// itself: opening it and running a command through it are DbConnection's and DbCommand's, so a
+// connection reaching a page typed as one of those, or built through DbProviderFactories from a
+// connection string, would otherwise pass both checks.
+N:System.Data.Common;give the read or write a method in HostPinger.Core (HostStore, DatabaseReads, UserSettingsStore, HostPingerDatabase) and call that instead
+T:System.Data.IDbConnection;give the read or write a method in HostPinger.Core (HostStore, DatabaseReads, UserSettingsStore, HostPingerDatabase) and call that instead
+T:System.Data.IDbCommand;give the read or write a method in HostPinger.Core (HostStore, DatabaseReads, UserSettingsStore, HostPingerDatabase) and call that instead
 
 // HostPinger.Core's own Entity Framework types. What the context inherits from DbContext is
 // covered by the namespace entry above, but not what it declares itself, such as Hosts.
-T:HostPinger.Core.Data.HostPingerDbContext;give the read or write a method in HostPinger.Core (HostStore, DatabaseReads, HostPingerDatabase) and call that instead
+T:HostPinger.Core.Data.HostPingerDbContext;give the read or write a method in HostPinger.Core (HostStore, DatabaseReads, UserSettingsStore, HostPingerDatabase) and call that instead
 T:HostPinger.Core.Data.DesignTimeDbContextFactory;it exists for the dotnet ef tools; the application opens the database with HostPingerDatabase
 N:HostPinger.Core.Migrations;HostPingerDatabase.OpenAsync applies the migrations

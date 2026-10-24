@@ -45,8 +45,48 @@ namespace HostPinger.Test
             Assert.That(
                 database,
                 Is.Empty,
-                "The web project reaches the database directly. Give the read or write a method in "
-                + "HostPinger.Core (HostStore, DatabaseReads, HostPingerDatabase) and call that instead.");
+                "The web project names a database type: a context or connection, a type argument, or a "
+                + "caught exception type. Give the read or write a method in HostPinger.Core (HostStore, "
+                + "DatabaseReads, UserSettingsStore, HostPingerDatabase), call that instead, and catch the "
+                + "IOException it throws where a write can fail.");
+        }
+
+        /// <summary>
+        /// Every assembly the web project references is one of the shared frameworks', Core, or one
+        /// a package on its PermittedPackageReference list brings. The list in HostPinger.csproj
+        /// keeps a new package out at restore, but not a DLL referenced by its path, a reference to
+        /// another project, or a data package reached through Core's own references; each of those
+        /// shows up here as an assembly nothing permits, and the ban list above would know none of
+        /// its types.
+        /// </summary>
+        [Test]
+        public void WebProject_ReferencesOnlyTheFrameworksCoreAndItsPermittedPackages()
+        {
+            var framework = new[] { typeof(object), typeof(Microsoft.AspNetCore.Http.HttpContext) }
+                .Select(type => Path.GetDirectoryName(type.Assembly.Location)!)
+                .SelectMany(directory => Directory.EnumerateFiles(directory, "*.dll"))
+                .Select(Path.GetFileNameWithoutExtension)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var permitted = ReadPermittedPackages()
+                .Append(typeof(HostPinger.Core.Options.PingerPaths).Assembly.GetName().Name!)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var referenced = ReadAssemblyReferences(typeof(Program).Assembly.Location);
+            // A scan that read nothing would pass by finding nothing outside the list.
+            Assert.That(referenced, Does.Contain("HostPinger.Core"), "the scan reads the web project's assembly references");
+
+            var unpermitted = referenced
+                .Where(name => !framework.Contains(name) && !permitted.Contains(name))
+                .Order()
+                .ToList();
+
+            Assert.That(
+                unpermitted,
+                Is.Empty,
+                "The web project references an assembly that is neither the framework's, Core, nor one of its "
+                + "PermittedPackageReference packages. A library that reads or writes the database belongs in "
+                + "HostPinger.Core, behind a method the pages call; any other, reference it as a package and "
+                + "add it to the list.");
         }
 
         /// <summary>
@@ -83,6 +123,26 @@ namespace HostPinger.Test
                 .Where(id => id.StartsWith("N:", StringComparison.Ordinal) || id.StartsWith("T:", StringComparison.Ordinal))
                 .Select(id => new BanEntry(id[0], id[2..]))
                 .ToArray();
+
+        /// <summary>
+        /// The packages HostPinger.csproj permits, read from the copy beside the tests. Each one's
+        /// assembly carries its package's name; the ones that are only build tools are never
+        /// referenced, and so permit nothing.
+        /// </summary>
+        private static IEnumerable<string> ReadPermittedPackages() =>
+            System.Xml.Linq.XDocument.Load(Path.Combine(AppContext.BaseDirectory, "HostPinger.csproj.xml"))
+                .Descendants("PermittedPackageReference")
+                .Select(item => (string)item.Attribute("Include")!);
+
+        private static List<string> ReadAssemblyReferences(string path)
+        {
+            using var stream = File.OpenRead(path);
+            using var image = new PEReader(stream);
+            var metadata = image.GetMetadataReader();
+            return metadata.AssemblyReferences
+                .Select(handle => metadata.GetString(metadata.GetAssemblyReference(handle).Name))
+                .ToList();
+        }
 
         /// <summary>
         /// The full names of the types an assembly references, or of the ones it declares.
