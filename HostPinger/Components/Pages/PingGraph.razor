@@ -130,6 +130,21 @@ else
     private const int MinPointsPerSeries = 50;
     private const int MaxPointsPerSeries = 8000;
 
+    /// <summary>
+    /// The cookie the measured density is remembered in, written by PingGraph.razor.js, so that the
+    /// next opening's prerender reads at the density the plot will measure rather than at
+    /// <see cref="DefaultPointsPerSeries"/> and then reads again a third of a second after the page
+    /// comes alive, redrawing the line. Clamped like a measurement, since the browser can send
+    /// anything back.
+    /// </summary>
+    private const string DensityCookie = "hostpinger-graph-density";
+
+    /// <summary>The request a prerender is answering, for <see cref="DensityCookie"/>; null on a live page.</summary>
+    [CascadingParameter]
+    private HttpContext? HttpContext { get; set; }
+
+    private IJSObjectReference? _module;
+
     [Parameter] public string? HostIdsSegment { get; set; }
 
     /// <summary>
@@ -276,6 +291,13 @@ else
 
         _selected = ParseIds(HostIdsSegment);
         ApplyQueryOpening();
+        if (!RendererInfo.IsInteractive
+            && HttpContext?.Request.Cookies[DensityCookie] is { } remembered
+            && int.TryParse(remembered, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var points))
+        {
+            _pointsPerSeries = Math.Clamp(points, MinPointsPerSeries, MaxPointsPerSeries);
+        }
+
         if (TakePrerenderRead() is { } prerendered)
         {
             // At the density the prerender read at, which is as good a guess at the chart's width
@@ -603,10 +625,24 @@ else
     private void OnPlotDeviceWidthChanged(double deviceWidth)
     {
         _pointsPerSeries = Math.Clamp((int)Math.Round(deviceWidth), MinPointsPerSeries, MaxPointsPerSeries);
+        _ = RememberDensityAsync(_pointsPerSeries);
         if (_awaitingFirstMeasurement)
         {
             _awaitingFirstMeasurement = false;
             _ = ApplyFirstMeasurementAsync();
+        }
+    }
+
+    // A courtesy to the next opening, so a failure to write it — the circuit gone — is let go.
+    private async Task RememberDensityAsync(int points)
+    {
+        try
+        {
+            _module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./Components/Pages/PingGraph.razor.js");
+            await _module.InvokeVoidAsync("rememberDensity", DensityCookie, points);
+        }
+        catch (Exception ex) when (ex is JSException or JSDisconnectedException or OperationCanceledException or ObjectDisposedException)
+        {
         }
     }
 
