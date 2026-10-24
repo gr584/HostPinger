@@ -12,9 +12,16 @@ namespace HostPinger.Security
         /// write. An absolute or protocol-relative URL would turn signing in into a redirect to
         /// somewhere else entirely, which is worth refusing here rather than at each of the three
         /// places that need to be sure of one.
+        /// <para>
+        /// A control character anywhere is refused as well. Browsers drop tabs and line breaks from
+        /// a URL before reading it, so a slash, a tab and "/example.com" arrives as
+        /// "//example.com" — somewhere else entirely, through a link the unlock page draws with the
+        /// value as it came. ASP.NET's own IsLocalUrl refuses them for the same reason.
+        /// </para>
         /// </remarks>
         public static string OrRoot(string? url) =>
             url is not null && url.StartsWith('/') && !url.StartsWith("//") && !url.StartsWith("/\\")
+                && !url.Any(char.IsControl)
                 ? url
                 : "/";
     }

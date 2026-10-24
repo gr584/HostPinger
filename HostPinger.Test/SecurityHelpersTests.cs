@@ -21,14 +21,18 @@ namespace HostPinger.Test
 
         /// <summary>
         /// Anything that could lead off the site — an absolute address, a protocol-relative one,
-        /// the backslash form browsers read the same way — or nothing at all goes to the home page,
-        /// so signing in cannot be turned into a redirect somewhere else.
+        /// the backslash form browsers read the same way, one a browser makes protocol-relative by
+        /// dropping a tab or a line break — or nothing at all goes to the home page, so signing in
+        /// cannot be turned into a redirect somewhere else.
         /// </summary>
         [TestCase(null)]
         [TestCase("")]
         [TestCase("https://example.com/")]
         [TestCase("//example.com/")]
         [TestCase("/\\example.com/")]
+        [TestCase("/\t/example.com/")]
+        [TestCase("/\n/example.com/")]
+        [TestCase("/\r/example.com/")]
         [TestCase("configuration")]
         [TestCase("javascript:alert(1)")]
         public void LocalUrl_SendsAnythingElseHome(string? url)
