@@ -18,6 +18,10 @@ jobs:
   test:
     name: test (ubuntu)
     runs-on: ubuntu-latest
+    # Both suites take a couple of minutes. A test that waits on something nothing will ever
+    # answer would otherwise hold the job, and a tag's release behind it, for GitHub's six hours;
+    # the hang timeout on each run below names the test and dumps it well before this.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -32,11 +36,14 @@ jobs:
       # Running the tests on Linux is not redundant with a developer's Windows run: the path
       # defaults are per-OS, so the assertions covering /var/lib/hostpinger are skipped on Windows
       # and only ever execute here.
-      - run: dotnet test HostPinger.Test/HostPinger.Test.csproj -c Release
+      - run: dotnet test HostPinger.Test/HostPinger.Test.csproj -c Release --blame-hang-timeout 5m
 
-      # The runner image ships Chrome, which is what these drive; on a machine without one they
-      # report that and are ignored rather than failing, so this stays green either way.
-      - run: dotnet test HostPinger.UITest/HostPinger.UITest.csproj -c Release
+      # The runner image ships Chrome, which is what these drive. On a machine without one they
+      # report that and are ignored rather than failing, which here would leave the job green with
+      # every browser test skipped, so the variable has them fail instead.
+      - run: dotnet test HostPinger.UITest/HostPinger.UITest.csproj -c Release --blame-hang-timeout 5m
+        env:
+          HOSTPINGER_REQUIRE_BROWSER: 'true'
 
   benchmark:
     name: benchmark (ubuntu)

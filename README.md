@@ -738,7 +738,7 @@ dotnet run -c Release --project HostPinger.Benchmarks   # the database calls the
 itself, on a spare port and with a database in a temporary directory, so a run touches neither the
 development data nor an installed service's. It uses whichever browser is already installed rather
 than downloading one; where there is none, those tests report why and are ignored instead of
-failing.
+failing — unless `HOSTPINGER_REQUIRE_BROWSER` is set, as CI sets it, when they fail.
 
 The development profile keeps its database and settings inside the working tree, so a local run
 never touches an installed service's data.

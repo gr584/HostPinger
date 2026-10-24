@@ -19,9 +19,14 @@ namespace HostPinger.UITest
         {
             if (UiTestRun.BrowserPath is null)
             {
-                Assert.Ignore(
-                    "No Chrome or Chromium on this machine, so the browser tests cannot run. "
-                    + $"Looked in: {UiTestRun.WhereItLooked}.");
+                var reason = "No Chrome or Chromium on this machine, so the browser tests cannot run. "
+                    + $"Looked in: {UiTestRun.WhereItLooked}.";
+                if (UiTestRun.IsBrowserRequired)
+                {
+                    Assert.Fail($"{reason} {UiTestRun.RequireBrowserVariable} is set, so that fails them rather than skipping them.");
+                }
+
+                Assert.Ignore(reason);
             }
 
             _context = await UiTestRun.Browser.NewContextAsync();

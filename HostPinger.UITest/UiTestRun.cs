@@ -15,7 +15,9 @@ namespace HostPinger.UITest
     /// download and pin its own, but that is a step of its own on a machine where browsers cannot
     /// be installed without a package manager; running against the browser that is there is worth
     /// more than being skipped for want of a download. Where there is none, the browser tests say
-    /// so and are ignored rather than failing.
+    /// so and are ignored rather than failing — except where <see cref="RequireBrowserVariable"/>
+    /// is set, as CI sets it, since there a run that skips them all would pass looking like one
+    /// that ran them.
     /// </remarks>
     [SetUpFixture]
     public sealed class UiTestRun
@@ -31,6 +33,16 @@ namespace HostPinger.UITest
         private static WebApp? _app;
         private static IPlaywright? _playwright;
         private static IBrowser? _browser;
+
+        /// <summary>
+        /// Set to anything to have the browser tests fail where no browser is found, rather than
+        /// be ignored. CI sets it: a runner image that stopped shipping Chrome would otherwise turn
+        /// every browser test into a skip and the job would stay green.
+        /// </summary>
+        public const string RequireBrowserVariable = "HOSTPINGER_REQUIRE_BROWSER";
+
+        public static bool IsBrowserRequired =>
+            !string.IsNullOrEmpty(Environment.GetEnvironmentVariable(RequireBrowserVariable));
 
         /// <summary>The browser to drive, or null when this machine has none.</summary>
         public static string? BrowserPath { get; } = CandidateBrowsers.FirstOrDefault(File.Exists);
