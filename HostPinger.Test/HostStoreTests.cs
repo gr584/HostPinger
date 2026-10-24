@@ -378,6 +378,66 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// A long history goes a batch at a time, each its own statement and transaction, so that
+        /// a ping round coming due waits for one batch rather than the whole history; the other
+        /// host's attempts stay. Counted through the statements the store sends.
+        /// </summary>
+        [Test]
+        public async Task DeleteAsync_TakesALongHistoryABatchAtATime()
+        {
+            var id = await AddHostAsync("alpha", "alpha.example");
+            var kept = await AddHostAsync("bravo", "bravo.example", roundtripMs: 15);
+            await AddAttemptsAsync(id, HostStore.DeleteBatchSize * 2 + 7);
+            var counting = new StatementCounter("DELETE FROM PingAttempts");
+            var store = Store(new DbContextOptionsBuilder<HostPingerDbContext>()
+                .UseSqlite($"Data Source={_databasePath}")
+                .AddInterceptors(counting)
+                .Options);
+
+            var summary = await MakeAsync(() => store.DeleteAsync(id));
+
+            await using var db = new HostPingerDbContext(_options);
+            Assert.Multiple(async () =>
+            {
+                Assert.That(counting.Count, Is.EqualTo(3), "two full batches and the seven left");
+                Assert.That(Names(summary), Is.EqualTo(new[] { "bravo" }));
+                Assert.That(await db.PingAttempts.Select(a => a.HostId).ToListAsync(), Is.EqualTo(new[] { kept }));
+            });
+        }
+
+        /// <summary>
+        /// A delete that fails after its first write says it stopped partway rather than that
+        /// nothing was saved, and leaves the host paused with the history it had not yet reached:
+        /// paused, so that it is not pinged with half its history, and there, so that deleting it
+        /// again finishes the job. A trigger refuses the last batch, standing in for a full disk.
+        /// </summary>
+        [Test]
+        public async Task DeleteAsync_ThatStopsPartway_LeavesTheHostPausedWithTheRest()
+        {
+            var id = await AddHostAsync("alpha", "alpha.example");
+            await AddAttemptsAsync(id, HostStore.DeleteBatchSize + 7);
+            await using (var db = new HostPingerDbContext(_options))
+            {
+                await db.Database.ExecuteSqlRawAsync(
+                    "CREATE TRIGGER refuse_last BEFORE DELETE ON PingAttempts "
+                    + "WHEN OLD.Id = (SELECT MAX(Id) FROM PingAttempts) BEGIN SELECT RAISE(ABORT, 'disk full'); END;");
+            }
+
+            var failure = await Assert.ThrowsAsync<IOException>(() => _store.DeleteAsync(id).WaitAsync(Patience));
+
+            var host = (await HostsAsync()).Single();
+            await using var check = new HostPingerDbContext(_options);
+            Assert.Multiple(async () =>
+            {
+                Assert.That(failure!.Message, Is.EqualTo(
+                    "The delete stopped partway: SQLite Error 19: 'disk full'. The host is paused, with what was left "
+                    + "of its history; delete it again to finish."));
+                Assert.That(host.IsEnabled, Is.False);
+                Assert.That(await check.PingAttempts.CountAsync(), Is.EqualTo(7), "the first batch went, the last did not");
+            });
+        }
+
+        /// <summary>
         /// Only the address's own index is the address being taken. Any other constraint that
         /// refuses a host — here a trigger, standing in for whatever a later schema adds — is the
         /// change not being saved, with the database's reason, which is the misreport the page
@@ -575,12 +635,20 @@ namespace HostPinger.Test
         /// <summary>
         /// Makes a change and takes the read it is waiting for. It is still waiting once the change
         /// has been made — a store handing back the summary in hand would be done already — and is
-        /// done once the read has been taken.
+        /// done once the read has been taken. A delete is made off this thread, so the read is
+        /// taken only once the change has asked for it.
         /// </summary>
         private async Task<T> MakeAsync<T>(Func<Task<T>> change)
         {
             var making = change();
             Assert.That(making.IsCompleted, Is.False, "the change waits for a read of its own");
+            var deadline = DateTime.UtcNow + Patience;
+            while (!_summaries.IsReadRequested && !making.IsCompleted)
+            {
+                Assert.That(DateTime.UtcNow, Is.LessThan(deadline), "the change asks for a read");
+                await Task.Delay(10);
+            }
+
             await _summaries.PollAsync();
             return await making.WaitAsync(Patience);
         }
@@ -600,6 +668,41 @@ namespace HostPinger.Test
 
             await _summaries.PollAsync();
             return host.Id;
+        }
+
+        /// <summary>A run of attempts for one host, a second apart, oldest first.</summary>
+        private async Task AddAttemptsAsync(int hostId, int count)
+        {
+            await using var db = new HostPingerDbContext(_options);
+            db.PingAttempts.AddRange(Enumerable.Range(0, count).Select(i => new PingAttempt
+            {
+                HostId = hostId,
+                TimestampUtc = Now.AddSeconds(-count + i),
+                RoundtripMs = null,
+            }));
+            await db.SaveChangesAsync();
+        }
+
+        /// <summary>Counts the statements a context sends that begin a given way.</summary>
+        private sealed class StatementCounter(string prefix) : Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor
+        {
+            private int _count;
+
+            public int Count => _count;
+
+            public override ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> NonQueryExecutingAsync(
+                System.Data.Common.DbCommand command,
+                Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData,
+                Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> result,
+                CancellationToken cancellationToken = default)
+            {
+                if (command.CommandText.TrimStart().StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    Interlocked.Increment(ref _count);
+                }
+
+                return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+            }
         }
 
         private async Task<List<MonitoredHost>> HostsAsync()

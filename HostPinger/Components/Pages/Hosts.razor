@@ -229,7 +229,9 @@
                             <span class="text-danger">Delete this host and its ping history?</span>
                             <div class="d-flex gap-2">
                                 <button type="button" class="btn btn-outline-secondary btn-sm" disabled="@_isChanging" @onclick="() => _isDeletePending = false">Cancel</button>
-                                <button type="button" class="btn btn-danger btn-sm" disabled="@_isChanging" @onclick="() => DeleteAsync(deleteId)">Confirm delete</button>
+                                @* A host with months of history takes seconds to delete; the store does it off this
+                                   page's circuit, so the button can say so meanwhile. *@
+                                <button type="button" class="btn btn-danger btn-sm" disabled="@_isChanging" @onclick="() => DeleteAsync(deleteId)">@(_isChanging ? "Deleting…" : "Confirm delete")</button>
                             </div>
                         }
                         else

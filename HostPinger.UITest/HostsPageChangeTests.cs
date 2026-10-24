@@ -249,7 +249,9 @@ namespace HostPinger.UITest
         /// <summary>
         /// A delete the database refuses is reported in the dialog, with the confirmation taken
         /// down so that the reason is not read as a question, and the host stays. It used to throw
-        /// out of the page and end its circuit.
+        /// out of the page and end its circuit. A delete pauses the host before it takes the
+        /// history, so one refused at the host itself says it stopped partway and leaves the host
+        /// paused, which the table shows.
         /// </summary>
         [Test]
         public async Task Form_ShowsWhyADeleteWasNotSaved()
@@ -266,11 +268,13 @@ namespace HostPinger.UITest
                 await Button(Dialog, "Delete").ClickAsync();
                 await Button(Dialog, "Confirm delete").ClickAsync();
 
-                await Assertions.Expect(Dialog.Locator(".alert"))
-                    .ToHaveTextAsync("The change was not saved: SQLite Error 19: 'kept by the test'.");
+                await Assertions.Expect(Dialog.Locator(".alert")).ToHaveTextAsync(
+                    "The delete stopped partway: SQLite Error 19: 'kept by the test'. The host is paused, with what "
+                    + "was left of its history; delete it again to finish.");
                 await Assertions.Expect(Button(Dialog, "Confirm delete")).ToHaveCountAsync(0);
                 await Assertions.Expect(Button(Dialog, "Delete")).ToBeVisibleAsync();
                 await Assertions.Expect(Row(name)).ToHaveCountAsync(1);
+                await Assertions.Expect(Status(name)).ToHaveTextAsync("Paused");
             }
             finally
             {

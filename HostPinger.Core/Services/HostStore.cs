@@ -42,9 +42,12 @@ namespace HostPinger.Core.Services
     /// that restore had just retired.
     /// </para>
     /// <para>
-    /// Each change runs on the thread that asks for it, for as long as its statement takes:
-    /// Microsoft.Data.Sqlite does no asynchronous I/O. Only the wait for the summary afterwards
-    /// hands the thread back. Cancelling ends that wait; a change already made stays made.
+    /// Each change but a delete runs on the thread that asks for it, for as long as its statement
+    /// takes: Microsoft.Data.Sqlite does no asynchronous I/O, and a change to one row takes
+    /// milliseconds. Only the wait for the summary afterwards hands the thread back. A delete can
+    /// take a host's whole history with it, which is seconds, so it runs on the thread pool
+    /// instead. Cancelling ends the wait for the summary; a change already made, or a delete
+    /// already asked for, stays made.
     /// </para>
     /// </remarks>
     public sealed class HostStore(
@@ -59,6 +62,14 @@ namespace HostPinger.Core.Services
         /// this can only be the address.
         /// </summary>
         private const int UniqueConstraintFailed = 2067;
+
+        /// <summary>
+        /// How many of a host's attempts one statement of a delete takes away. Each batch commits on
+        /// its own, so a ping round that comes due waits for one batch rather than for the whole
+        /// history: one statement over the 417,000 attempts of a host down for six weeks held the
+        /// database for seventeen seconds on the development machine.
+        /// </summary>
+        internal const int DeleteBatchSize = 5000;
 
         private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
 
@@ -181,25 +192,51 @@ namespace HostPinger.Core.Services
         }
 
         /// <summary>
-        /// Deletes a host and, through the cascade on its attempts, its whole ping history. A host
-        /// that is not there any more is already gone. A ping round under way is not waited for;
-        /// see the remarks on this class.
+        /// Deletes a host and its whole ping history. A host that is not there any more is already
+        /// gone. A ping round under way is not waited for; see the remarks on this class.
         /// </summary>
+        /// <remarks>
+        /// The host is paused first, so that no round starting meanwhile pings it, and its history
+        /// then goes <see cref="DeleteBatchSize"/> attempts at a time, each batch a transaction of
+        /// its own, so that ping rounds and other writes take turns with it rather than waiting out
+        /// the whole history. The host row goes last, and its cascade takes whatever a round that
+        /// was already out saved after the last batch. All of it runs on the thread pool, and to
+        /// the end once asked for: the page's circuit stays free meanwhile, and leaving the page
+        /// does not leave half a history behind. A delete that fails partway — a disk that fills —
+        /// leaves the host paused with what was not yet taken, and says so.
+        /// </remarks>
         public async Task<HostSummarySnapshot> DeleteAsync(int id, CancellationToken cancellationToken = default)
         {
-            await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken))
-            {
-                try
-                {
-                    await db.Hosts.Where(h => h.Id == id).ExecuteDeleteAsync(cancellationToken);
-                }
-                catch (Exception ex) when (IsStorageFailure(ex))
-                {
-                    throw NotSaved(ex);
-                }
-            }
-
+            await Task.Run(() => DeleteHostAndHistoryAsync(id), CancellationToken.None);
             return await summaries.RefreshAsync(cancellationToken);
+        }
+
+        private async Task DeleteHostAndHistoryAsync(int id)
+        {
+            await using var db = await dbFactory.CreateDbContextAsync();
+            var paused = false;
+            try
+            {
+                if (await db.Hosts.Where(h => h.Id == id).ExecuteUpdateAsync(s => s.SetProperty(h => h.IsEnabled, false)) == 0)
+                {
+                    return;
+                }
+
+                paused = true;
+                int deleted;
+                do
+                {
+                    deleted = await db.Database.ExecuteSqlAsync(
+                        $"DELETE FROM PingAttempts WHERE Id IN (SELECT Id FROM PingAttempts WHERE HostId = {id} LIMIT {DeleteBatchSize});");
+                }
+                while (deleted == DeleteBatchSize);
+
+                await db.Hosts.Where(h => h.Id == id).ExecuteDeleteAsync();
+            }
+            catch (Exception ex) when (IsStorageFailure(ex))
+            {
+                throw paused ? NotFinished(ex) : NotSaved(ex);
+            }
         }
 
         /// <summary>
@@ -244,6 +281,15 @@ namespace HostPinger.Core.Services
         {
             logger.LogWarning(ex, "A change to the hosts was not saved.");
             return new IOException($"The change was not saved: {(ex.InnerException ?? ex).Message}", ex);
+        }
+
+        private IOException NotFinished(Exception ex)
+        {
+            logger.LogWarning(ex, "A host's delete stopped partway; the host is paused with the rest of its history.");
+            return new IOException(
+                $"The delete stopped partway: {(ex.InnerException ?? ex).Message} The host is paused, with what was "
+                    + "left of its history; delete it again to finish.",
+                ex);
         }
     }
 

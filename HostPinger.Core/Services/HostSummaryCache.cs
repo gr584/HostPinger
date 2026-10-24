@@ -178,6 +178,22 @@ namespace HostPinger.Core.Services
         }
 
         /// <summary>
+        /// Whether somebody is waiting on <see cref="RefreshAsync"/> for the next turn of the loop:
+        /// for tests that turn the loop by hand, and have to know a change made off their own
+        /// thread has asked before they take the read it asked for.
+        /// </summary>
+        internal bool IsReadRequested
+        {
+            get
+            {
+                lock (_requestLock)
+                {
+                    return _requested is not null;
+                }
+            }
+        }
+
+        /// <summary>
         /// One turn of the loop: reads the summary if the database or the retry count has changed
         /// since the last read, hands it to the pages, and answers whoever asked for it.
         /// </summary>

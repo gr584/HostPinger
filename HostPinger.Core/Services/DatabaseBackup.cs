@@ -113,7 +113,15 @@ namespace HostPinger.Core.Services
         /// one carrying migrations this build has never heard of is refused rather than guessed at,
         /// and so is one defining anything that would run inside this application.
         /// </summary>
-        public async Task<string?> ValidateBackupAsync(string candidatePath, CancellationToken cancellationToken = default)
+        /// <remarks>
+        /// Runs on the thread pool: Microsoft.Data.Sqlite does no asynchronous I/O, and the integrity
+        /// check reads the whole file, which for a gigabyte is seconds the page asking would
+        /// otherwise sit frozen through.
+        /// </remarks>
+        public Task<string?> ValidateBackupAsync(string candidatePath, CancellationToken cancellationToken = default) =>
+            Task.Run(() => ValidateOnThisThreadAsync(candidatePath, cancellationToken), cancellationToken);
+
+        private async Task<string?> ValidateOnThisThreadAsync(string candidatePath, CancellationToken cancellationToken)
         {
             if (!await HasSqliteHeaderAsync(candidatePath, cancellationToken))
             {
@@ -225,8 +233,15 @@ namespace HostPinger.Core.Services
         /// rollback-journal mode; on a fresh install, where there was nothing to put back, an empty
         /// database takes its place.
         /// </para>
+        /// <para>
+        /// Runs on the thread pool, for the reason <see cref="ValidateBackupAsync"/> gives: an old
+        /// backup's migration would otherwise hold the page asking for minutes.
+        /// </para>
         /// </summary>
-        public async Task RestoreAsync(string candidatePath, CancellationToken cancellationToken = default)
+        public Task RestoreAsync(string candidatePath, CancellationToken cancellationToken = default) =>
+            Task.Run(() => RestoreOnThisThreadAsync(candidatePath, cancellationToken), CancellationToken.None);
+
+        private async Task RestoreOnThisThreadAsync(string candidatePath, CancellationToken cancellationToken)
         {
             await PrepareCandidateAsync(candidatePath, cancellationToken);
 
