@@ -196,10 +196,13 @@ service, locked or not.
 - **No password is set by default**, and nothing is locked until one is. A HostPinger that nobody
   has given a password behaves exactly as it did before the feature existed, and says so on the
   Configuration page.
-- **Unlocking is per browser and lasts until that browser is closed.** It is not remembered any
-  longer than that, and nothing is remembered about who unlocked it — there is nobody to remember.
-  Locking applies from the next page each open window loads, so a window left sitting on the host
-  list keeps what it had until it is used again.
+- **Unlocking is per browser and lasts until that browser is closed**, or until twelve hours pass
+  in which it loads no page. It is not remembered any longer than that, and nothing is remembered
+  about who unlocked it — there is nobody to remember. Locking applies from the next page each open
+  window loads, so a window left sitting on the host list keeps what it had until it is used again.
+  **Lock** forgets the unlock in that browser only; a copy of its cookie taken off the network goes
+  on working until those twelve hours run out or the password changes, so changing the password is
+  how to end every unlock at once.
 - **Changing the password locks every browser again**, including the one that changed it, which is
   signed straight back in under the new one. Removing it unlocks everything for everyone.
 - **Wrong passwords are made to wait.** The first three cost nothing, so mistyping a password from

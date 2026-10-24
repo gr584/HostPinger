@@ -70,11 +70,8 @@ namespace HostPinger
             builder.Services.AddSingleton<UserSettingsStore>();
             builder.Services.AddHostPingerDatabase(paths);
 
-            // Unlocking the actions that change hosts and settings. There are no accounts: signing
-            // in means holding the one password, and the cookie says nothing but that. It is
-            // deliberately not persistent, so closing the browser locks it again, and SameAsRequest
-            // rather than Always because the service is normally reached over plain HTTP — a
-            // cookie marked secure there would never come back.
+            // Unlocking the actions that change hosts and settings; see UnlockCookie for the cookie
+            // an unlock is made of.
             builder.Services.AddSingleton<PasswordGate>();
 
             // Every guess goes through here, which is why it is a singleton: what it remembers is
@@ -83,15 +80,7 @@ namespace HostPinger
             builder.Services.AddSingleton<PasswordAttempts>();
 
             builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
-                .AddCookie(options =>
-                {
-                    options.Cookie.Name = "hostpinger-unlock";
-                    options.Cookie.HttpOnly = true;
-                    options.Cookie.SameSite = SameSiteMode.Lax;
-                    options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
-                    options.LoginPath = "/unlock";
-                    options.ReturnUrlParameter = "returnUrl";
-                });
+                .AddCookie(UnlockCookie.Configure);
 
             // Puts the signed-in principal where the components can see it, which is what the pages
             // pass to PasswordGate.
