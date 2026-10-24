@@ -7,6 +7,13 @@ Wants=network-online.target
 # notify rather than simple: the application calls AddSystemd(), so it reports READY=1 once the
 # host has started and systemd stops treating the unit as activating before it can serve.
 Type=notify
+# No time limit on reaching READY=1, because the migrations run before it. One that builds an
+# index over a database near its size limit takes as long as the history is big and the machine
+# slow: upgrading a 1 GB production copy from 1.12.0 took 35-56 s, and 124 s at 40% of a core,
+# where Fedora's default limit is 45 s. A start killed for running long gains nothing by being
+# retried — the next one starts that migration over and is killed at the same point, for as long
+# as Restart= keeps trying.
+TimeoutStartSec=infinity
 ExecStart=/usr/lib/hostpinger/HostPinger
 User=hostpinger
 Group=hostpinger

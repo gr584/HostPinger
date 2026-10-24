@@ -85,11 +85,49 @@ namespace HostPinger.Core.Services
             try
             {
                 await EnableIncrementalVacuumAsync(db, cancellationToken);
+                await ClearMigrationLockAsync(db, cancellationToken);
                 await db.Database.MigrateAsync(cancellationToken);
             }
             finally
             {
                 await db.Database.CloseConnectionAsync();
+            }
+        }
+
+        /// <summary>
+        /// Deletes the row EF Core's migrator holds as its lock, if a migrator that never finished
+        /// left one behind.
+        /// </summary>
+        /// <remarks>
+        /// The migrator locks a SQLite database by inserting a row into __EFMigrationsLock, and only
+        /// deletes it again once it is done. A process stopped partway through leaves the row in
+        /// place: a start that ran past systemd's start timeout while a migration built an index
+        /// over a large history, a reboot, a kill. Every migrator after it then waits on that row
+        /// forever — the service never starts, and neither --remove-password nor a restore gets past
+        /// it — until somebody deletes it by hand.
+        /// <para>
+        /// Deleting it unasked is safe because nothing else migrates this database while this runs.
+        /// The service migrates before it serves anything, and a restore migrates inside the
+        /// service with the maintenance gate held. The one other process that migrates is
+        /// --remove-password, which is meant to be run with the service stopped. Run against a
+        /// service still migrating regardless, the delete is a write like any other: it waits
+        /// behind the migration under way, which holds the file's write lock until it commits, and
+        /// gives up with "database is locked" once the busy timeout runs out. Should it slip in
+        /// between two migrations instead, each one commits together with its history row, so a
+        /// second attempt at one the other has just applied fails on finding its work done, and
+        /// rolls back, rather than applying it twice.
+        /// </para>
+        /// </remarks>
+        private static async Task ClearMigrationLockAsync(HostPingerDbContext db, CancellationToken cancellationToken)
+        {
+            // The table is EF's, created the first time a migrator takes the lock; a brand-new file
+            // has none to clear.
+            var connection = db.Database.GetDbConnection();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '__EFMigrationsLock';";
+            if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken)) > 0)
+            {
+                await db.Database.ExecuteSqlRawAsync("DELETE FROM \"__EFMigrationsLock\";", cancellationToken);
             }
         }
 

@@ -281,7 +281,9 @@ service, locked or not.
   migrated automatically at startup, so an upgrade needs no separate step. A release that adds or
   rebuilds an index builds it over the history already recorded, before the service starts
   answering — on a database near its size limit that is the one kind of upgrade that takes
-  noticeable time, a minute or two.
+  noticeable time, a minute or two, and longer on a slow machine. The Linux service waits for it
+  however long it takes, and a start interrupted anyway — a reboot, a stop — leaves nothing to
+  repair: the next start begins that migration again.
 - The settings edited on the Configuration page, and the hashed password if one is set, live in a
   small table inside the same file. It holds only what has been changed from the defaults, so a
   default improved by a later release shows through for everything nobody has touched — and a

@@ -20,6 +20,9 @@ namespace HostPinger.Test
         /// <summary>The last migration before the settings table, for a database an older build left.</summary>
         private const string BeforeUserSettings = "20260811051236_AddResolverErrors";
 
+        /// <summary>The last migration 1.12.0 shipped, with both index rebuilds still to come.</summary>
+        private const string LastIn1_12 = "20260829041132_AddUserSettings";
+
         private static readonly DateTime Start = new(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc);
 
         private string _directory = null!;
@@ -83,6 +86,42 @@ namespace HostPinger.Test
             }
 
             Assert.That(File.Exists(awkward), Is.True);
+        }
+
+        /// <summary>
+        /// A start killed partway through a migration leaves the migrator's lock row behind — which
+        /// is what systemd's start timeout did to an upgrade from 1.12.0, whose two index rebuilds
+        /// outlasted it. Every later start then waited on that row forever, and the service only
+        /// came back once somebody deleted it by hand.
+        /// </summary>
+        [Test]
+        public async Task InitializeAsync_MigratesPastALockAKilledMigrationLeftBehind()
+        {
+            await using (var db = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath)))
+            {
+                await db.GetService<IMigrator>().MigrateAsync(LastIn1_12);
+                await db.Database.ExecuteSqlRawAsync(
+                    "INSERT INTO \"__EFMigrationsLock\" (\"Id\", \"Timestamp\") VALUES (1, '2026-10-22 07:03:51.8874913+00:00');");
+            }
+
+            // The migrator's wait for the lock honours cancellation, so a lock still in the way
+            // fails the test here rather than hanging the run.
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            await using (var db = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath)))
+            {
+                await HostPingerDatabase.InitializeAsync(db, timeout.Token);
+            }
+
+            await using var check = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath));
+            var connection = check.Database.GetDbConnection();
+            await connection.OpenAsync();
+            await using var count = connection.CreateCommand();
+            count.CommandText = "SELECT COUNT(*) FROM \"__EFMigrationsLock\";";
+            Assert.Multiple(async () =>
+            {
+                Assert.That(await check.Database.GetPendingMigrationsAsync(), Is.Empty);
+                Assert.That(await count.ExecuteScalarAsync(), Is.Zero, "the lock is released once the migrations are done");
+            });
         }
 
         /// <summary>
