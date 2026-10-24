@@ -39,6 +39,19 @@ namespace HostPinger.Core.Services
         internal int BusyTimeoutSeconds { get; init; } = 30;
 
         /// <summary>
+        /// What the disk beside the database has free. Settable for the tests, which cannot fill a
+        /// disk to see a restore refuse for want of room.
+        /// </summary>
+        internal Func<long> MeasureFreeBytes { get; init; } =
+            () => new DriveInfo(Path.GetDirectoryName(paths.DatabasePath)!).AvailableFreeSpace;
+
+        /// <summary>
+        /// Called once the backup is in place, before it is opened. For the tests, which have no
+        /// other way to act at that moment: to leave the page there, or to have opening it fail.
+        /// </summary>
+        internal Func<Task>? AfterSwap { get; init; }
+
+        /// <summary>
         /// Where the previous database goes when a restore replaces it: the undo, kept until the
         /// next restore overwrites it. Deliberately not the live file name plus a numbered scheme —
         /// one undo that is always current beats a directory that fills with stale ones.
@@ -167,30 +180,56 @@ namespace HostPinger.Core.Services
 
             // The migrations this build ships, read from the assembly: the context never opens.
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-            var known = db.Database.GetMigrations().ToHashSet(StringComparer.Ordinal);
-            return applied.TrueForAll(known.Contains)
-                ? null
-                : "This backup was made by a newer version of HostPinger.";
+            var known = db.Database.GetMigrations().ToList();
+            if (!applied.TrueForAll(known.Contains))
+            {
+                return "This backup was made by a newer version of HostPinger.";
+            }
+
+            // An older backup is migrated beside the database before it goes into place, and the
+            // migrations since 1.12.0 rebuild the history's indexes: on a production-sized file the
+            // journal for that reached about a third of the file. Refused here rather than left to
+            // fill the disk partway through, with half the file's size as the room it needs.
+            if (known.Except(applied).Any())
+            {
+                var needed = new FileInfo(candidatePath).Length / 2 + FreeSpaceMarginBytes;
+                var free = MeasureFreeBytes();
+                if (free < needed)
+                {
+                    return $"This backup is from an older version, and migrating it needs about {needed >> 20} MB "
+                        + $"free beside the database. The disk has {free >> 20} MB.";
+                }
+            }
+
+            return null;
         }
 
         /// <summary>
         /// Replaces the database with the validated file at <paramref name="candidatePath"/>,
-        /// keeping what it replaced at <see cref="PreRestorePath"/>, then migrates the new file
-        /// and reloads the settings snapshot — so when this returns, the backup's settings and
-        /// password are the ones in force. The candidate file is consumed by the swap. The restored
-        /// database is in WAL mode, and the one kept at <see cref="PreRestorePath"/> is in
-        /// rollback-journal mode, whole without a -wal beside it.
+        /// keeping what it replaced at <see cref="PreRestorePath"/>, and reloads the settings
+        /// snapshot — so when this returns, the backup's settings and password are the ones in
+        /// force. The candidate file is consumed by the swap. The restored database is in WAL
+        /// mode, and the one kept at <see cref="PreRestorePath"/> is in rollback-journal mode,
+        /// whole without a -wal beside it.
+        /// <para>
+        /// The candidate is migrated and checked where it lies, before anything is replaced and
+        /// before the maintenance gate is taken: migrating an old backup of a production-sized
+        /// database takes minutes, and ping rounds go on meanwhile rather than leaving a gap in
+        /// the history. Only the swap itself holds the gate.
+        /// </para>
         /// <para>
         /// Every failure is an <see cref="IOException"/>, and none leaves the service without a
-        /// database it can start on. Before the swap nothing has been replaced. After it, a
-        /// restored file that cannot be migrated, lacks part of the schema or will not give up its
-        /// settings is taken out again and the database it replaced put back, in rollback-journal
-        /// mode; on a fresh install, where there was nothing to put back, an empty database takes
-        /// its place.
+        /// database it can start on. A backup that cannot be migrated or lacks part of the schema
+        /// is refused with nothing replaced. After the swap, a restored file that will not open or
+        /// give up its settings is taken out again and the database it replaced put back, in
+        /// rollback-journal mode; on a fresh install, where there was nothing to put back, an empty
+        /// database takes its place.
         /// </para>
         /// </summary>
         public async Task RestoreAsync(string candidatePath, CancellationToken cancellationToken = default)
         {
+            await PrepareCandidateAsync(candidatePath, cancellationToken);
+
             using var maintenanceHold = await maintenanceGate.AcquireAsync(cancellationToken);
 
             // The host summary keeps a connection of its own open, outside the pool that
@@ -204,6 +243,40 @@ namespace HostPinger.Core.Services
             finally
             {
                 hostSummaries.Resume();
+            }
+        }
+
+        /// <summary>
+        /// Brings the candidate up to date and checks it has every table and column this build
+        /// reads, then puts it in WAL mode, all on connections of its own that are closed again
+        /// before the swap. Validation reads the migration history, not the tables it vouches
+        /// for, and a file can carry the one without the others; checked after the migrations,
+        /// because an older backup is only complete after them.
+        /// </summary>
+        private async Task PrepareCandidateAsync(string candidatePath, CancellationToken cancellationToken)
+        {
+            try
+            {
+                // Out of the pool, so that nothing holds the candidate open across the swap.
+                var options = new DbContextOptionsBuilder<HostPingerDbContext>()
+                    .UseSqlite(new SqliteConnectionStringBuilder { DataSource = candidatePath, Pooling = false }.ToString())
+                    .Options;
+                await using (var db = new HostPingerDbContext(options))
+                {
+                    await HostPingerDatabase.InitializeAsync(db, cancellationToken);
+                    if (await FindMissingSchemaAsync(db, cancellationToken) is { } missing)
+                    {
+                        throw new InvalidDataException($"The backup has no {missing}.");
+                    }
+                }
+
+                await EnterWalAsync(candidatePath, BusyTimeoutSeconds, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // A migration that fails on the file, a disk that fills partway through it: the
+                // live database has not been touched, which is what the reader needs to know.
+                throw new IOException($"{ex.Message} Nothing was replaced.", ex);
             }
         }
 
@@ -227,22 +300,25 @@ namespace HostPinger.Core.Services
                 // restored file it is corruption, not recovery.
                 DeleteSidecars();
 
-                await EnterWalAsync(candidatePath, BusyTimeoutSeconds, cancellationToken);
                 retired = await SwapIntoPlaceAsync(candidatePath, cancellationToken);
             }
             catch (SqliteException ex)
             {
-                // A file SQLite will not work on — a disk too full to change the candidate's
-                // journal mode — is a failed restore to report, like the file kept busy above.
+                // A file SQLite will not work on is a failed restore to report, like the file kept
+                // busy above.
                 throw new IOException($"{ex.Message} Nothing was replaced.", ex);
             }
 
             // From here the restore finishes or is undone, whatever becomes of the page that asked
             // for it: given up halfway, it would leave the backup's file in place under the
-            // settings and password of the one it replaced. Migrating a large old backup takes
-            // minutes, which is plenty of time to navigate away.
+            // settings and password of the one it replaced.
             try
             {
+                if (AfterSwap is { } afterSwap)
+                {
+                    await afterSwap();
+                }
+
                 await OpenRestoredAsync(CancellationToken.None);
             }
             catch (Exception ex)
@@ -268,20 +344,16 @@ namespace HostPinger.Core.Services
         }
 
         /// <summary>
-        /// Brings the file just swapped in up to date and loads its settings, refusing it if it
-        /// does not have every table and column this build reads.
+        /// Opens the file just swapped in and loads its settings. The candidate was migrated and
+        /// checked before the swap, so the migrations and the check here normally find nothing to
+        /// do; they are run again because they are what a service start would run on the file,
+        /// and cheap once there is nothing to apply.
         /// </summary>
         private async Task OpenRestoredAsync(CancellationToken cancellationToken)
         {
             await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken))
             {
-                // The restored file is somebody's old database: migrate it up and re-establish
-                // incremental vacuum, exactly as a service start would.
                 await HostPingerDatabase.InitializeAsync(db, cancellationToken);
-
-                // Validation reads the migration history, not the tables it vouches for, and a file
-                // can carry the one without the others. Checked here, once the migrations have run,
-                // rather than up front, because an older backup is only complete after them.
                 if (await FindMissingSchemaAsync(db, cancellationToken) is { } missing)
                 {
                     throw new InvalidDataException($"The backup has no {missing}.");
@@ -456,8 +528,7 @@ namespace HostPinger.Core.Services
         }
 
         /// <summary>What the data directory's disk has free, for the headroom checks.</summary>
-        public long AvailableFreeBytes() =>
-            new DriveInfo(Path.GetDirectoryName(paths.DatabasePath)!).AvailableFreeSpace;
+        public long AvailableFreeBytes() => MeasureFreeBytes();
 
         /// <summary>
         /// Sweeps snapshot and upload temp files an earlier run left behind — a download that
@@ -475,10 +546,11 @@ namespace HostPinger.Core.Services
                     {
                         File.Delete(leftover);
                     }
-                    catch (IOException)
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                     {
                         // A file that will not delete is disk clutter, not a reason the service
-                        // cannot start.
+                        // cannot start. Windows refuses a read-only file, or one its permissions
+                        // deny, with UnauthorizedAccessException rather than IOException.
                     }
                 }
             }

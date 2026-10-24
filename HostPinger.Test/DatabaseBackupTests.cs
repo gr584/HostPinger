@@ -3,6 +3,8 @@ using HostPinger.Core.Options;
 using HostPinger.Core.Services;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace HostPinger.Test
@@ -13,6 +15,11 @@ namespace HostPinger.Test
     /// </summary>
     public class DatabaseBackupTests
     {
+        /// <summary>The last migration 1.12.0 shipped, with both index rebuilds still to come.</summary>
+        private const string LastIn1_12 = "20260829041132_AddUserSettings";
+
+        private static readonly TimeSpan Patience = TimeSpan.FromSeconds(30);
+
         private string _directory = null!;
         private string _dbPath = null!;
         private DbContextOptions<HostPingerDbContext> _options = null!;
@@ -508,10 +515,10 @@ namespace HostPinger.Test
         /// Validation vouches for the migration history, and a file can carry that without the
         /// tables it describes. Swapped in, such a file used to stay in place with the settings
         /// unreadable, and the service could not start on it until somebody put the undo copy back
-        /// by hand. Now the restore takes it out again itself.
+        /// by hand. Now it is found out where it lies, before anything is replaced.
         /// </summary>
         [Test]
-        public async Task Restore_PutsTheDatabaseBackWhenTheBackupLacksATable()
+        public async Task Restore_RefusesABackupThatLacksATable_ReplacingNothing()
         {
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
             await StagePasswordAsync(_options, "current-hash");
@@ -534,16 +541,16 @@ namespace HostPinger.Test
 
             var failure = await Assert.ThrowsAsync<IOException>(() => _backup.RestoreAsync(backupPath));
 
-            await AssertTheCurrentDatabaseIsBackAsync(failure!, "The backup has no ResolverErrors table. The previous database is back in place.");
+            await AssertNothingWasReplacedAsync(failure!, "The backup has no ResolverErrors table. Nothing was replaced.");
         }
 
         /// <summary>
-        /// An older backup is migrated as it is restored, and a migration can fail on it — here
-        /// the last one, which drops an index the file no longer has. The file it was meant to
-        /// replace goes back rather than the half-migrated one staying.
+        /// An older backup is migrated before it is restored, and a migration can fail on it —
+        /// here the last one, which drops an index the file no longer has. That is found out
+        /// before the swap, so the database it was meant to replace never leaves.
         /// </summary>
         [Test]
-        public async Task Restore_PutsTheDatabaseBackWhenTheBackupCannotBeMigrated()
+        public async Task Restore_RefusesABackupThatCannotBeMigrated_ReplacingNothing()
         {
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
             await StagePasswordAsync(_options, "current-hash");
@@ -563,7 +570,26 @@ namespace HostPinger.Test
             var failure = await Assert.ThrowsAsync<IOException>(() => _backup.RestoreAsync(backupPath));
 
             Assert.That(failure!.Message, Does.Contain("no such index: IX_PingAttempts_Answered"));
-            await AssertTheCurrentDatabaseIsBackAsync(failure, failure.Message);
+            Assert.That(failure.Message, Does.EndWith(" Nothing was replaced."));
+            await AssertNothingWasReplacedAsync(failure, failure.Message);
+        }
+
+        /// <summary>
+        /// A restored file that will not open once it is in place — standing in for the settings
+        /// failing to load, or the disk filling as it is opened — is taken out again, and the
+        /// database it replaced goes back.
+        /// </summary>
+        [Test]
+        public async Task Restore_PutsTheDatabaseBackWhenTheRestoredFileWillNotOpen()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            await StagePasswordAsync(_options, "current-hash");
+            await _store.LoadAsync();
+            var backupPath = await BackupWithAsync("backup.example", "backup-hash");
+
+            var failure = await Assert.ThrowsAsync<IOException>(() => FailingToOpen().RestoreAsync(backupPath));
+
+            await AssertTheCurrentDatabaseIsBackAsync(failure!, "Opening it failed in the test. The previous database is back in place.");
         }
 
         /// <summary>
@@ -574,31 +600,197 @@ namespace HostPinger.Test
         [Test]
         public async Task Restore_IntoAFreshInstallLeavesAnEmptyDatabaseWhenTheBackupWillNotOpen()
         {
-            var backupPath = Path.Combine(_directory, "uploaded.db");
-            await using (var db = new HostPingerDbContext(OptionsFor(backupPath)))
-            {
-                await db.Database.MigrateAsync();
-                await db.Database.ExecuteSqlRawAsync("DROP TABLE ResolverErrors;");
-            }
+            var backupPath = await BackupWithAsync("backup.example", "backup-hash");
 
             SqliteConnection.ClearAllPools();
             File.Move(_dbPath, _backup.PreRestorePath);
             await SeedHostWithAttemptsAsync(OptionsFor(_backup.PreRestorePath), "an-earlier-undo.example", attempts: 1);
             SqliteConnection.ClearAllPools();
 
-            var failure = await Assert.ThrowsAsync<IOException>(() => _backup.RestoreAsync(backupPath));
+            var failure = await Assert.ThrowsAsync<IOException>(() => FailingToOpen().RestoreAsync(backupPath));
 
             await using var live = new HostPingerDbContext(_options);
             await using var undo = new HostPingerDbContext(OptionsFor(_backup.PreRestorePath));
             Assert.Multiple(async () =>
             {
                 Assert.That(failure!.Message, Is.EqualTo(
-                    "The backup has no ResolverErrors table. An empty database is in its place, as there was none before."));
+                    "Opening it failed in the test. An empty database is in its place, as there was none before."));
                 Assert.That(await live.Database.GetPendingMigrationsAsync(), Is.Empty);
                 Assert.That(await live.Hosts.CountAsync(), Is.Zero);
                 Assert.That(await undo.Hosts.Select(h => h.Address).SingleAsync(), Is.EqualTo("an-earlier-undo.example"),
                     "the earlier undo is left where it was");
             });
+        }
+
+        /// <summary>
+        /// Leaving the page once the backup is in place no longer stops the restore: given up
+        /// there, it would leave the backup's file under the settings and password of the one it
+        /// replaced. The page's token is cancelled at exactly that moment, and the restore still
+        /// finishes, with the backup's password in force.
+        /// </summary>
+        [Test]
+        public async Task Restore_FinishesWhenThePageLeavesOnceTheBackupIsInPlace()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            await StagePasswordAsync(_options, "current-hash");
+            await _store.LoadAsync();
+            var backupPath = await BackupWithAsync("backup.example", "backup-hash");
+
+            using var page = new CancellationTokenSource();
+            var backup = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _summaries)
+            {
+                AfterSwap = () => page.CancelAsync(),
+            };
+
+            await backup.RestoreAsync(backupPath, page.Token);
+
+            SqliteConnection.ClearAllPools();
+            await using var live = new HostPingerDbContext(_options);
+            Assert.Multiple(async () =>
+            {
+                Assert.That(page.IsCancellationRequested, Is.True, "the page left");
+                Assert.That(await live.Hosts.Select(h => h.Address).SingleAsync(), Is.EqualTo("backup.example"));
+                Assert.That(_store.PasswordHash, Is.EqualTo("backup-hash"));
+            });
+        }
+
+        /// <summary>
+        /// An older backup is migrated where it lies, without the maintenance gate: on a
+        /// production-sized file that takes minutes, and holding the gate meanwhile left a gap of
+        /// that length in every host's history. Here the test holds the gate, as a round would, and
+        /// the backup is still brought up to date; only the swap waits.
+        /// </summary>
+        [Test]
+        public async Task Restore_MigratesAnOlderBackupWithoutHoldingUpThePingRounds()
+        {
+            var backupPath = Path.Combine(_directory, "uploaded.db");
+            await using (var db = new HostPingerDbContext(OptionsFor(backupPath)))
+            {
+                await db.GetService<IMigrator>().MigrateAsync(LastIn1_12);
+            }
+
+            int allMigrations;
+            await using (var db = new HostPingerDbContext(_options))
+            {
+                allMigrations = db.Database.GetMigrations().Count();
+            }
+
+            var gate = new MaintenanceGate();
+            var backup = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, gate, _summaries);
+            Task restoring;
+            using (await gate.AcquireAsync())
+            {
+                restoring = backup.RestoreAsync(backupPath);
+
+                var deadline = DateTime.UtcNow + Patience;
+                while (await AppliedMigrationsAsync(backupPath) < allMigrations)
+                {
+                    Assert.That(DateTime.UtcNow, Is.LessThan(deadline), "the backup is migrated while a round holds the gate");
+                    await Task.Delay(50);
+                }
+
+                Assert.That(restoring.IsCompleted, Is.False, "the swap waits for the round");
+            }
+
+            await restoring.WaitAsync(Patience);
+            SqliteConnection.ClearAllPools();
+            await using var live = new HostPingerDbContext(_options);
+            Assert.That(await live.Database.GetPendingMigrationsAsync(), Is.Empty);
+        }
+
+        /// <summary>
+        /// Migrating an older backup needs room beside the database for the journal, which on a
+        /// production-sized file reached about a third of it. Without that room the backup is
+        /// refused up front rather than filling the disk partway through.
+        /// </summary>
+        [Test]
+        public async Task ValidateBackup_RefusesAnOlderBackupWithoutRoomToMigrateIt()
+        {
+            var backupPath = Path.Combine(_directory, "uploaded.db");
+            await using (var db = new HostPingerDbContext(OptionsFor(backupPath)))
+            {
+                await db.GetService<IMigrator>().MigrateAsync(LastIn1_12);
+            }
+
+            var cramped = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _summaries)
+            {
+                MeasureFreeBytes = () => 3L << 20,
+            };
+
+            Assert.That(await cramped.ValidateBackupAsync(backupPath), Is.EqualTo(
+                "This backup is from an older version, and migrating it needs about 64 MB free beside the database. The disk has 3 MB."));
+        }
+
+        /// <summary>A backup with nothing to migrate needs no room beyond the upload it already is.</summary>
+        [Test]
+        public async Task ValidateBackup_AcceptsACurrentBackupWhateverRoomIsLeft()
+        {
+            var backupPath = await _backup.CreateSnapshotAsync();
+            var cramped = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _summaries)
+            {
+                MeasureFreeBytes = () => 0,
+            };
+
+            Assert.That(await cramped.ValidateBackupAsync(backupPath), Is.Null);
+        }
+
+        /// <summary>
+        /// What a restore refused before the swap must leave: the current database untouched at
+        /// the path with its settings in force, no undo copy made, and the failure saying why.
+        /// </summary>
+        private async Task AssertNothingWasReplacedAsync(IOException failure, string expectedMessage)
+        {
+            SqliteConnection.ClearAllPools();
+            await using var live = new HostPingerDbContext(_options);
+            Assert.Multiple(async () =>
+            {
+                Assert.That(failure.Message, Is.EqualTo(expectedMessage));
+                Assert.That(await live.Hosts.Select(h => h.Address).SingleAsync(), Is.EqualTo("current.example"));
+                Assert.That(await live.PingAttempts.CountAsync(), Is.EqualTo(1));
+                Assert.That(_store.PasswordHash, Is.EqualTo("current-hash"), "the settings in force are the current database's");
+                Assert.That(File.Exists(_backup.PreRestorePath), Is.False, "nothing was retired");
+            });
+        }
+
+        /// <summary>A restore whose backup goes into place and then fails to open, for the put-back.</summary>
+        private DatabaseBackup FailingToOpen() =>
+            new(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _summaries)
+            {
+                AfterSwap = () => throw new InvalidDataException("Opening it failed in the test."),
+            };
+
+        /// <summary>A current backup holding one host and a password, as an upload would be.</summary>
+        private async Task<string> BackupWithAsync(string address, string hash)
+        {
+            var backupPath = Path.Combine(_directory, "uploaded.db");
+            var backupOptions = OptionsFor(backupPath);
+            await using (var db = new HostPingerDbContext(backupOptions))
+            {
+                await db.Database.MigrateAsync();
+            }
+
+            await SeedHostWithAttemptsAsync(backupOptions, address, attempts: 3);
+            await StagePasswordAsync(backupOptions, hash);
+            SqliteConnection.ClearAllPools();
+            return backupPath;
+        }
+
+        /// <summary>
+        /// How many migrations a file records, read on a connection of its own that a restore
+        /// working on the same file may keep waiting for a moment.
+        /// </summary>
+        private static async Task<long> AppliedMigrationsAsync(string path)
+        {
+            try
+            {
+                await using var connection = new SqliteConnection($"Data Source={path};Pooling=False;Default Timeout=1");
+                await connection.OpenAsync();
+                return Convert.ToInt64(await ScalarAsync(connection, "SELECT COUNT(*) FROM __EFMigrationsHistory;"));
+            }
+            catch (SqliteException)
+            {
+                return 0;
+            }
         }
 
         /// <summary>

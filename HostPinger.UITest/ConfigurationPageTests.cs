@@ -159,11 +159,11 @@ namespace HostPinger.UITest
         }
 
         /// <summary>
-        /// A backup that passes validation but will not open once swapped in — here a faithful
-        /// copy missing one of its tables — is reported beside the control, with the page still
-        /// working, and the database it was meant to replace is the one the application runs on
-        /// afterwards. Before, the failure escaped the page's catch and ended the circuit, and the
-        /// half-restored file stayed in place.
+        /// A backup that passes validation but will not open — here a faithful copy missing one of
+        /// its tables — is reported beside the control, with the page still working, and the
+        /// database it was meant to replace is the one the application runs on afterwards. Before,
+        /// the failure escaped the page's catch and ended the circuit, and the half-restored file
+        /// stayed in place; now it is found out before the swap, and nothing is replaced.
         /// </summary>
         [Test]
         public async Task Restore_ReportsABackupThatWillNotOpenAndKeepsTheDatabase()
@@ -220,7 +220,7 @@ namespace HostPinger.UITest
                 await confirm.ClickAsync();
 
                 await Assertions.Expect(Page.GetByText(
-                        "The restore failed: The backup has no ResolverErrors table. The previous database is back in place."))
+                        "The restore failed: The backup has no ResolverErrors table. Nothing was replaced."))
                     .ToBeVisibleAsync();
                 await Assertions.Expect(Page.Locator("#blazor-error-ui")).ToBeHiddenAsync();
 
