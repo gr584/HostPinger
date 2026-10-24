@@ -28,6 +28,13 @@ namespace HostPinger.Core.Options
         // the database taken off the machine leaves this as the only thing in the way.
         private const int Iterations = 210_000;
 
+        // The most a stored value may ask of Verify: ten times the cost above, about a second per
+        // attempt. The count comes out of the stored value, and a restored backup is somebody
+        // else's choice of value — taken as given, a large enough one made every password check
+        // cost minutes of CPU. There is no floor: a smaller count only makes the check cheaper for
+        // whoever chose it, and the counts earlier builds wrote have to go on verifying.
+        private const int MaxIterations = Iterations * 10;
+
         private const int SaltBytes = 16;
         private const int SubkeyBytes = 32;
 
@@ -61,7 +68,8 @@ namespace HostPinger.Core.Options
             if (parts.Length != 4
                 || parts[0] != Version
                 || !int.TryParse(parts[1], out var iterations)
-                || iterations <= 0)
+                || iterations <= 0
+                || iterations > MaxIterations)
             {
                 return false;
             }

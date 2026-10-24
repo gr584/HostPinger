@@ -43,6 +43,23 @@ namespace HostPinger.Test
             Assert.That(PasswordHash.Verify(stored, Password), Is.False);
         }
 
+        /// <summary>
+        /// The iteration count comes out of the stored value, which a restored backup lets somebody
+        /// else choose. A correct password under a count past ten times the one Hash writes is
+        /// refused without being worked out, so a planted value cannot make each check cost minutes.
+        /// </summary>
+        [Test]
+        public void Verify_RefusesAStoredCountPastTenTimesItsOwn()
+        {
+            const int iterations = 2_100_001;
+            var salt = new byte[16];
+            var subkey = System.Security.Cryptography.Rfc2898DeriveBytes.Pbkdf2(
+                Password, salt, iterations, System.Security.Cryptography.HashAlgorithmName.SHA256, 32);
+            var stored = $"v1.{iterations}.{Convert.ToBase64String(salt)}.{Convert.ToBase64String(subkey)}";
+
+            Assert.That(PasswordHash.Verify(stored, Password), Is.False);
+        }
+
         [Test]
         public void Hash_SaltsEachOneSeparately()
         {

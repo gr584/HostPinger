@@ -159,6 +159,90 @@ namespace HostPinger.UITest
         }
 
         /// <summary>
+        /// A backup that passes validation but will not open once swapped in — here a faithful
+        /// copy missing one of its tables — is reported beside the control, with the page still
+        /// working, and the database it was meant to replace is the one the application runs on
+        /// afterwards. Before, the failure escaped the page's catch and ended the circuit, and the
+        /// half-restored file stayed in place.
+        /// </summary>
+        [Test]
+        public async Task Restore_ReportsABackupThatWillNotOpenAndKeepsTheDatabase()
+        {
+            var uploadPath = Path.Combine(Path.GetTempPath(), $"hostpinger-ui-upload-{Guid.NewGuid():N}.db");
+            try
+            {
+                long hosts;
+                await using (var connection = new SqliteConnection(
+                    $"Data Source={UiTestRun.DatabasePath};Mode=ReadOnly;Pooling=False"))
+                {
+                    await connection.OpenAsync();
+                    await using var command = connection.CreateCommand();
+                    command.CommandText = "VACUUM INTO $path;";
+                    command.Parameters.AddWithValue("$path", uploadPath);
+                    await command.ExecuteNonQueryAsync();
+                    command.CommandText = "SELECT COUNT(*) FROM Hosts;";
+                    command.Parameters.Clear();
+                    hosts = Convert.ToInt64(await command.ExecuteScalarAsync());
+                }
+
+                await using (var connection = new SqliteConnection($"Data Source={uploadPath};Pooling=False"))
+                {
+                    await connection.OpenAsync();
+                    await using var command = connection.CreateCommand();
+                    command.CommandText = "DROP TABLE ResolverErrors;";
+                    await command.ExecuteNonQueryAsync();
+                }
+
+                await UnlockedConfigurationPageAsync();
+
+                // Chosen and confirmed the same way, and for the same reasons, as the restore above.
+                var restore = Button("Restore backup…");
+                var confirm = Button("Confirm restore");
+                for (var attempt = 0; ; attempt++)
+                {
+                    var chooser = await Page.RunAndWaitForFileChooserAsync(() => restore.ClickAsync());
+                    await chooser.SetFilesAsync(uploadPath);
+                    try
+                    {
+                        await confirm.WaitForAsync(new LocatorWaitForOptions
+                        {
+                            State = WaitForSelectorState.Visible,
+                            Timeout = 2_000,
+                        });
+                        break;
+                    }
+                    catch (TimeoutException) when (attempt < 9)
+                    {
+                    }
+                }
+
+                SqliteConnection.ClearAllPools();
+                await confirm.ClickAsync();
+
+                await Assertions.Expect(Page.GetByText(
+                        "The restore failed: The backup has no ResolverErrors table. The previous database is back in place."))
+                    .ToBeVisibleAsync();
+                await Assertions.Expect(Page.Locator("#blazor-error-ui")).ToBeHiddenAsync();
+
+                await using var check = new SqliteConnection($"Data Source={UiTestRun.DatabasePath};Mode=ReadOnly;Pooling=False");
+                await check.OpenAsync();
+                await using var query = check.CreateCommand();
+                query.CommandText = "SELECT (SELECT COUNT(*) FROM Hosts), (SELECT COUNT(*) FROM sqlite_master WHERE name = 'ResolverErrors');";
+                await using var reader = await query.ExecuteReaderAsync();
+                await reader.ReadAsync();
+                Assert.Multiple(() =>
+                {
+                    Assert.That(reader.GetInt64(0), Is.EqualTo(hosts), "the application runs on the database it had");
+                    Assert.That(reader.GetInt64(1), Is.EqualTo(1), "with every table it had");
+                });
+            }
+            finally
+            {
+                File.Delete(uploadPath);
+            }
+        }
+
+        /// <summary>
         /// The configuration page, unlocked and with a live circuit. The unlock is a navigation,
         /// so the circuit the first <see cref="BrowserTest.GoAsync"/> waited for is gone by the
         /// time it lands; going to the page again is what waits for its replacement.
