@@ -803,7 +803,10 @@ pull requests but not on tags, and gates nothing.
 
 `HostPinger.Benchmarks` times the calls the pages make into `HostPinger.Core` with BenchmarkDotNet:
 the Hosts summary, opening and refreshing the graph, the Configuration and Resolver errors reads,
-the changes `HostStore` and `UserSettingsStore` make, and opening the database at startup. Each
+the changes `HostStore` and `UserSettingsStore` make, opening the database at startup, and
+upgrading it from the schema the last release left, which is what the first start of a new
+release does; while no migration has been added since that release, that last one has nothing to
+do. Each
 benchmark starts from a fresh copy of a seeded database shaped like the production one the page
 freezes were found on: 21 hosts pinged every ten seconds for 48 days, 8.3 million attempts, with two
 hosts in outages still running after 41 and 20 days, outages of hours that ended, network-wide
