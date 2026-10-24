@@ -1,4 +1,5 @@
 using HostPinger.Core.Data;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Playwright;
 
@@ -280,6 +281,58 @@ namespace HostPinger.UITest
             {
                 await ExecuteAsync("DROP TRIGGER IF EXISTS refuse_form_delete;");
             }
+        }
+
+        /// <summary>
+        /// While a delete is under way the dialog stays: Escape and a click on the overlay are
+        /// ignored, and the confirmation says it is deleting. The delete was asked for, so a dialog
+        /// that closed would read as an undo, and one closed and opened again on another host
+        /// would be shut by the first delete's answer. The test holds the database's write lock,
+        /// as a ping round or another writer would, so the delete waits on it for as long as the
+        /// test needs; the page answers meanwhile, since the delete runs off its circuit.
+        /// </summary>
+        [Test]
+        public async Task Dialog_StaysOpenWhileADeleteIsUnderWay()
+        {
+            const string name = "change-held-delete";
+            await SeedAsync(name);
+            await UnlockAsync();
+            await ClickUntilAsync(Button(Row(name), "Edit"), Dialog);
+            await Button(Dialog, "Delete").ClickAsync();
+
+            await using (var holder = new SqliteConnection($"Data Source={UiTestRun.DatabasePath};Pooling=False"))
+            {
+                await holder.OpenAsync();
+                await using (var begin = holder.CreateCommand())
+                {
+                    begin.CommandText = "BEGIN IMMEDIATE;";
+                    await begin.ExecuteNonQueryAsync();
+                }
+
+                await Button(Dialog, "Confirm delete").ClickAsync();
+                var deleting = Button(Dialog, "Deleting…");
+                await Assertions.Expect(deleting).ToBeDisabledAsync();
+
+                // Pressed in a field of the dialog: the button just clicked is disabled now, and
+                // the focus has left it for the page, where the dialog never hears a key.
+                await Page.Locator("#host-name").PressAsync("Escape");
+
+                // The very top of the overlay, which is backdrop rather than dialog.
+                await Page.Mouse.ClickAsync(20, 20);
+
+                // Nothing on screen says the server has handled a key and a click it ignores, and
+                // the dialog is visible until it has, so it is given a round trip's time first.
+                await Page.WaitForTimeoutAsync(1000);
+                await Assertions.Expect(Dialog).ToBeVisibleAsync();
+                await Assertions.Expect(deleting).ToBeVisibleAsync();
+
+                await using var rollback = holder.CreateCommand();
+                rollback.CommandText = "ROLLBACK;";
+                await rollback.ExecuteNonQueryAsync();
+            }
+
+            await Assertions.Expect(Dialog).ToBeHiddenAsync();
+            await Assertions.Expect(Row(name)).ToHaveCountAsync(0);
         }
 
         private ILocator Row(string text) => Page.Locator(".host-row", new PageLocatorOptions { HasText = text });
