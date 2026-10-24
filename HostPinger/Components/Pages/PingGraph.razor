@@ -266,6 +266,14 @@ else
 
     protected override async Task OnParametersSetAsync()
     {
+        // Blazor hands a live page its query parameters again on every navigation, the one taking
+        // it away included, as the address it is going to has them. That read would be cancelled
+        // as the page went, and is not sent.
+        if (!IsGraphAddress(Navigation.ToBaseRelativePath(Navigation.Uri)))
+        {
+            return;
+        }
+
         _selected = ParseIds(HostIdsSegment);
         ApplyQueryOpening();
         if (TakePrerenderRead() is { } prerendered)
@@ -675,6 +683,17 @@ else
         _window = resumeWindow;
         _pinnedRange = null;
         await LoadAsync();
+    }
+
+    /// <summary>
+    /// Whether a base-relative address is one of this page's two routes, with or without hosts and
+    /// a query: what the page is still on, as against wherever a navigation away is taking it.
+    /// </summary>
+    internal static bool IsGraphAddress(string relativeAddress)
+    {
+        var path = relativeAddress.Split('?', '#')[0];
+        return path.Equals("graph", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith("graph/", StringComparison.OrdinalIgnoreCase);
     }
 
     private static HashSet<int> ParseIds(string? segment)
