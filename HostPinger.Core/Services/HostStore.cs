@@ -66,18 +66,23 @@ namespace HostPinger.Core.Services
         /// Adds a host, its name and address stored without the blanks around them: the address is
         /// what has to be unique, and a space typed before it would otherwise make it a second one.
         /// </summary>
+        /// <exception cref="ArgumentException">
+        /// The name or the address is blank once trimmed, or longer than a host's can be.
+        /// </exception>
         public async Task<HostChange> AddAsync(
             string name,
             string address,
             bool isEnabled,
             CancellationToken cancellationToken = default)
         {
+            name = Trimmed(name, MonitoredHost.MaxNameLength, nameof(name));
+            address = Trimmed(address, MonitoredHost.MaxAddressLength, nameof(address));
             await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken))
             {
                 db.Hosts.Add(new MonitoredHost
                 {
-                    Name = name.Trim(),
-                    Address = address.Trim(),
+                    Name = name,
+                    Address = address,
                     IsEnabled = isEnabled,
                     CreatedUtc = _timeProvider.GetUtcNow().UtcDateTime,
                 });
@@ -108,6 +113,9 @@ namespace HostPinger.Core.Services
         /// saving it, which left a host deleted between the two to fail the save as though its
         /// address were taken.
         /// </remarks>
+        /// <exception cref="ArgumentException">
+        /// The name or the address is blank once trimmed, or longer than a host's can be.
+        /// </exception>
         public async Task<HostChange> UpdateAsync(
             int id,
             string name,
@@ -115,8 +123,8 @@ namespace HostPinger.Core.Services
             bool isEnabled,
             CancellationToken cancellationToken = default)
         {
-            name = name.Trim();
-            address = address.Trim();
+            name = Trimmed(name, MonitoredHost.MaxNameLength, nameof(name));
+            address = Trimmed(address, MonitoredHost.MaxAddressLength, nameof(address));
             int updated;
             await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken))
             {
@@ -192,6 +200,28 @@ namespace HostPinger.Core.Services
             }
 
             return await summaries.RefreshAsync(cancellationToken);
+        }
+
+        /// <summary>
+        /// A name or an address as a host keeps it, refused when trimming leaves nothing or more
+        /// than the column is meant to hold. The Hosts page's form refuses the same before it calls;
+        /// this is for whatever else does, because SQLite enforces neither, and an empty address is
+        /// resolved as this machine's own name, so a host given one would read as up.
+        /// </summary>
+        private static string Trimmed(string value, int maxLength, string parameterName)
+        {
+            var trimmed = value.Trim();
+            if (trimmed.Length == 0)
+            {
+                throw new ArgumentException("Nothing is left once the blanks around it are trimmed.", parameterName);
+            }
+
+            if (trimmed.Length > maxLength)
+            {
+                throw new ArgumentException($"Longer than the {maxLength} characters a host's can be.", parameterName);
+            }
+
+            return trimmed;
         }
 
         private async Task<HostChange> SavedAsync(CancellationToken cancellationToken) =>

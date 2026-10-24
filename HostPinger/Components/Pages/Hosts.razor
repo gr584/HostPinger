@@ -703,11 +703,11 @@
         public int? Id { get; set; }
 
         [Required(ErrorMessage = "Name is required.")]
-        [StringLength(100)]
+        [StringLength(MonitoredHost.MaxNameLength)]
         public string Name { get; set; } = string.Empty;
 
         [Required(ErrorMessage = "Address is required.")]
-        [StringLength(253)]
+        [StringLength(MonitoredHost.MaxAddressLength)]
         public string Address { get; set; } = string.Empty;
 
         public bool IsEnabled { get; set; } = true;

@@ -16,8 +16,8 @@ namespace HostPinger.Core.Data
         {
             modelBuilder.Entity<MonitoredHost>(host =>
             {
-                host.Property(h => h.Name).IsRequired().HasMaxLength(100);
-                host.Property(h => h.Address).IsRequired().HasMaxLength(253);
+                host.Property(h => h.Name).IsRequired().HasMaxLength(MonitoredHost.MaxNameLength);
+                host.Property(h => h.Address).IsRequired().HasMaxLength(MonitoredHost.MaxAddressLength);
                 host.HasIndex(h => h.Address).IsUnique();
                 host.HasMany(h => h.PingAttempts)
                     .WithOne(a => a.Host!)
@@ -75,7 +75,7 @@ namespace HostPinger.Core.Data
             {
                 // Matching the column the address is copied from, so a name a host can hold is a
                 // name this table can record.
-                error.Property(e => e.Address).IsRequired().HasMaxLength(253);
+                error.Property(e => e.Address).IsRequired().HasMaxLength(MonitoredHost.MaxAddressLength);
 
                 // Oldest first, which is the order the pruner deletes in.
                 error.HasIndex(e => e.TimestampUtc);

@@ -131,6 +131,65 @@ namespace HostPinger.Test
             });
         }
 
+        /// <summary>
+        /// A name or an address that is nothing but blanks, or longer than its column, is refused
+        /// before anything is written, whether a host is being added or edited. The Hosts page's
+        /// form refuses the same, so this holds for any other caller: SQLite would store either,
+        /// and an empty address resolves as this machine and reads as up.
+        /// </summary>
+        [TestCaseSource(nameof(Unstorable))]
+        public async Task Changes_RefuseANameOrAddressAHostCannotHave(Change change, string name, string address, string parameter)
+        {
+            var id = await AddHostAsync("alpha", "alpha.example");
+
+            // Bounded, because a store that took the value would then wait for a read nothing here
+            // takes, and that should fail the test rather than hang the run.
+            var failure = await Assert.ThrowsAsync<ArgumentException>(() => (change == Change.Add
+                ? _store.AddAsync(name, address, isEnabled: true)
+                : _store.UpdateAsync(id, name, address, isEnabled: true)).WaitAsync(Patience));
+
+            var host = (await HostsAsync()).Single();
+            Assert.Multiple(() =>
+            {
+                Assert.That(failure!.ParamName, Is.EqualTo(parameter));
+                Assert.That(host.Name, Is.EqualTo("alpha"));
+                Assert.That(host.Address, Is.EqualTo("alpha.example"));
+            });
+        }
+
+        /// <summary>
+        /// The bound is on what is stored, so a name and an address as long as their columns hold
+        /// are taken with blanks around them, which are trimmed off.
+        /// </summary>
+        [Test]
+        public async Task AddAsync_TakesANameAndAddressAsLongAsAHostsCanBe()
+        {
+            var name = new string('n', MonitoredHost.MaxNameLength);
+            var address = new string('a', MonitoredHost.MaxAddressLength);
+
+            await MakeAsync(() => _store.AddAsync($" {name} ", $"\t{address} ", isEnabled: true));
+
+            var host = (await HostsAsync()).Single();
+            Assert.Multiple(() =>
+            {
+                Assert.That(host.Name, Is.EqualTo(name));
+                Assert.That(host.Address, Is.EqualTo(address));
+            });
+        }
+
+        private static IEnumerable<TestCaseData> Unstorable()
+        {
+            foreach (var change in new[] { Change.Add, Change.Update })
+            {
+                yield return new TestCaseData(change, "  ", "omega.example", "name").SetArgDisplayNames(change.ToString(), "blank name");
+                yield return new TestCaseData(change, "omega", " \t ", "address").SetArgDisplayNames(change.ToString(), "blank address");
+                yield return new TestCaseData(change, new string('n', MonitoredHost.MaxNameLength + 1), "omega.example", "name")
+                    .SetArgDisplayNames(change.ToString(), "long name");
+                yield return new TestCaseData(change, "omega", new string('a', MonitoredHost.MaxAddressLength + 1), "address")
+                    .SetArgDisplayNames(change.ToString(), "long address");
+            }
+        }
+
         /// <summary>An edit is in the summary handed back, as an addition is.</summary>
         [Test]
         public async Task UpdateAsync_HandsBackASummaryThatAlreadyHoldsTheEdit()
