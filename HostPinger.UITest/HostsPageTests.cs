@@ -56,6 +56,25 @@ namespace HostPinger.UITest
         }
 
         /// <summary>
+        /// A click on a heading sorts the rows the page already has and rewrites the address, rather
+        /// than navigating to it: a navigation had the server render the whole page again, a
+        /// round trip and a prerender for a re-sort. No request carrying the order goes out.
+        /// </summary>
+        [Test]
+        public async Task Headings_SortWithoutAskingTheServer()
+        {
+            await SeedAsync();
+            await GoAsync();
+            var requests = new List<string>();
+            Page.Request += (_, request) => requests.Add(request.Url);
+
+            await ClickUntilAsync(Button("Name"), Page.Locator("th[aria-sort='descending']"));
+            await Assertions.Expect(Page).ToHaveURLAsync(new Regex(@"\?sort=name&dir=desc$"));
+
+            Assert.That(requests.Where(url => url.Contains("sort=", StringComparison.Ordinal)), Is.Empty);
+        }
+
+        /// <summary>
         /// The address a sorted table leaves behind is the whole of what it takes to bring that
         /// table back — which is what lets a row be opened and returned from with the sort intact,
         /// and what makes the table worth sending to someone.

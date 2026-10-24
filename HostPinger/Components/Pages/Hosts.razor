@@ -7,6 +7,7 @@
 @inject HostStore Store
 @inject HostSummaryCache Summaries
 @inject NavigationManager Navigation
+@inject IJSRuntime JS
 @inject PasswordGate Gate
 @inject LockPrompt Prompt
 @implements IDisposable
@@ -265,9 +266,10 @@
     private Task<AuthenticationState>? AuthenticationState { get; set; }
 
     /// <summary>
-    /// The order the table is in, kept in the address rather than in a field of this component. A
-    /// row opens that host's graph, so the sort has to survive going there and coming back, and a
-    /// table sorted to show what is wrong is worth being able to send someone.
+    /// The order the address asks for. The order travels in the address because a row opens that
+    /// host's graph, so the sort has to survive going there and coming back, and a table sorted to
+    /// show what is wrong is worth being able to send someone. A page opened on an address takes
+    /// its order from it; a click on a heading sorts here and rewrites the address to match.
     /// </summary>
     [SupplyParameterFromQuery(Name = SortQuery)]
     private string? SortColumn { get; set; }
@@ -275,7 +277,12 @@
     [SupplyParameterFromQuery(Name = DirectionQuery)]
     private string? SortDirection { get; set; }
 
-    private HostSort Sort => HostSort.Parse(SortColumn, SortDirection);
+    private HostSort Sort { get; set; } = HostSort.Default;
+
+    // The address's order as last taken. Blazor hands the parameters over again whenever anything
+    // else changes, and it never saw the address a click wrote, so what it hands over is the order
+    // the page opened on; taken again, it would undo the click.
+    private (string? Column, string? Direction)? _addressOrder;
 
     private List<HostSummary> _rows = [];
 
@@ -325,10 +332,19 @@
     }
 
     /// <summary>
-    /// Re-orders what is already on screen, which is what a click on a heading comes back to: the
-    /// table turns round there and then rather than when the next summary arrives.
+    /// Takes the address's order when it is one the page has not taken yet — on opening, and on a
+    /// navigation to the page with another order — and puts what is on screen in it.
     /// </summary>
-    protected override void OnParametersSet() => _rows = Sort.Apply(_rows);
+    protected override void OnParametersSet()
+    {
+        if (_addressOrder is not { } taken || taken != (SortColumn, SortDirection))
+        {
+            _addressOrder = (SortColumn, SortDirection);
+            Sort = HostSort.Parse(SortColumn, SortDirection);
+        }
+
+        _rows = Sort.Apply(_rows);
+    }
 
     // Focusing the first field also puts the keyboard inside the dialog, which is what lets the
     // Escape key reach OnFormKeyDown.
@@ -659,20 +675,21 @@
         Sort.Column != column ? "none" : Sort.IsDescending ? "descending" : "ascending";
 
     /// <summary>
-    /// Takes the click to the address rather than to a field of this component; see
-    /// <see cref="SortColumn"/>. The entry is replaced rather than added, so the back button goes
-    /// on pointing at wherever the reader came from instead of at their own last click.
+    /// Sorts the rows on screen there and then, and writes the order into the address without
+    /// navigating: a navigation had the server render the whole page again for a re-sort these
+    /// rows already allow. The entry is replaced rather than added, so the back button goes on
+    /// pointing at wherever the reader came from instead of at their own last click.
     /// </summary>
-    private void SortBy(HostSortColumn column)
+    private async Task SortBy(HostSortColumn column)
     {
-        var sort = Sort.ClickedOn(column);
-        Navigation.NavigateTo(
-            Navigation.GetUriWithQueryParameters(new Dictionary<string, object?>
-            {
-                [SortQuery] = sort.QueryColumn,
-                [DirectionQuery] = sort.QueryDirection,
-            }),
-            replace: true);
+        Sort = Sort.ClickedOn(column);
+        _rows = Sort.Apply(_rows);
+        var address = Navigation.GetUriWithQueryParameters(new Dictionary<string, object?>
+        {
+            [SortQuery] = Sort.QueryColumn,
+            [DirectionQuery] = Sort.QueryDirection,
+        });
+        await JS.InvokeVoidAsync("history.replaceState", null, string.Empty, address);
     }
 
     private string PauseTitle(bool isEnabled) => _isUnlocked
