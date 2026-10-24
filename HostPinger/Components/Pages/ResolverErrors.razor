@@ -2,6 +2,7 @@
 @rendermode InteractiveServer
 @using HostPinger.Core.Services
 @inject DatabaseReads Reads
+@inject HostSummaryCache Summaries
 @implements IDisposable
 
 <PageTitle>HostPinger - Resolver errors</PageTitle>
@@ -106,11 +107,30 @@ else
     protected override async Task OnInitializedAsync()
     {
         await LoadAsync();
-        _ = AutoRefreshAsync();
+        if (RendererInfo.IsInteractive)
+        {
+            Summaries.Updated += OnDatabaseChanged;
+            _ = AutoRefreshAsync();
+        }
     }
 
-    // Every five seconds. The Hosts page shows a round within a second of it landing, so a row
-    // recorded by that round can appear here a few seconds after it appears there.
+    /// <summary>
+    /// Reads again whenever the Hosts summary does, which is whenever anything has been committed:
+    /// a round records its resolver errors in the same transaction as its attempts, so a row turns
+    /// up here as the round shows on the Hosts page, rather than up to five seconds later on a
+    /// timer of this page's own, and nothing is read while nothing changes. Raised on the summary's
+    /// loop, so the read is handed to this page's circuit.
+    /// </summary>
+    private void OnDatabaseChanged(HostSummarySnapshot summary) => _ = InvokeAsync(async () =>
+    {
+        await LoadAsync();
+        StateHasChanged();
+    });
+
+    /// <summary>
+    /// Reads nothing: what moves on its own is the clock, which the "ago" beside each last failure
+    /// is measured against.
+    /// </summary>
     private async Task AutoRefreshAsync()
     {
         try
@@ -118,7 +138,6 @@ else
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
             while (await timer.WaitForNextTickAsync(_cts.Token))
             {
-                await LoadAsync();
                 await InvokeAsync(StateHasChanged);
             }
         }
@@ -179,5 +198,9 @@ else
     }
 
     // Cancelled rather than disposed, because a read can land after the page has gone; see PageReads.
-    public void Dispose() => _cts.Cancel();
+    public void Dispose()
+    {
+        Summaries.Updated -= OnDatabaseChanged;
+        _cts.Cancel();
+    }
 }

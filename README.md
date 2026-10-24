@@ -109,10 +109,11 @@ and resizes with the window.
 
 ### Resolver errors — `/resolver-errors`
 
-The addresses that could not be turned into an IP address, one row each, refreshed every five
-seconds. A round that cannot resolve a host never asks it anything, so the failure is recorded
-here rather than as a missed ping — a name that does not resolve is not the same as a host that is
-down, and this is where the difference can be read without going through the log.
+The addresses that could not be turned into an IP address, one row each, updated as each round
+lands, as the Hosts page is. A round that cannot resolve a host never asks it anything, so the
+failure is recorded here rather than as a missed ping — a name that does not resolve is not the
+same as a host that is down, and this is where the difference can be read without going through
+the log.
 
 - **One row per address**, the most recently failed at the top, however many rounds it has failed
   in. Every failure is stored; the row is what they add up to.
