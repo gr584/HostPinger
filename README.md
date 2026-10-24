@@ -208,7 +208,10 @@ service, locked or not.
 - **Wrong passwords are made to wait.** The first three cost nothing, so mistyping a password from
   memory is free. Each one after that doubles the wait before another guess from the same address
   is looked at — five seconds, then ten, then twenty, and so on up to an hour, where it stops. That
-  turns an unattended run through a word list into a couple of dozen guesses a day. The right
+  turns an unattended run through a word list into a couple of dozen guesses a day from any one
+  address — but only per address: somebody guessing from many, or rotating through an IPv6 range,
+  gets that many times more, so a password guarding a service reachable from the internet still
+  has to be a strong one. The right
   password is turned away along with the wrong ones while a wait stands; getting it right once the
   wait is over clears the tally, as does leaving the password alone for an hour afterwards. The
   change and removal forms count against the same tally, so neither is a way round it, and an empty

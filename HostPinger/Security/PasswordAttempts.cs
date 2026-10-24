@@ -77,7 +77,9 @@ namespace HostPinger.Security
     /// cannot lock out whoever owns the password by guessing badly enough. The address is the one
     /// the connection was opened from — see <see cref="RequestOrigin"/> for why nothing forwarded
     /// is trusted — so everyone arriving through a reverse proxy shares one tally, and on such an
-    /// install the wait is in practice for the whole service.
+    /// install the wait is in practice for the whole service. The other side of it: the couple of
+    /// dozen a day is per address, and somebody guessing from many addresses, or rotating through
+    /// the /64s of an IPv6 range, gets that many times more. Nothing counts across addresses.
     /// </para>
     /// <para>
     /// Nothing is written down: a restart forgets every tally. Persisting it would mean a database
