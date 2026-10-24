@@ -131,6 +131,60 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// A database an older build left is in rollback-journal mode, where a long read holds up a
+        /// ping round's write — production's was — and opening it puts it in WAL mode, once it is
+        /// migrated, so that an upgrade's index rebuild is journalled the old way. A brand-new
+        /// database ends up the same: the application opens the file before EF sees it, so EF
+        /// never creates it, and SQLite starts it in rollback-journal mode.
+        /// </summary>
+        [TestCase(LastIn1_12)]
+        [TestCase(null)]
+        public async Task InitializeAsync_PutsTheDatabaseInWalModeOnceItIsMigrated(string? leftAt)
+        {
+            if (leftAt is not null)
+            {
+                await using var older = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath));
+                await older.GetService<IMigrator>().MigrateAsync(leftAt);
+
+                // EF puts a file it creates itself in WAL mode, which is not how production's came to be.
+                await older.Database.ExecuteSqlRawAsync("PRAGMA journal_mode = DELETE;");
+                Assert.That(await JournalModeAsync(), Is.EqualTo("delete"), "the mode an older build left it in");
+            }
+
+            await using (var db = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath)))
+            {
+                await HostPingerDatabase.InitializeAsync(db);
+                Assert.That(await db.Database.GetPendingMigrationsAsync(), Is.Empty);
+            }
+
+            Assert.That(await JournalModeAsync(), Is.EqualTo("wal"));
+        }
+
+        /// <summary>
+        /// Every connection the application's contexts open caps what a checkpoint leaves of the
+        /// -wal. The pragma is the connection's rather than the file's, so it is asked of each way a
+        /// context is made: the application's factory, and the options the command line and the
+        /// seeding use.
+        /// </summary>
+        [Test]
+        public async Task Contexts_CapTheWalOnEveryConnectionTheyOpen()
+        {
+            await using var provider = new ServiceCollection()
+                .AddHostPingerDatabase(PingerPaths.Resolve(_databasePath, _directory))
+                .BuildServiceProvider();
+            var factory = provider.GetRequiredService<IDbContextFactory<HostPingerDbContext>>();
+
+            await using var fromFactory = await factory.CreateDbContextAsync();
+            await using var fromOptions = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath));
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(await JournalSizeLimitAsync(fromFactory), Is.EqualTo(HostPingerDatabase.JournalSizeLimitBytes));
+                Assert.That(await JournalSizeLimitAsync(fromOptions), Is.EqualTo(HostPingerDatabase.JournalSizeLimitBytes));
+            });
+        }
+
+        /// <summary>
         /// A database whose last migrator finished, as every one does but a killed one, has nothing
         /// to clear, and says nothing about it: the lock's table is there, but empty.
         /// </summary>
@@ -267,6 +321,30 @@ namespace HostPinger.Test
             await HostPingerDatabase.OpenAsync(provider, timeout.Token);
 
             Assert.That(log.Entries.Select(e => e.Level), Is.EqualTo(new[] { LogLevel.Warning }));
+        }
+
+        private async Task<string?> JournalModeAsync()
+        {
+            await using var connection = new SqliteConnection($"Data Source={_databasePath};Pooling=False");
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA journal_mode;";
+            return (string?)await command.ExecuteScalarAsync();
+        }
+
+        private static async Task<long> JournalSizeLimitAsync(HostPingerDbContext db)
+        {
+            await db.Database.OpenConnectionAsync();
+            try
+            {
+                await using var command = db.Database.GetDbConnection().CreateCommand();
+                command.CommandText = "PRAGMA journal_size_limit;";
+                return Convert.ToInt64(await command.ExecuteScalarAsync());
+            }
+            finally
+            {
+                await db.Database.CloseConnectionAsync();
+            }
         }
 
         private TestDb.Factory Factory() => new(HostPingerDatabase.Options(_databasePath));

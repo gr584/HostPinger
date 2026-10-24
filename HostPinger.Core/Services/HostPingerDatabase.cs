@@ -9,9 +9,9 @@ using Microsoft.Extensions.Logging;
 namespace HostPinger.Core.Services
 {
     /// <summary>
-    /// Prepares the SQLite database: says how to open it, applies migrations and enables
-    /// incremental auto-vacuum so pruning can shrink the file, and loads what the application
-    /// reads from it before it serves a page.
+    /// Prepares the SQLite database: says how to open it, applies migrations, enables
+    /// incremental auto-vacuum so pruning can shrink the file, puts it in WAL mode, and loads what
+    /// the application reads from it before it serves a page.
     /// </summary>
     /// <remarks>
     /// The web project used to do the opening and the ordering itself, building the connection
@@ -29,10 +29,21 @@ namespace HostPinger.Core.Services
         public static string ConnectionString(string databasePath) =>
             new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString();
 
+        /// <summary>
+        /// The most a -wal file is left holding once a checkpoint has copied it into the database.
+        /// Left alone, SQLite keeps a -wal at the largest size it ever reached until the last
+        /// connection to the file closes, and the host summary's never does while the service
+        /// runs: one large write — deleting a host with months of history, migrating a big
+        /// database — would leave hundreds of megabytes beside the file, which the size limit does
+        /// not count, until the next restart.
+        /// </summary>
+        public const long JournalSizeLimitBytes = 64L * 1024 * 1024;
+
         /// <summary>Options for a context over the database at <paramref name="databasePath"/>.</summary>
         public static DbContextOptions<HostPingerDbContext> Options(string databasePath) =>
             new DbContextOptionsBuilder<HostPingerDbContext>()
                 .UseSqlite(ConnectionString(databasePath))
+                .AddInterceptors(JournalSizeLimit.Instance)
                 .Options;
 
         /// <summary>
@@ -41,7 +52,9 @@ namespace HostPinger.Core.Services
         /// </summary>
         public static IServiceCollection AddHostPingerDatabase(this IServiceCollection services, PingerPaths paths) =>
             services.AddDbContextFactory<HostPingerDbContext>(
-                options => options.UseSqlite(ConnectionString(paths.DatabasePath)));
+                options => options
+                    .UseSqlite(ConnectionString(paths.DatabasePath))
+                    .AddInterceptors(JournalSizeLimit.Instance));
 
         /// <summary>
         /// What has to happen before the first page is served, from the services
@@ -83,7 +96,7 @@ namespace HostPinger.Core.Services
 
         /// <summary>
         /// Brings the database up to date: incremental auto-vacuum, then the migrations, after
-        /// clearing any lock a migration stopped partway through left behind.
+        /// clearing any lock a migration stopped partway through left behind, then WAL mode.
         /// </summary>
         /// <returns>
         /// Whether there was such a lock to clear, which is also logged as a warning through the
@@ -98,6 +111,7 @@ namespace HostPinger.Core.Services
                 await EnableIncrementalVacuumAsync(db, cancellationToken);
                 var cleared = await ClearMigrationLockAsync(db, cancellationToken);
                 await db.Database.MigrateAsync(cancellationToken);
+                await EnterWalAsync(db, cancellationToken);
                 return cleared;
             }
             finally
@@ -143,16 +157,59 @@ namespace HostPinger.Core.Services
                 return false;
             }
 
-            // The context's own logging, which for one from the application's factory is the
-            // application's: the service and a restore log it without being handed a logger.
-            db.GetService<ILoggerFactory>()
-                .CreateLogger(typeof(HostPingerDatabase).FullName!)
-                .LogWarning(
+            LoggerFor(db).LogWarning(
                     "Cleared the lock an interrupted migration left in {Database}: a start, restore or "
                     + "--remove-password was stopped partway through migrating it. That migration runs again now.",
                     connection.DataSource);
             return true;
         }
+
+        /// <summary>
+        /// Puts a database still in rollback-journal mode into WAL mode, where a read never holds up
+        /// a write. In rollback-journal mode a ping round that comes due during a long read waits
+        /// for it, and past the busy timeout gives up and loses its pings. A new database starts in
+        /// rollback-journal mode — the file is opened here before EF sees it, so EF never creates
+        /// it, which is when EF would choose WAL — and an older build left its database in it, so
+        /// this is what moves both; a restore puts its file in WAL mode itself.
+        /// </summary>
+        /// <remarks>
+        /// After the migrations, so that an upgrade's index rebuild is journalled the old way and
+        /// leaves nothing behind once it commits, rather than growing a -wal to the size of the
+        /// index. A file another connection is holding keeps its mode, with a warning, rather than
+        /// stopping the start: the next start switches it. Where SQLite cannot use WAL on the file,
+        /// it answers with the mode it kept, and the database goes on in that.
+        /// </remarks>
+        private static async Task EnterWalAsync(HostPingerDbContext db, CancellationToken cancellationToken)
+        {
+            var connection = db.Database.GetDbConnection();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA journal_mode;";
+            if (await command.ExecuteScalarAsync(cancellationToken) is "wal")
+            {
+                return;
+            }
+
+            command.CommandText = "PRAGMA journal_mode = WAL;";
+            try
+            {
+                await command.ExecuteScalarAsync(cancellationToken);
+            }
+            catch (SqliteException ex) when (ex.SqliteErrorCode is 5 or 6)
+            {
+                // SQLITE_BUSY and SQLITE_LOCKED, past the provider's wait.
+                LoggerFor(db).LogWarning(
+                    ex,
+                    "{Database} stays in rollback-journal mode for now: another connection held it. The next start puts it in WAL mode.",
+                    connection.DataSource);
+            }
+        }
+
+        /// <summary>
+        /// The context's own logging, which for one from the application's factory is the
+        /// application's: the service and a restore log through it without being handed a logger.
+        /// </summary>
+        private static ILogger LoggerFor(HostPingerDbContext db) =>
+            db.GetService<ILoggerFactory>().CreateLogger(typeof(HostPingerDatabase).FullName!);
 
         /// <summary>
         /// The auto_vacuum pragma only takes effect on a brand-new database file or after VACUUM

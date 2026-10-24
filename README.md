@@ -289,6 +289,12 @@ service, locked or not.
   noticeable time, a minute or two, and longer on a slow machine. The Linux service waits for it
   however long it takes, and a start interrupted anyway — a reboot, a stop — leaves nothing to
   repair: the next start begins that migration again.
+- The file runs in SQLite's WAL mode, where reading the history never holds up a ping round's
+  write; an install upgraded from an older version is switched at its first start, once any
+  migration is done. The most recent writes then sit in `hostpinger.db-wal` beside the file until
+  a checkpoint folds them in, so copy the database with the Backup button on the Configuration
+  page or with the service stopped, never by copying `hostpinger.db` alone while it runs. Keep it
+  on a local disk: WAL mode does not work over a network share.
 - The settings edited on the Configuration page, and the hashed password if one is set, live in a
   small table inside the same file. It holds only what has been changed from the defaults, so a
   default improved by a later release shows through for everything nobody has touched — and a
