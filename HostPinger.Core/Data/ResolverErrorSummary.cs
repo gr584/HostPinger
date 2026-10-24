@@ -42,7 +42,7 @@ namespace HostPinger.Core.Data
         /// runs off IX_ResolverErrors_Address_TimestampUtc; see the index for why it can afford to
         /// take in everything.
         /// </remarks>
-        public static async Task<List<ResolverErrorSummary>> LoadAsync(
+        internal static async Task<List<ResolverErrorSummary>> LoadAsync(
             HostPingerDbContext db,
             DateTime nowUtc,
             CancellationToken cancellationToken = default)

@@ -26,7 +26,7 @@ namespace HostPinger.Core.Services
         /// than written out, so that a path with a semicolon or a quote in it names that file
         /// instead of breaking the string apart.
         /// </summary>
-        public static string ConnectionString(string databasePath) =>
+        internal static string ConnectionString(string databasePath) =>
             new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString();
 
         /// <summary>
@@ -40,7 +40,7 @@ namespace HostPinger.Core.Services
         public const long JournalSizeLimitBytes = 64L * 1024 * 1024;
 
         /// <summary>Options for a context over the database at <paramref name="databasePath"/>.</summary>
-        public static DbContextOptions<HostPingerDbContext> Options(string databasePath) =>
+        internal static DbContextOptions<HostPingerDbContext> Options(string databasePath) =>
             new DbContextOptionsBuilder<HostPingerDbContext>()
                 .UseSqlite(ConnectionString(databasePath))
                 .AddInterceptors(JournalSizeLimit.Instance)
@@ -79,7 +79,7 @@ namespace HostPinger.Core.Services
         /// And all of it before the first page is served, so that no page ever draws the summary
         /// empty.
         /// </remarks>
-        public static async Task OpenAsync(
+        internal static async Task OpenAsync(
             IDbContextFactory<HostPingerDbContext> dbFactory,
             UserSettingsStore settings,
             HostSummaryCache summaries,
@@ -103,7 +103,7 @@ namespace HostPinger.Core.Services
         /// context's own logging: the one trace left of a start, restore or --remove-password that
         /// was stopped while it migrated.
         /// </returns>
-        public static async Task<bool> InitializeAsync(HostPingerDbContext db, CancellationToken cancellationToken = default)
+        internal static async Task<bool> InitializeAsync(HostPingerDbContext db, CancellationToken cancellationToken = default)
         {
             await db.Database.OpenConnectionAsync(cancellationToken);
             try
@@ -215,7 +215,7 @@ namespace HostPinger.Core.Services
         /// The auto_vacuum pragma only takes effect on a brand-new database file or after VACUUM
         /// rebuilds an existing one, and the connection must stay open between statements.
         /// </summary>
-        public static async Task EnableIncrementalVacuumAsync(HostPingerDbContext db, CancellationToken cancellationToken = default)
+        internal static async Task EnableIncrementalVacuumAsync(HostPingerDbContext db, CancellationToken cancellationToken = default)
         {
             await db.Database.OpenConnectionAsync(cancellationToken);
             await db.Database.ExecuteSqlRawAsync("PRAGMA auto_vacuum = INCREMENTAL;", cancellationToken);

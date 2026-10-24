@@ -8,8 +8,13 @@
 
   <ItemGroup>
     <!-- Lets the tests assert on the SQL shape of internal queries, and take one turn of
-         HostSummaryCache's loop at a time (PollAsync) instead of racing its once-a-second poll. -->
+         HostSummaryCache's loop at a time (PollAsync) instead of racing its once-a-second poll.
+         Everything that takes a context or its factory and is not a service's constructor is
+         internal, so that the web project, which may not touch the database, cannot hand one in
+         without a compile error; the tests and the benchmarks, which time those very calls, are
+         the projects that may. -->
     <InternalsVisibleTo Include="HostPinger.Test" />
+    <InternalsVisibleTo Include="HostPinger.Benchmarks" />
   </ItemGroup>
 
   <ItemGroup>

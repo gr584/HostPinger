@@ -71,7 +71,7 @@ namespace HostPinger.Core.Services
         }
 
         /// <summary>Returns the number of rows deleted, across every history table.</summary>
-        public async Task<int> EnforceSizeLimitAsync(HostPingerDbContext db, long maxSizeBytes, CancellationToken cancellationToken = default)
+        internal async Task<int> EnforceSizeLimitAsync(HostPingerDbContext db, long maxSizeBytes, CancellationToken cancellationToken = default)
         {
             if (maxSizeBytes <= 0)
             {
@@ -107,7 +107,7 @@ namespace HostPinger.Core.Services
             return totalDeleted;
         }
 
-        public static async Task<long> GetDatabaseSizeBytesAsync(HostPingerDbContext db, CancellationToken cancellationToken = default)
+        internal static async Task<long> GetDatabaseSizeBytesAsync(HostPingerDbContext db, CancellationToken cancellationToken = default)
         {
             var connection = db.Database.GetDbConnection();
             await db.Database.OpenConnectionAsync(cancellationToken);

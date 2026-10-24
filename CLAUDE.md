@@ -23,9 +23,10 @@ of them fires, fix the code rather than the check:
 - **RS0030 build error.** The banned-API analyzer reads `HostPinger/BannedSymbols.txt`. Don't
   suppress the error or remove the entry. Move the read or write into Core and call that.
 - **`WebProject_ReferencesNoDatabaseType` fails.** The compiled web project references a banned
-  type that the analyzer let through. Usually a context or factory is injected and handed to a
-  Core helper such as `HostSummary.LoadAsync(db, …)`. The fix is the same: a Core method that
-  takes no context.
+  type that the analyzer let through: a factory injected and handed to a Core service's
+  constructor, a type argument, a caught exception type. The fix is the same: a Core method that
+  takes no context. Core's static helpers that take a context, such as `HostSummary.LoadAsync`,
+  are internal, so handing them one does not compile at all.
 - **`BannedSymbols_EachEntryNamesSomething` fails.** A list entry names nothing, typically
   because a type was renamed or misspelled. Correct the entry.
 - **"not on its PermittedPackageReference list" at restore.** A package was added to

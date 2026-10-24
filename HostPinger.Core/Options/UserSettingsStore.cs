@@ -161,7 +161,7 @@ namespace HostPinger.Core.Options
         /// <see cref="RemovePasswordAsync"/>, so what a removal writes cannot drift from what
         /// <see cref="SavePasswordHashAsync"/> writes; the caller saves the changes.
         /// </summary>
-        public static async Task StageAsync(
+        internal static async Task StageAsync(
             HostPingerDbContext db,
             string key,
             string value,

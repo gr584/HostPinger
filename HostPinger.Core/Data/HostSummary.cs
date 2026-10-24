@@ -42,7 +42,7 @@ namespace HostPinger.Core.Data
         /// that seeks IX_PingAttempts_HostId_TimestampUtc and stays flat.
         /// <see cref="BuildQuery"/> is kept separate so tests can inspect the generated SQL.
         /// </remarks>
-        public static async Task<List<HostSummary>> LoadAsync(
+        internal static async Task<List<HostSummary>> LoadAsync(
             HostPingerDbContext db,
             int retryAttempts,
             CancellationToken cancellationToken = default)

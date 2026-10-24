@@ -776,8 +776,9 @@ to notice:
   migrations, and the banned-API analyzer reports any use of them as error RS0030 — in the editor
   as it is typed, and in every build and publish.
 - `WebProjectTests` reads the same list against the compiled web project and fails on any
-  reference to what it names. That covers what the analyzer does not see, such as a context
-  injected only to be handed on to a method in Core.
+  reference to what it names. That covers what the analyzer does not see, such as a factory
+  injected only to be handed on to a Core service. Core's helpers that take a context are
+  internal to it, so handing one to them does not even compile.
 - `HostPinger.csproj` names every package the web project may reference, and restore and build
   fail on any other, as they do on a DLL referenced by its path or a reference to any project but
   Core. A ban list can only ban what the project already contains, so this is what keeps a new

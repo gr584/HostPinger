@@ -79,7 +79,7 @@ namespace HostPinger.Core.Data
         /// <param name="rangeEndUtc">The newest.</param>
         /// <param name="bucketCount">How many points the chart has room for.</param>
         /// <param name="cancellationToken">Cancels the read.</param>
-        public static async Task<ChartSeriesRead> LoadAsync(
+        internal static async Task<ChartSeriesRead> LoadAsync(
             HostPingerDbContext db,
             int hostId,
             DateTime rangeStartUtc,
@@ -135,7 +135,7 @@ namespace HostPinger.Core.Data
         /// <param name="rangeEndUtc">The newest.</param>
         /// <param name="bucketCount">How many points the chart has room for.</param>
         /// <param name="cancellationToken">Cancels the read.</param>
-        public static async Task<ChartSeriesRead> RefreshAsync(
+        internal static async Task<ChartSeriesRead> RefreshAsync(
             HostPingerDbContext db,
             int hostId,
             ChartSeriesRead earlier,

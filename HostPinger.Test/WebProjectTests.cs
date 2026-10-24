@@ -11,8 +11,8 @@ namespace HostPinger.Test
     /// <remarks>
     /// The web project's build enforces most of this itself: its BannedSymbols.txt lists what it
     /// may not use, and the analyzer fails the build on any use of it. What the analyzer does not
-    /// report is a type named with nothing done through it, such as an injected context that is
-    /// only handed on to a method in Core. These tests read the compiled assembly against the same
+    /// report is a type named with nothing done through it, such as an injected factory that is
+    /// only handed on to a Core service. These tests read the compiled assembly against the same
     /// list, which catches that.
     /// </remarks>
     public class WebProjectTests
@@ -21,7 +21,7 @@ namespace HostPinger.Test
 
         /// <summary>
         /// Read off the web project's compiled assembly's metadata rather than its source, so that
-        /// what the analyzer lets through still counts — a context injected and only handed on to
+        /// what the analyzer lets through still counts — a factory injected and only handed on to
         /// Core, a type argument, a caught exception type — since each leaves a reference to the
         /// type it names. Only code that names no type until it runs gets past both, reflection by
         /// name or <c>dynamic</c>, and nobody writes that by accident.

@@ -53,7 +53,7 @@ namespace HostPinger.Core.Data
         /// both go.
         /// </para>
         /// </remarks>
-        public static async Task<GraphRead> LoadAsync(
+        internal static async Task<GraphRead> LoadAsync(
             HostPingerDbContext db,
             IReadOnlySet<int> plotted,
             IReadOnlyDictionary<int, ChartSeriesRead>? earlier,

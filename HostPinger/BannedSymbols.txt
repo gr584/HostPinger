@@ -5,8 +5,10 @@
 // use of what it lists, as RS0030.
 //
 // A use is a call, a member read, a new, a typeof or a base type. A type named with nothing done
-// through it goes unreported: an injected context only handed on to a method in Core, a type
-// argument such as GetRequiredService<HostPingerDbContext>(), a caught exception type.
+// through it goes unreported: an injected factory only handed on to a Core service's constructor,
+// a type argument such as GetRequiredService<HostPingerDbContext>(), a caught exception type.
+// (Core's static helpers that take a context are internal, so handing one to them does not
+// compile.)
 // WebProjectTests reads this same list against the compiled assembly, where those leave a
 // reference too, and fails on them. So does a `using static` of a listed type or an alias for
 // one, even with nothing going through it: it is a reference all the same, and it opens the

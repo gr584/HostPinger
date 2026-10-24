@@ -76,7 +76,7 @@ namespace HostPinger.Core.Services
         /// <param name="db">The context to read through.</param>
         /// <param name="options">The settings the projection is made against.</param>
         /// <param name="cancellationToken">Cancels the queries.</param>
-        public static async Task<DatabaseStats> CollectAsync(
+        internal static async Task<DatabaseStats> CollectAsync(
             HostPingerDbContext db,
             PingerOptions options,
             CancellationToken cancellationToken = default)
@@ -92,7 +92,7 @@ namespace HostPinger.Core.Services
         }
 
         /// <summary>How many attempts are stored, as <see cref="AttemptIdSpanSql"/> reads it.</summary>
-        public static async Task<long> CountAttemptsAsync(
+        internal static async Task<long> CountAttemptsAsync(
             HostPingerDbContext db,
             CancellationToken cancellationToken = default)
         {
