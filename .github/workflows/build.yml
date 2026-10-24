@@ -452,7 +452,8 @@ jobs:
 
           # Port and protocol as numbers: 6 is TCP. Profile 1 is domain and 2 is private; the public
           # profile is deliberately not among them, and finding it here means someone widened the
-          # rule to networks the unauthenticated UI has no business answering on.
+          # rule to networks the UI — readable by anyone, and guarded at most by an optional
+          # password sent in the clear — has no business answering on.
           #
           # The table name carries the extension's major version, so moving off WiX 6 renames it and
           # fails this step until the name is updated — which is the point at which to check that
@@ -475,10 +476,9 @@ jobs:
   release:
     name: release
     # The gate sits here rather than between the build jobs. Those four catch disjoint failures —
-    # and since the test project references only HostPinger.Core, the packaging jobs are the sole
-    # compile check for the web project — so making them wait on one another would delay signal
-    # without changing whether the run is red. What actually warrants a gate is publishing, and
-    # this job cannot start unless all four passed.
+    # the packaging jobs are the only builds on the target distributions' own SDKs — so making them
+    # wait on one another would delay signal without changing whether the run is red. What
+    # actually warrants a gate is publishing, and this job cannot start unless all four passed.
     needs: [test, rpm, deb, msi]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest

@@ -127,7 +127,8 @@ namespace HostPinger.Core.Data
         /// answered ping must itself be unanswered, and the first attempt after the last unanswered
         /// ping of a run must be answered, so neither has to filter on RoundtripMs and both seek
         /// IX_PingAttempts_HostId_TimestampUtc directly. Finding the answered ping that precedes a
-        /// run is the one walk over unindexed rows, and it only covers the run itself.
+        /// run seeks IX_PingAttempts_Answered, which holds only answered pings, so it steps over
+        /// none of the run however long the run is.
         /// </para>
         /// </remarks>
         internal static IQueryable<HostSummaryRow> BuildQuery(HostPingerDbContext db, int missesToDown) =>

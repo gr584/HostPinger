@@ -140,10 +140,10 @@
         Scoped to this executable as well as the port, so opening 5000 opens it for HostPinger and
         nothing else that might later listen there.
 
-        Domain and private only. The UI has no authentication of any kind — anyone who reaches it
-        can add and delete monitored hosts along with their history — so a public network, which is
-        Windows' name for the untrusted ones, is not somewhere to answer on. A machine that genuinely
-        needs it can add that profile by hand.
+        Domain and private only. Anyone who reaches the UI can read it, and unless a password is set
+        can add and delete monitored hosts along with their history; the password itself travels
+        over plain HTTP. So a public network, which is Windows' name for the untrusted ones, is not
+        somewhere to answer on. A machine that genuinely needs it can add that profile by hand.
 
         Two elements because @Profile takes one value and each becomes its own rule; they share a
         name, which is how Windows itself lists a per-profile pair.

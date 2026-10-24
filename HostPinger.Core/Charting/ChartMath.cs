@@ -307,10 +307,11 @@ namespace HostPinger.Core.Charting
         /// over a week of history and eight again over a year, and never more than about ten
         /// milliseconds behind on the ranges small enough for folding to win — so there is no size
         /// at which folding is worth choosing, and no threshold between them worth writing. What
-        /// still runs here is the pass-through just above. The fold below it is the reference the
-        /// database path is held to, by <c>ChartSeriesTests</c> reducing the same attempts both
-        /// ways and comparing, and it is kept for that although nothing in the application reaches
-        /// it. The rules the two share are <see cref="BucketIndex"/> and
+        /// normally runs here is the pass-through just above. The fold below it is the reference
+        /// the database path is held to, by <c>ChartSeriesTests</c> reducing the same attempts both
+        /// ways and comparing, and the application reaches it only when a round lands between
+        /// <c>ChartSeries</c> counting a range's attempts and reading them, tipping the range over
+        /// what fits. The rules the two share are <see cref="BucketIndex"/> and
         /// <see cref="BucketSample"/>, so what is written twice is only the counting.
         /// </para>
         /// </remarks>

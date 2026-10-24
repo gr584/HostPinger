@@ -546,9 +546,10 @@ default, which would be localhost only — see [Environment configuration](#envi
 for changing it.
 
 The installer also opens the port in Windows Firewall, in the domain and private profiles, for this
-executable only. It leaves the public profile alone: the UI has no authentication, so anyone who
-reaches it can add and delete monitored hosts along with their history, and an untrusted network is
-not somewhere to answer on. Where that is wanted anyway:
+executable only. It leaves the public profile alone: anyone who reaches the UI can read it, and
+change it too unless a password is set — see [Locking](#locking) — and that
+password travels over plain HTTP, so an untrusted network is not somewhere to answer on. Where that
+is wanted anyway:
 
 ```powershell
 Set-NetFirewallRule -DisplayName 'HostPinger web UI' -Profile Domain,Private,Public
@@ -771,10 +772,12 @@ SDK that Fedora packages, rather than on a generic runner with the SDK from Micr
 different feature bands and do not accept identical source. Building on the target distribution is
 what catches that.
 
-The three build jobs run independently so that a push reports every kind of failure at once.
-Pushing a `v*` tag additionally runs a release job, which requires all three to have passed and
-attaches the RPM and MSI to a GitHub release — a tag carrying a prerelease suffix is marked as
-such rather than becoming the current release.
+The four build jobs (test, rpm, deb and msi) run independently so that a push reports every kind
+of failure at once. Pushing a `v*` tag additionally runs a release job, which requires all four to
+have passed and attaches the RPM, the deb and the MSI to a GitHub release — a tag carrying a
+prerelease suffix is marked as such rather than becoming the current release — after which the repo
+job publishes the dnf and apt repositories to GitHub Pages. The benchmark job runs on pushes and
+pull requests but not on tags, and gates nothing.
 
 ### Benchmarks
 
