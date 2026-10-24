@@ -634,6 +634,64 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// What the summary costs, held against the length of a host's ongoing outage: a hundred
+        /// times the outage must not cost anything like a hundred times the work. The plan test
+        /// below cannot see that, since EXPLAIN says SEARCH whether the walk is one row or two
+        /// million, and it is the regression the answered-ping index fixed — the last answered
+        /// ping found by walking back over every missed one, which made a host down for weeks cost
+        /// seconds on every read. Counted in SQLite's own virtual-machine steps, so how fast the
+        /// machine is does not enter into it.
+        /// </summary>
+        [Test]
+        public async Task LoadAsync_CostsNoMoreForALongerOngoingOutage()
+        {
+            var shortOutage = await StepsToLoadAsync(missedSinceLastAnswer: 200);
+            var longOutage = await StepsToLoadAsync(missedSinceLastAnswer: 20_000);
+
+            Assert.That(longOutage, Is.LessThan(shortOutage * 2),
+                $"{shortOutage} steps with 200 pings missed, {longOutage} with 20,000");
+        }
+
+        /// <summary>
+        /// The virtual-machine steps, in hundreds, that loading the summary takes on a database of
+        /// its own holding one host that answered once and then missed the given number of pings.
+        /// </summary>
+        private static async Task<long> StepsToLoadAsync(int missedSinceLastAnswer)
+        {
+            var (connection, options) = TestDb.CreateInMemory();
+            await using (connection)
+            {
+                var start = new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);
+                await using var db = new HostPingerDbContext(options);
+                var host = new MonitoredHost { Name = "down", Address = "down.example" };
+                db.Hosts.Add(host);
+                await db.SaveChangesAsync();
+                db.PingAttempts.Add(new PingAttempt { HostId = host.Id, TimestampUtc = start, RoundtripMs = 12 });
+                db.PingAttempts.AddRange(Enumerable.Range(1, missedSinceLastAnswer).Select(i => new PingAttempt
+                {
+                    HostId = host.Id,
+                    TimestampUtc = start.AddSeconds(10 * i),
+                }));
+                await db.SaveChangesAsync();
+                db.ChangeTracker.Clear();
+
+                long hundreds = 0;
+                SQLitePCL.raw.sqlite3_progress_handler(connection.Handle, 100, _ => { hundreds++; return 0; }, null);
+                try
+                {
+                    var summary = await HostSummary.LoadAsync(db, TwoRetries);
+                    Assert.That(summary.Single().LastDowntime?.IsOngoing, Is.True, "the host is down");
+                }
+                finally
+                {
+                    SQLitePCL.raw.sqlite3_progress_handler(connection.Handle, 0, null, null);
+                }
+
+                return hundreds;
+            }
+        }
+
+        /// <summary>
         /// The correlated subqueries are only fast because SQLite can walk
         /// IX_PingAttempts_HostId_TimestampUtc backwards; without the index it scans instead. The
         /// downtime lookups need IX_PingAttempts_Unanswered on top of it: the most recent

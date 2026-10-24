@@ -45,6 +45,38 @@ namespace HostPinger.UITest
             await Assertions.Expect(Page.Locator(".config-value").First).ToHaveTextAsync(FormatBytes(bytes));
         }
 
+        /// <summary>
+        /// The capacity is projected against the settings in force rather than the defaults, so with
+        /// the size limit saved as 0 the page says pruning is off. A page projecting against the
+        /// default settings instead — the one change a mutation pass found no test could see, since
+        /// this database holds too few attempts for any projection — says there is not enough data
+        /// yet, the answer for the default 1024 MB.
+        /// </summary>
+        [Test]
+        public async Task Capacity_FollowsTheSizeLimitInForce()
+        {
+            await UnlockedConfigurationPageAsync();
+            var size = Page.Locator("#max-db-size");
+            var save = Page.Locator(".input-group", new PageLocatorOptions { Has = size })
+                .GetByRole(AriaRole.Button, new LocatorGetByRoleOptions { Name = "Save" });
+            var unlimited = Page.GetByText("Unlimited — pruning is disabled.");
+            await Assertions.Expect(size).ToBeEnabledAsync();
+            var original = await size.InputValueAsync();
+            try
+            {
+                await size.FillAsync("0");
+                await save.ClickAsync();
+
+                await Assertions.Expect(unlimited).ToBeVisibleAsync();
+            }
+            finally
+            {
+                await size.FillAsync(original);
+                await save.ClickAsync();
+                await Assertions.Expect(unlimited).ToHaveCountAsync(0);
+            }
+        }
+
         /// <summary>The page's way of writing a size, which the assertion above has to match exactly.</summary>
         private static string FormatBytes(double bytes)
         {
