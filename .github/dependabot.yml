@@ -18,7 +18,9 @@ updates:
   # Every version lives in Directory.Packages.props, but Dependabot only bumps a package there
   # when it finds a project referencing it, so the project directories are listed explicitly:
   # HostPinger.slnx is not a solution format Dependabot reads, which is why leaving it to find
-  # the projects from the root would turn up almost nothing.
+  # the projects from the root would turn up almost nothing. The benchmarks are listed too: they
+  # ship nowhere, but they are the only project referencing BenchmarkDotNet, which would otherwise
+  # never be bumped.
   #
   # HostPinger.WindowsInstaller is deliberately absent. Dependabot recognises .csproj, .vbproj,
   # .fsproj and .proj, but not .wixproj, and naming a directory it finds no manifest in fails the
@@ -31,6 +33,7 @@ updates:
       - /HostPinger.Core
       - /HostPinger.Test
       - /HostPinger.UITest
+      - /HostPinger.Benchmarks
     schedule:
       interval: weekly
     groups:
