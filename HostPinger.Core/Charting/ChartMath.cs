@@ -195,10 +195,20 @@ namespace HostPinger.Core.Charting
                 : null;
         }
 
-        /// <summary>The width of one <see cref="Downsample"/> bucket over the given range.</summary>
+        /// <summary>
+        /// The width of one <see cref="Downsample"/> bucket over the given range. A range that ends
+        /// where it starts, or before, and a chart with no room for a point are the caller's
+        /// mistakes rather than an empty chart, and said to be here, where every way of reading a
+        /// series works out its grid.
+        /// </summary>
         public static TimeSpan BucketDuration(DateTime rangeStartUtc, DateTime rangeEndUtc, int bucketCount)
         {
             ArgumentOutOfRangeException.ThrowIfLessThan(bucketCount, 1);
+            if (rangeEndUtc <= rangeStartUtc)
+            {
+                throw new ArgumentException("rangeEndUtc must be after rangeStartUtc.", nameof(rangeEndUtc));
+            }
+
             return TimeSpan.FromTicks(Math.Max(1, (rangeEndUtc - rangeStartUtc).Ticks / bucketCount));
         }
 

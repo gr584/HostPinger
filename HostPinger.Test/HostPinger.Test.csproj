@@ -40,6 +40,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- For ChartPaletteTests, which checks that the stylesheet still defines a color for every
+         palette slot. Copied for the same reason as the two above. -->
+    <Content Include="..\HostPinger\wwwroot\app.css" Link="app.css" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\HostPinger.Core\HostPinger.Core.csproj" />
     <!-- For PasswordGateTests. Anything about the web UI itself lives in HostPinger.UITest, which
          is where the reference would otherwise be pulling this project. -->

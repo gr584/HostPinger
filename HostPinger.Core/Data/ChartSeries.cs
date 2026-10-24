@@ -192,12 +192,7 @@ namespace HostPinger.Core.Data
             DateTime rangeEndUtc,
             int bucketCount)
         {
-            ArgumentOutOfRangeException.ThrowIfLessThan(bucketCount, 1);
-            if (rangeEndUtc <= rangeStartUtc)
-            {
-                throw new ArgumentException("rangeEndUtc must be after rangeStartUtc.", nameof(rangeEndUtc));
-            }
-
+            // Which also refuses a range that is no range and a chart with no points.
             var bucketDuration = ChartMath.BucketDuration(rangeStartUtc, rangeEndUtc, bucketCount);
 
             // The oldest bucket on screen starts before the range does, and reading only from the

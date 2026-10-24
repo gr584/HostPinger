@@ -6,6 +6,25 @@ namespace HostPinger.Test
     {
         private static readonly DateTime Start = new(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc);
 
+        /// <summary>
+        /// The grid every way of reading a series works out refuses a range that ends where it
+        /// starts, or before, and a chart with no room for a point. ChartSeries used to check both
+        /// itself as well, and the two copies made each other's mutants survive.
+        /// </summary>
+        [Test]
+        public void BucketDuration_RefusesARangeThatIsNoRangeAndAChartWithNoPoints()
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(() => ChartMath.BucketDuration(Start, Start, 20),
+                    Throws.ArgumentException.With.Property(nameof(ArgumentException.ParamName)).EqualTo("rangeEndUtc"));
+                Assert.That(() => ChartMath.BucketDuration(Start.AddSeconds(10), Start, 20),
+                    Throws.ArgumentException.With.Property(nameof(ArgumentException.ParamName)).EqualTo("rangeEndUtc"));
+                Assert.That(() => ChartMath.BucketDuration(Start, Start.AddSeconds(10), 0),
+                    Throws.InstanceOf<ArgumentOutOfRangeException>());
+            });
+        }
+
         [Test]
         public void NiceTicks_RoundsUpToNiceStep()
         {
