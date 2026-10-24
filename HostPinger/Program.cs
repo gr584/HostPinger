@@ -121,6 +121,11 @@ namespace HostPinger
             builder.Services.AddSingleton<DatabaseBackup>();
             builder.Services.AddSingleton<BackupDownloadTokens>();
 
+            // Migrations, then the settings, then the host summary, then the temp-file sweep, before
+            // the web server or any ping round starts; see DatabaseStartup for why it is a hosted
+            // service rather than a step ahead of the host.
+            builder.Services.AddHostedService<DatabaseStartup>();
+
             // Registered ahead of the monitor so its verdict reaches the log before the first round
             // starts recording hosts as down.
             builder.Services.AddHostedService<IcmpAvailabilityCheck>();
@@ -141,14 +146,6 @@ namespace HostPinger
             builder.Services.AddSingleton<DatabaseReads>();
 
             var app = builder.Build();
-
-            // Migrations, then the settings, then the host summary, before the first page is served;
-            // see OpenAsync for why in that order.
-            HostPingerDatabase.OpenAsync(app.Services).GetAwaiter().GetResult();
-
-            // A download that died with the process or an upload cut off by a restart leaves its
-            // temp file beside the database; nothing holds them now, so they go.
-            DatabaseBackup.DeleteLeftoverTempFiles(paths);
 
             // Configure the HTTP request pipeline.
             if (!app.Environment.IsDevelopment())

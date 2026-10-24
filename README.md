@@ -287,8 +287,9 @@ service, locked or not.
   rebuilds an index builds it over the history already recorded, before the service starts
   answering — on a database near its size limit that is the one kind of upgrade that takes
   noticeable time, a minute or two, and longer on a slow machine. The Linux service waits for it
-  however long it takes, and a start interrupted anyway — a reboot, a stop — leaves nothing to
-  repair: the next start begins that migration again.
+  however long it takes, the Windows service reports itself started before it begins so the
+  service manager does not give up on it, and a start interrupted anyway — a reboot, a stop —
+  leaves nothing to repair: the next start begins that migration again.
 - The file runs in SQLite's WAL mode, where reading the history never holds up a ping round's
   write; an install upgraded from an older version is switched at its first start, once any
   migration is done. The most recent writes then sit in `hostpinger.db-wal` beside the file until
