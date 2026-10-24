@@ -2,7 +2,9 @@ using HostPinger.Core.Data;
 using HostPinger.Core.Options;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace HostPinger.Core.Services
 {
@@ -79,14 +81,24 @@ namespace HostPinger.Core.Services
             await summaries.LoadAsync(cancellationToken);
         }
 
-        public static async Task InitializeAsync(HostPingerDbContext db, CancellationToken cancellationToken = default)
+        /// <summary>
+        /// Brings the database up to date: incremental auto-vacuum, then the migrations, after
+        /// clearing any lock a migration stopped partway through left behind.
+        /// </summary>
+        /// <returns>
+        /// Whether there was such a lock to clear, which is also logged as a warning through the
+        /// context's own logging: the one trace left of a start, restore or --remove-password that
+        /// was stopped while it migrated.
+        /// </returns>
+        public static async Task<bool> InitializeAsync(HostPingerDbContext db, CancellationToken cancellationToken = default)
         {
             await db.Database.OpenConnectionAsync(cancellationToken);
             try
             {
                 await EnableIncrementalVacuumAsync(db, cancellationToken);
-                await ClearMigrationLockAsync(db, cancellationToken);
+                var cleared = await ClearMigrationLockAsync(db, cancellationToken);
                 await db.Database.MigrateAsync(cancellationToken);
+                return cleared;
             }
             finally
             {
@@ -96,7 +108,7 @@ namespace HostPinger.Core.Services
 
         /// <summary>
         /// Deletes the row EF Core's migrator holds as its lock, if a migrator that never finished
-        /// left one behind.
+        /// left one behind, and says whether it did.
         /// </summary>
         /// <remarks>
         /// The migrator locks a SQLite database by inserting a row into __EFMigrationsLock, and only
@@ -118,17 +130,28 @@ namespace HostPinger.Core.Services
         /// rolls back, rather than applying it twice.
         /// </para>
         /// </remarks>
-        private static async Task ClearMigrationLockAsync(HostPingerDbContext db, CancellationToken cancellationToken)
+        private static async Task<bool> ClearMigrationLockAsync(HostPingerDbContext db, CancellationToken cancellationToken)
         {
             // The table is EF's, created the first time a migrator takes the lock; a brand-new file
             // has none to clear.
             var connection = db.Database.GetDbConnection();
             await using var command = connection.CreateCommand();
             command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '__EFMigrationsLock';";
-            if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken)) > 0)
+            if (Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken)) == 0
+                || await db.Database.ExecuteSqlRawAsync("DELETE FROM \"__EFMigrationsLock\";", cancellationToken) == 0)
             {
-                await db.Database.ExecuteSqlRawAsync("DELETE FROM \"__EFMigrationsLock\";", cancellationToken);
+                return false;
             }
+
+            // The context's own logging, which for one from the application's factory is the
+            // application's: the service and a restore log it without being handed a logger.
+            db.GetService<ILoggerFactory>()
+                .CreateLogger(typeof(HostPingerDatabase).FullName!)
+                .LogWarning(
+                    "Cleared the lock an interrupted migration left in {Database}: a start, restore or "
+                    + "--remove-password was stopped partway through migrating it. That migration runs again now.",
+                    connection.DataSource);
+            return true;
         }
 
         /// <summary>

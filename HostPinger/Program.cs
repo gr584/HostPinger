@@ -213,7 +213,12 @@ namespace HostPinger
         /// </summary>
         private static void RemovePassword(PingerPaths paths)
         {
-            UserSettingsStore.RemovePasswordAsync(paths.DatabasePath).GetAwaiter().GetResult();
+            var clearedLock = UserSettingsStore.RemovePasswordAsync(paths.DatabasePath).GetAwaiter().GetResult();
+
+            if (clearedLock)
+            {
+                Console.WriteLine("Cleared a lock that an interrupted migration had left, then migrated the database.");
+            }
 
             Console.WriteLine($"Password removed from {paths.DatabasePath}.");
             Console.WriteLine("Nothing is locked now. Start the service, or restart it if it is running.");

@@ -138,10 +138,14 @@ namespace HostPinger.Core.Options
         /// no database at all, where it creates one that says no password rather than failing
         /// somebody who is locked out.
         /// </remarks>
-        public static async Task RemovePasswordAsync(string databasePath, CancellationToken cancellationToken = default)
+        /// <returns>
+        /// Whether the migrations first had to clear a lock that a migration stopped partway through
+        /// left behind, for the command to tell whoever ran it, having no log of its own.
+        /// </returns>
+        public static async Task<bool> RemovePasswordAsync(string databasePath, CancellationToken cancellationToken = default)
         {
             await using var db = new HostPingerDbContext(HostPingerDatabase.Options(databasePath));
-            await HostPingerDatabase.InitializeAsync(db, cancellationToken);
+            var clearedLock = await HostPingerDatabase.InitializeAsync(db, cancellationToken);
             await StageAsync(db, PasswordHashKey, string.Empty, cancellationToken);
             await db.SaveChangesAsync(cancellationToken);
         }
@@ -149,6 +153,7 @@ namespace HostPinger.Core.Options
         /// <summary>
         /// Stages one row without saving, adding or updating as the table requires. Shared with
         /// <see cref="RemovePasswordAsync"/>, so what a removal writes cannot drift from what
+            return clearedLock;
         /// <see cref="SavePasswordHashAsync"/> writes; the caller saves the changes.
         /// </summary>
         public static async Task StageAsync(

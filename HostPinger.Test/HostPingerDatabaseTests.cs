@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace HostPinger.Test
@@ -107,9 +108,11 @@ namespace HostPinger.Test
             // The migrator's wait for the lock honours cancellation, so a lock still in the way
             // fails the test here rather than hanging the run.
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            await using (var db = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath)))
+            var log = new DatabaseLog();
+            bool cleared;
+            await using (var db = new HostPingerDbContext(log.Options(_databasePath)))
             {
-                await HostPingerDatabase.InitializeAsync(db, timeout.Token);
+                cleared = await HostPingerDatabase.InitializeAsync(db, timeout.Token);
             }
 
             await using var check = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath));
@@ -121,6 +124,31 @@ namespace HostPinger.Test
             {
                 Assert.That(await check.Database.GetPendingMigrationsAsync(), Is.Empty);
                 Assert.That(await count.ExecuteScalarAsync(), Is.Zero, "the lock is released once the migrations are done");
+                Assert.That(cleared, Is.True);
+                Assert.That(log.Entries, Has.Exactly(1).Matches<(LogLevel Level, string Message, Exception? Exception)>(
+                    e => e.Level == LogLevel.Warning && e.Message.StartsWith("Cleared the lock an interrupted migration left in ")));
+            });
+        }
+
+        /// <summary>
+        /// A database whose last migrator finished, as every one does but a killed one, has nothing
+        /// to clear, and says nothing about it: the lock's table is there, but empty.
+        /// </summary>
+        [Test]
+        public async Task InitializeAsync_ClearsNothingAfterAMigrationThatFinished()
+        {
+            await using (var db = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath)))
+            {
+                await db.GetService<IMigrator>().MigrateAsync(LastIn1_12);
+            }
+
+            var log = new DatabaseLog();
+            await using var reopened = new HostPingerDbContext(log.Options(_databasePath));
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(await HostPingerDatabase.InitializeAsync(reopened), Is.False);
+                Assert.That(log.Entries, Is.Empty);
             });
         }
 
@@ -211,7 +239,62 @@ namespace HostPinger.Test
             });
         }
 
+        /// <summary>
+        /// The service's own start, which is where a lock is found after a start that was killed:
+        /// its warning reaches the application's logging, which nothing handed the migrations.
+        /// </summary>
+        [Test]
+        public async Task OpenAsync_LogsALockItClearsThroughTheApplicationsLogging()
+        {
+            await using (var db = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath)))
+            {
+                await db.GetService<IMigrator>().MigrateAsync(LastIn1_12);
+                await db.Database.ExecuteSqlRawAsync(
+                    "INSERT INTO \"__EFMigrationsLock\" (\"Id\", \"Timestamp\") VALUES (1, '2026-10-22 07:03:51.8874913+00:00');");
+            }
+
+            var log = new DatabaseLog();
+            var services = new ServiceCollection()
+                .AddHostPingerDatabase(PingerPaths.Resolve(_databasePath, _directory))
+                .AddLogging(logging => logging.AddProvider(log))
+                .AddSingleton<Microsoft.Extensions.Options.IOptionsMonitor<PingerOptions>>(new TestOptionsMonitor<PingerOptions>(new PingerOptions()))
+                .AddSingleton<Microsoft.Extensions.Options.IOptionsMonitor<SecurityOptions>>(new TestOptionsMonitor<SecurityOptions>(new SecurityOptions()))
+                .AddSingleton<UserSettingsStore>()
+                .AddSingleton<HostSummaryCache>();
+            await using var provider = services.BuildServiceProvider();
+
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            await HostPingerDatabase.OpenAsync(provider, timeout.Token);
+
+            Assert.That(log.Entries.Select(e => e.Level), Is.EqualTo(new[] { LogLevel.Warning }));
+        }
+
         private TestDb.Factory Factory() => new(HostPingerDatabase.Options(_databasePath));
+
+        /// <summary>
+        /// What is logged under HostPingerDatabase's own category, through whichever logger factory
+        /// it is added to; EF's own lines, under categories of their own, are left out.
+        /// </summary>
+        private sealed class DatabaseLog : ILoggerProvider
+        {
+            private readonly TestLogger<DatabaseLog> _logger = new();
+
+            public IReadOnlyList<(LogLevel Level, string Message, Exception? Exception)> Entries => _logger.Entries;
+
+            /// <summary>Options for a context whose own logging comes here, as a test's context has none otherwise.</summary>
+            public DbContextOptions<HostPingerDbContext> Options(string databasePath) =>
+                new DbContextOptionsBuilder<HostPingerDbContext>()
+                    .UseSqlite(HostPingerDatabase.ConnectionString(databasePath))
+                    .UseLoggerFactory(LoggerFactory.Create(logging => logging.AddProvider(this)))
+                    .Options;
+
+            public ILogger CreateLogger(string categoryName) =>
+                categoryName == typeof(HostPingerDatabase).FullName ? _logger : NullLogger.Instance;
+
+            public void Dispose()
+            {
+            }
+        }
 
         private (UserSettingsStore Settings, HostSummaryCache Summaries) Services(PingerOptions defaults)
         {
