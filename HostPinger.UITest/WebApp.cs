@@ -19,6 +19,9 @@ namespace HostPinger.UITest
     /// </remarks>
     public sealed class WebApp : IAsyncDisposable
     {
+        /// <summary>The start of every run's temporary directory, which is how what a run left is found.</summary>
+        private const string DataDirectoryPrefix = "hostpinger-ui-";
+
         /// <summary>The password every test unlocks with, seeded into the database before the start.</summary>
         public const string Password = "the-test-password";
 
@@ -64,7 +67,8 @@ namespace HostPinger.UITest
                     + "than this project alone.", assemblyPath);
             }
 
-            var dataDirectory = Path.Combine(Path.GetTempPath(), $"hostpinger-ui-{Guid.NewGuid():N}");
+            StopWhatEarlierRunsLeft();
+            var dataDirectory = Path.Combine(Path.GetTempPath(), $"{DataDirectoryPrefix}{Guid.NewGuid():N}");
             Directory.CreateDirectory(dataDirectory);
             var databasePath = Path.Combine(dataDirectory, PingerPaths.DatabaseFileName);
             SeedSettings(databasePath);
@@ -229,6 +233,83 @@ namespace HostPinger.UITest
             lock (output)
             {
                 return string.Join(Environment.NewLine, output.TakeLast(40));
+            }
+        }
+
+        /// <summary>
+        /// Stops any application an earlier run started and could not stop itself, and deletes the
+        /// temporary directories such runs left. A cancelled run — Ctrl+C, a hang timeout — kills the
+        /// test host without its teardown, and the application it started goes on running on its port.
+        /// </summary>
+        /// <remarks>
+        /// Found through /proc, so on Linux only: a process whose database path lies in one of these
+        /// runs' directories, and whose parent is no longer a test host, which is how a run still under
+        /// way elsewhere is told apart and left alone. Directories and uploads go only once they are an
+        /// hour old, so that another run's, made a moment before its application starts, is not taken.
+        /// </remarks>
+        private static void StopWhatEarlierRunsLeft()
+        {
+            var prefix = Path.Combine(Path.GetTempPath(), DataDirectoryPrefix);
+            if (OperatingSystem.IsLinux())
+            {
+                var marker = $"Pinger__DatabasePath={prefix}";
+                foreach (var entry in Directory.EnumerateDirectories("/proc"))
+                {
+                    if (!int.TryParse(Path.GetFileName(entry), out var pid) || pid == Environment.ProcessId)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        if (!File.ReadAllText(Path.Combine(entry, "environ")).Split('\0').Any(v => v.StartsWith(marker, StringComparison.Ordinal)))
+                        {
+                            continue;
+                        }
+
+                        // "pid (name) state ppid …", where the name can hold spaces and parentheses.
+                        var stat = File.ReadAllText(Path.Combine(entry, "stat"));
+                        var parentId = int.Parse(stat[(stat.LastIndexOf(')') + 2)..].Split(' ')[1]);
+                        var parent = Path.Combine("/proc", parentId.ToString(), "cmdline");
+                        if (File.Exists(parent) && File.ReadAllText(parent).Contains("testhost", StringComparison.Ordinal))
+                        {
+                            continue;
+                        }
+
+                        using var orphan = Process.GetProcessById(pid);
+                        orphan.Kill(entireProcessTree: true);
+                        orphan.WaitForExit(TimeSpan.FromSeconds(10));
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException
+                        or InvalidOperationException or FormatException)
+                    {
+                        // Gone meanwhile, or not ours to read: either way nothing to stop.
+                    }
+                }
+            }
+
+            // The uploads ConfigurationPageTests writes share the prefix, and a cancelled run leaves those too.
+            foreach (var left in Directory.EnumerateFileSystemEntries(Path.GetTempPath(), $"{DataDirectoryPrefix}*"))
+            {
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(left) >= DateTime.UtcNow.AddHours(-1))
+                    {
+                        continue;
+                    }
+
+                    if (Directory.Exists(left))
+                    {
+                        Directory.Delete(left, recursive: true);
+                    }
+                    else
+                    {
+                        File.Delete(left);
+                    }
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                }
             }
         }
 
