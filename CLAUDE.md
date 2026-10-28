@@ -53,6 +53,17 @@ Known gaps, which neither check covers:
 - **The database file.** Reading, copying or streaming the file at `PingerPaths.DatabasePath`
   isn't guarded. Anything that copies or serves the file goes through `DatabaseBackup` in Core.
 
+## Release notes
+
+A commit that changes what HostPinger's users see or have to do ends with a `Release-note:`
+trailer, in the closing block beside `Co-Authored-By:`. It is a sentence or two written for
+someone running HostPinger, with each continuation line starting with a space. Tests, CI,
+benchmarks and refactoring get none.
+
+Why: work lands on main without pull requests, so GitHub's generated release notes have nothing to
+list. The release's notes are these trailers, collected by the notes job in `build.yml`, and a
+commit without one is left out of them. README's Development section has the rest.
+
 ## Subagent effort
 
 Workflow agents and subagents run at `high` effort at most, whatever effort the session runs at.

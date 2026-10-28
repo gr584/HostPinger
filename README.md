@@ -800,6 +800,31 @@ prerelease suffix is marked as such rather than becoming the current release —
 job publishes the dnf and apt repositories to GitHub Pages. The benchmark job runs on pushes and
 pull requests but not on tags, and gates nothing.
 
+A release's notes are written as the work lands rather than at the tag. GitHub generates notes of
+its own from merged pull requests, but changes here go to main directly, so those come to little
+more than a compare link. A commit that changes what users see or have to do therefore ends with a
+`Release-note:` trailer, in the closing block beside any `Co-Authored-By:`, saying so in a sentence
+or two written for them, with a space at the start of each continuation line:
+
+```text
+Release-note: Deleting a host pauses it first, then removes its history in batches without
+ freezing the page.
+```
+
+Tests, CI, benchmarks and refactoring get none. The notes job collects these trailers from every
+commit since the last release that was not a prerelease, and on a tag adds the tag's own message
+below its first line, for whatever belongs to the release as a whole. The release job puts the
+result above GitHub's notes. The notes job runs on every push too, and its summary page shows what
+a tag at that commit would publish. To give a release a message of its own, write it to a file after
+a first line such as `HostPinger 1.15.0` and a blank line, and tag with:
+
+```bash
+git tag -a v1.15.0 --cleanup=whitespace -F notes.md
+```
+
+Without `--cleanup=whitespace`, git takes a Markdown heading in the file for a comment and drops it.
+A lightweight tag (`git tag v1.15.0`) has no message, and its release carries the trailers alone.
+
 ### Benchmarks
 
 `HostPinger.Benchmarks` times the calls the pages make into `HostPinger.Core` with BenchmarkDotNet:

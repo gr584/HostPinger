@@ -480,13 +480,91 @@ jobs:
           path: HostPinger.WindowsInstaller/bin/**/*.msi
           if-no-files-found: error
 
+  notes:
+    name: notes
+    # The text the release job puts above GitHub's own release notes. GitHub builds those from
+    # merged pull requests, and work here lands on main directly, so on their own they come to the
+    # Dependabot bumps and a compare link. This text comes from two places, both written by hand: a
+    # Release-note: trailer on each commit since the last release that changes what users see or
+    # have to do, and on a tag, the tag's message below its first line, for whatever belongs to the
+    # release as a whole.
+    #
+    # Collected on every run rather than only on a tag, so that a tag is not the first time this
+    # runs, and so that any run's summary page shows what a tag at that commit would publish.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      notes: ${{ steps.collect.outputs.notes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The history back to the last release, and the tags as the annotated objects they are.
+          # On a tag, checkout compares the tag it was started for with the commit through
+          # ^{commit}, so it leaves the annotated tag that came with the history in place.
+          fetch-depth: 0
+
+      - name: Collect the release notes
+        id: collect
+        run: |
+          set -euo pipefail
+
+          # The last release before this commit. From HEAD^, so that a tag's own run finds the one
+          # before it, and passing over prerelease tags, so that a release's notes cover everything
+          # since the last release users were offered rather than since its own release candidate.
+          previous=$(git describe --tags --abbrev=0 --match 'v*' --exclude 'v*-*' HEAD^ 2>/dev/null || true)
+
+          # One line per trailer, with its continuation lines joined; a commit without one prints an
+          # empty line.
+          trailers=$(git log --reverse --no-merges \
+            --format='%(trailers:key=Release-note,valueonly,unfold)' "${previous:+$previous..}HEAD" |
+            sed '/^[[:space:]]*$/d; s/^/- /')
+
+          # Only an annotated tag has a message of its own. Asked for a lightweight tag's, git
+          # answers with the commit's.
+          message=""
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag ]; then
+            message=$(git for-each-ref --format='%(contents:body)' "refs/tags/$GITHUB_REF_NAME")
+          fi
+
+          if [ -n "$message" ] && [ -n "$trailers" ]; then
+            notes=$(printf '%s\n\n%s' "$message" "$trailers")
+          else
+            notes="$message$trailers"
+          fi
+
+          # A random delimiter, so that no line of the notes can end the value early.
+          delimiter="notes_$(openssl rand -hex 16)"
+          printf 'notes<<%s\n%s\n%s\n' "$delimiter" "$notes" "$delimiter" >> "$GITHUB_OUTPUT"
+
+          sources="the commits since ${previous:-the first}"
+          if [ -n "$message" ]; then
+            sources="the tag's message and $sources"
+          fi
+
+          {
+            if [ "$GITHUB_REF_TYPE" = tag ]; then
+              echo "## Release notes for $GITHUB_REF_NAME"
+            else
+              echo "## Release notes a tag at this commit would publish"
+            fi
+            echo
+            echo "From $sources. The release job puts these above GitHub's list of pull requests and its compare link."
+            echo
+            if [ -n "$notes" ]; then
+              printf '%s\n' "$notes"
+            else
+              echo 'None: no commit since then carries a `Release-note:` trailer.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   release:
     name: release
     # The gate sits here rather than between the build jobs. Those four catch disjoint failures —
     # the packaging jobs are the only builds on the target distributions' own SDKs — so making them
     # wait on one another would delay signal without changing whether the run is red. What
-    # actually warrants a gate is publishing, and this job cannot start unless all four passed.
-    needs: [test, rpm, deb, msi]
+    # actually warrants a gate is publishing, and this job cannot start unless all four passed. It
+    # waits on the notes job as well, for the text it puts above GitHub's notes.
+    needs: [test, rpm, deb, msi, notes]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -550,6 +628,7 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ needs.notes.outputs.notes }}
         run: |
           set -euo pipefail
 
@@ -565,9 +644,18 @@ jobs:
           mapfile -t files < <(find artifacts -type f \( -name '*.rpm' -o -name '*.deb' -o -name '*.msi' \))
           printf 'attaching: %s\n' "${files[@]}"
 
+          # The notes job's text goes above what --generate-notes produces. It is passed in a file
+          # that ends in a blank line, so a list closing it cannot run on into the first line of the
+          # generated text. An empty file leaves GitHub's notes as they would be on their own.
+          : > notes.md
+          if [ -n "$NOTES" ]; then
+            printf '%s\n\n' "$NOTES" > notes.md
+          fi
+
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
             --generate-notes \
             $prerelease \
             "${files[@]}"
