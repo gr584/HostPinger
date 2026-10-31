@@ -1,6 +1,7 @@
 @page "/configuration"
 @rendermode InteractiveServer
 @using System.ComponentModel.DataAnnotations
+@using System.Net
 @using HostPinger.Core.Options
 @using HostPinger.Core.Services
 @using HostPinger.Security
@@ -9,10 +10,13 @@
 @inject PingerPaths Paths
 @inject UserSettingsStore SettingsStore
 @inject PasswordGate Gate
+@inject PasswordAttempts Attempts
+@inject IHttpContextAccessor HttpContextAccessor
 @inject LockPrompt Prompt
 @inject DatabaseBackup Backup
 @inject BackupDownloadTokens Tokens
 @inject NavigationManager Navigation
+@inject ILogger<Configuration> Logger
 @implements IDisposable
 
 <PageTitle>HostPinger - Configuration</PageTitle>
@@ -69,7 +73,7 @@
                 <dt>Backup</dt>
                 <dd>
                     <button type="button" class="btn btn-outline-primary btn-sm" disabled="@(!_isUnlocked)"
-                            @onclick="DownloadBackupAsync">Download backup</button>
+                            @onclick="RequestDownloadAsync">Download backup</button>
                     <div class="form-text">
                         A compacted snapshot of the whole database: hosts, history, settings and
                         the password, if one is set, all travel with it.
@@ -89,36 +93,30 @@
                         the DOM: the browser keeps the chosen file on the input element itself,
                         and reading it on confirm goes back to that element — unmounting it is
                         how an upload loses its file. Cancelling re-keys the input instead, which
-                        recreates it empty and lets the browser drop the choice.
+                        recreates it empty and lets the browser drop the choice. Choosing a file
+                        opens the confirmation below.
+
+                        With a password set, the button opens that overlay first instead, to ask
+                        for the password before a file is chosen; the overlay then offers a label
+                        for the same input.
                     *@
                     <InputFile id="restore-file" @key="_restoreInputKey" OnChange="OnRestoreFileSelected"
                                disabled="@(!_isUnlocked)" class="d-none" />
-                    @if (!_isRestorePending)
+                    @if (Gate.IsPasswordSet)
                     {
-                        <label for="restore-file" role="button"
-                               class="btn btn-outline-primary btn-sm@(_isUnlocked ? null : " disabled")">Restore backup…</label>
+                        <button type="button" class="btn btn-outline-primary btn-sm" disabled="@(!_isUnlocked)"
+                                @onclick="RequestRestoreAsync">Restore backup…</button>
                     }
                     else
                     {
-                        <span class="text-danger">
-                            Restore <code>@_restoreFile?.Name</code>? It replaces everything —
-                            hosts, history and settings, and the backup's password (or lack of
-                            one) will apply, which can lock this browser out or unlock the
-                            application. The current database is kept as
-                            <code>@Path.GetFileName(Backup.PreRestorePath)</code>.
-                        </span>
-                        <div class="d-flex gap-2 mt-2">
-                            <button type="button" class="btn btn-outline-secondary btn-sm" disabled="@_isRestoring"
-                                    @onclick="CancelRestore">Cancel</button>
-                            <button type="button" class="btn btn-danger btn-sm" disabled="@_isRestoring"
-                                    @onclick="ConfirmRestoreAsync">@(_isRestoring ? "Restoring…" : "Confirm restore")</button>
-                        </div>
+                        <label for="restore-file" role="button"
+                               class="btn btn-outline-primary btn-sm@(_isUnlocked ? null : " disabled")">Restore backup…</label>
                     }
                     <div class="form-text">
                         Uploading a backup replaces the current database after a confirmation.
                         @if (_restoreStatus is not null)
                         {
-                            <span class="@StatusClass(_isRestoreRefused)">@_restoreStatus</span>
+                            <span class="config-refused">@_restoreStatus</span>
                         }
                     </div>
                 </dd>
@@ -238,6 +236,117 @@
     </div>
 </div>
 
+@if (_confirming != Confirming.Nothing)
+{
+    @*
+        Bootstrap's modal markup driven from here, the way the host form and the unlock overlay
+        do it. Unlike the unlock overlay's form, this one is handled here rather than posted:
+        nothing it does writes a cookie, so the circuit can check the password itself. The page
+        stays where it is, with the chosen file still on its input, while it is open.
+    *@
+    <div class="modal d-block" tabindex="-1" aria-modal="true" role="dialog" @ref="_dialog"
+         @onkeydown="OnDialogKeyDown" @onclick="OnOverlayClick" @onmousedown="() => _pressedInsideDialog = false">
+        <div class="modal-dialog modal-dialog-centered">
+            @*
+                The content box stops both events rather than the dialog box, because
+                modal-dialog-centered stretches that one to the full height of the overlay — a
+                click above or below the form has to reach the overlay to count as a click away.
+            *@
+            <div class="modal-content" @onclick:stopPropagation
+                 @onmousedown="() => _pressedInsideDialog = true" @onmousedown:stopPropagation>
+                <form @onsubmit="SubmitDialogAsync">
+                    <div class="modal-header">
+                        <h5 class="modal-title">@(_confirming == Confirming.Download ? "Download backup" : "Restore backup")</h5>
+                        <button type="button" class="btn-close" aria-label="Close" disabled="@_isRestoring"
+                                @onclick="CancelDialog"></button>
+                    </div>
+                    <div class="modal-body">
+                        @if (DialogNotice is not null)
+                        {
+                            <div class="alert alert-danger py-2">@DialogNotice</div>
+                        }
+                        @switch (_confirming)
+                        {
+                            case Confirming.Download:
+                                <p>
+                                    The backup carries the password's hash along with everything
+                                    else, so downloading one takes the current password, even in an
+                                    unlocked browser.
+                                </p>
+                                break;
+                            case Confirming.RestorePassword:
+                                <p>
+                                    A restore puts the backup's password, or the lack of one, in place
+                                    of this one, so it takes the current password, even in an unlocked
+                                    browser.
+                                </p>
+                                break;
+                            case Confirming.RestoreFile:
+                                <p class="mb-0">
+                                    Choose the backup to restore. Nothing is replaced until you have
+                                    confirmed it.
+                                </p>
+                                break;
+                            case Confirming.Restored:
+                                <div class="alert @(_isRestoreRefused ? "alert-danger" : "alert-success") mb-0"
+                                     role="status">@_restoreResult</div>
+                                break;
+                            default:
+                                <p class="text-danger mb-0">
+                                    Restore <code>@_restoreFile?.Name</code>? It replaces everything —
+                                    hosts, history and settings, and the backup's password (or lack of
+                                    one) will apply, which can lock this browser out or unlock the
+                                    application. The current database is kept as
+                                    <code>@Path.GetFileName(Backup.PreRestorePath)</code>.
+                                </p>
+                                break;
+                        }
+                        @if (AsksPassword)
+                        {
+                            <label class="form-label" for="backup-current-password">Current password</label>
+                            <input id="backup-current-password" type="password" class="form-control form-control-sm"
+                                   autocomplete="current-password"
+                                   @bind="_password" @bind:event="oninput" @ref="_passwordInput" />
+                        }
+                    </div>
+                    <div class="modal-footer">
+                        @if (_confirming != Confirming.Restored)
+                        {
+                            <button type="button" class="btn btn-outline-secondary btn-sm" disabled="@_isRestoring"
+                                    @onclick="CancelDialog">Cancel</button>
+                        }
+                        @*
+                            Held back while a wait stands, as the unlock overlay's button is: nothing
+                            typed then would be looked at. Disabling it also stops Enter submitting.
+                        *@
+                        @switch (_confirming)
+                        {
+                            case Confirming.Download:
+                                <button type="submit" class="btn btn-primary btn-sm" disabled="@IsWaiting">Download</button>
+                                break;
+                            case Confirming.RestorePassword:
+                                <button type="submit" class="btn btn-primary btn-sm" disabled="@IsWaiting">Continue</button>
+                                break;
+                            case Confirming.RestoreFile:
+                                @* The page's own hidden input, so the chosen file stays put; see there. *@
+                                <label for="restore-file" role="button" class="btn btn-primary btn-sm">Choose file…</label>
+                                break;
+                            case Confirming.Restored:
+                                <button type="button" class="btn btn-primary btn-sm" @onclick="CloseDialog">Close</button>
+                                break;
+                            default:
+                                <button type="submit" class="btn btn-danger btn-sm"
+                                        disabled="@_isRestoring">@(_isRestoring ? "Restoring…" : "Confirm restore")</button>
+                                break;
+                        }
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    <div class="modal-backdrop show"></div>
+}
+
 @code {
     // Upper bounds the form accepts; the pinger clamps to the same interval and timeout ceilings.
     private const int IntervalUpperBoundSeconds = 86_400;
@@ -268,18 +377,41 @@
     // The backup status only ever reports a refusal — a download that starts is its own feedback.
     private string? _backupStatus;
 
+    // Beside the restore control, which only ever reports the locked refusal: whatever comes of
+    // confirming a restore is said in the overlay instead, in the step after the confirmation.
     private string? _restoreStatus;
+    private string? _restoreResult;
     private bool _isRestoreRefused;
 
     // The chosen file, held while the confirmation is on screen. Confirming is a separate click
     // from choosing, because what follows replaces the database.
     private IBrowserFile? _restoreFile;
-    private bool _isRestorePending;
     private bool _isRestoring;
 
     // Replaced to recreate the restore input. The file lives on the browser's input element, so
     // the element has to survive until the upload has been read, and be rebuilt to be cleared.
     private object _restoreInputKey = new();
+
+    // The overlay that confirms a download or a restore, and what it is confirming.
+    private Confirming _confirming;
+    private ElementReference _dialog;
+    private ElementReference _passwordInput;
+    private bool _pressedInsideDialog;
+    private bool _focusDialog;
+    private string? _dialogError;
+
+    // Whether the current password has been given for the restore under way, which it is before a
+    // file is chosen. Forgotten with the chosen file, so it never carries over to the next restore.
+    private bool _restorePasswordGiven;
+
+    // What is typed in the overlay's password box. Emptied after every attempt, right or wrong, so
+    // a password is held here no longer than it takes to check it.
+    private string _password = string.Empty;
+
+    // When the wait a run of wrong passwords has earned runs out, and null while none stands. Kept
+    // across closing and reopening the overlay, as the unlock overlay keeps its own.
+    private DateTimeOffset? _waitUntil;
+    private bool _isCountingDown;
 
     // Whether the message beside each Save is a refusal rather than a confirmation, which is only
     // the locked case: the buttons are disabled then, so it takes a lock arriving between the last
@@ -305,6 +437,25 @@
         _isUnlocked = await IsUnlockedAsync();
         await LoadStatsAsync();
         _ = AutoRefreshAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // Focusing puts the keyboard inside the overlay, which is what lets Escape reach
+        // OnDialogKeyDown: the password box when there is one, the overlay itself otherwise.
+        if (_focusDialog && _confirming != Confirming.Nothing)
+        {
+            _focusDialog = false;
+            await (AsksPassword ? _passwordInput : _dialog).FocusAsync();
+        }
+
+        // Started from a render that has happened in a browser, as the unlock overlay starts its
+        // own; see CountDownAsync.
+        if (IsWaiting && !_isCountingDown)
+        {
+            _isCountingDown = true;
+            _ = CountDownAsync();
+        }
     }
 
     /// <summary>
@@ -470,14 +621,96 @@
         await LoadStatsAsync();
     }
 
+    /// <summary>
+    /// The address this page's clicks arrive from, which is what a guess typed here is counted
+    /// against and what the log names.
+    /// </summary>
+    /// <remarks>
+    /// A circuit's events come with no request of their own, so this is the connection the circuit
+    /// runs over: the browser's socket, opened from the same address as its unlock, and so counted
+    /// on the same tally. Null if the connection has no request behind it any more, which counts
+    /// against the one tally <see cref="PasswordAttempts"/> keeps for everything without an address.
+    /// </remarks>
+    private IPAddress? Origin => HttpContextAccessor.HttpContext?.Connection.RemoteIpAddress;
+
+    /// <summary>
+    /// Checks the password typed in the overlay for <paramref name="action"/>, and whether it may go
+    /// ahead — which it always may while no password is set. When it may not, the overlay stays
+    /// open and says why.
+    /// </summary>
+    /// <remarks>
+    /// Asked even though this browser is unlocked, for the reason the Password page asks before a
+    /// change: a browser left open and walked away from must not be enough to take the password
+    /// over. A backup carries its hash away, and a restore puts the backup's password, or none, in
+    /// its place. Through <see cref="PasswordAttempts"/>, so a wrong guess here waits and is logged
+    /// the same as one at the unlock overlay, and this is no way round that one's wait.
+    /// </remarks>
+    private bool HasCurrentPassword(string action)
+    {
+        var typed = _password;
+        _password = string.Empty;
+        if (!Gate.IsPasswordSet)
+        {
+            return true;
+        }
+
+        var attempt = Attempts.Verify(Origin, typed);
+        if (attempt.IsAccepted)
+        {
+            _waitUntil = null;
+            return true;
+        }
+
+        // An empty box is not counted as a guess, and is not logged as one either.
+        if (attempt.Result == PasswordAttemptResult.Wrong && typed.Length > 0)
+        {
+            Logger.LogWarning(
+                "Failed {Action} from {Address}: the current password was wrong.",
+                action,
+                RequestOrigin.Describe(Origin));
+        }
+
+        _waitUntil = attempt.Wait > TimeSpan.Zero ? DateTimeOffset.UtcNow + attempt.Wait : null;
+        _dialogError = typed.Length > 0 ? "That is not the current password." : "Enter the current password.";
+        _focusDialog = true;
+        return false;
+    }
+
+    /// <summary>
+    /// Asks for the current password before a download, and downloads straight away when there is
+    /// none to ask for.
+    /// </summary>
+    private async Task RequestDownloadAsync()
+    {
+        // A locked browser goes straight through too, to be turned away there: there is no point
+        // asking it for a password first.
+        if (Gate.IsPasswordSet && await IsUnlockedAsync())
+        {
+            OpenDialog(Confirming.Download);
+            return;
+        }
+
+        await DownloadBackupAsync();
+    }
+
     private async Task DownloadBackupAsync()
     {
         if (!await IsUnlockedAsync())
         {
+            CloseDialog();
             _backupStatus = "HostPinger is locked — unlock it to download a backup.";
             _isUnlocked = false;
             return;
         }
+
+        // Before the token is issued, so the endpoint that serves the file needs nothing more than
+        // the token and the unlock.
+        if (!HasCurrentPassword("backup download"))
+        {
+            return;
+        }
+
+        CloseDialog();
 
         // The snapshot lands beside the database before the browser starts pulling it, so the
         // disk has to hold a second copy of the file for the duration of the download.
@@ -489,47 +722,220 @@
             return;
         }
 
+        Logger.LogInformation("Backup downloaded from {Address}.", RequestOrigin.Describe(Origin));
+
         // A full page navigation rather than anything on the circuit: the response says
         // attachment, so the browser starts the download and this page stays where it is.
         _backupStatus = null;
         Navigation.NavigateTo($"database-backup?token={Tokens.Issue()}", forceLoad: true);
     }
 
+    /// <summary>
+    /// Starts a restore with the current password, before any file is chosen, so that a refusal
+    /// costs nobody a trip through the file picker. Only offered while a password is set; without
+    /// one, the page's own label goes straight to the picker.
+    /// </summary>
+    private async Task RequestRestoreAsync()
+    {
+        if (!await IsUnlockedAsync())
+        {
+            RefuseRestoreAsLocked();
+            return;
+        }
+
+        CancelRestore();
+        OpenDialog(Confirming.RestorePassword);
+    }
+
+    private async Task GiveRestorePasswordAsync()
+    {
+        if (!await IsUnlockedAsync())
+        {
+            RefuseRestoreAsLocked();
+            return;
+        }
+
+        if (!HasCurrentPassword("restore"))
+        {
+            return;
+        }
+
+        // Straight on to the confirmation when a file is already chosen, which is the case when
+        // the confirmation itself sent the overlay back here; see ConfirmRestoreAsync.
+        _restorePasswordGiven = true;
+        OpenDialog(_restoreFile is null ? Confirming.RestoreFile : Confirming.Restore);
+    }
+
     private void OnRestoreFileSelected(InputFileChangeEventArgs e)
     {
         _restoreFile = e.File;
-        _isRestorePending = true;
         _restoreStatus = null;
+        OpenDialog(Confirming.Restore);
     }
 
     private void CancelRestore()
     {
         _restoreFile = null;
-        _isRestorePending = false;
+        _restorePasswordGiven = false;
         _restoreInputKey = new object();
     }
+
+    private void RefuseRestoreAsLocked()
+    {
+        _restoreStatus = "HostPinger is locked — unlock it to restore a backup.";
+        _isRestoreRefused = true;
+        _isUnlocked = false;
+        CancelRestore();
+        CloseDialog();
+    }
+
+    private void OpenDialog(Confirming what)
+    {
+        _confirming = what;
+        _password = string.Empty;
+        _dialogError = null;
+        _pressedInsideDialog = false;
+        _focusDialog = true;
+
+        // A wait that has run out since the overlay last said so has nothing left to say.
+        if (!IsWaiting)
+        {
+            _waitUntil = null;
+        }
+    }
+
+    private void CloseDialog()
+    {
+        _confirming = Confirming.Nothing;
+        _password = string.Empty;
+        _dialogError = null;
+    }
+
+    /// <summary>Closes the overlay without doing what it was opened for.</summary>
+    private void CancelDialog()
+    {
+        if (_confirming != Confirming.Download)
+        {
+            CancelRestore();
+        }
+
+        CloseDialog();
+    }
+
+    // Choosing a file is the label's doing rather than a submit, and the result has only Close, so
+    // neither step has anything here.
+    private Task SubmitDialogAsync() => _confirming switch
+    {
+        Confirming.Download => DownloadBackupAsync(),
+        Confirming.RestorePassword => GiveRestorePasswordAsync(),
+        Confirming.Restore => ConfirmRestoreAsync(),
+        _ => Task.CompletedTask,
+    };
+
+    /// <summary>Whether the step on screen asks for the current password.</summary>
+    private bool AsksPassword => _confirming is Confirming.Download or Confirming.RestorePassword;
+
+    private void OnDialogKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape" && !_isRestoring)
+        {
+            CancelDialog();
+        }
+    }
+
+    /// <summary>
+    /// Cancels on a click away. Dragging a text selection out of the field also raises a click on
+    /// the overlay, so a press that started inside it is not one.
+    /// </summary>
+    private void OnOverlayClick()
+    {
+        if (!_pressedInsideDialog && !_isRestoring)
+        {
+            CancelDialog();
+        }
+    }
+
+    /// <summary>
+    /// Redraws the overlay once a second for as long as a wait stands, the way the unlock overlay
+    /// counts its own down, which hands the button back at the end of it. It runs for the whole
+    /// wait rather than while the overlay is open, for the reason given there.
+    /// </summary>
+    private async Task CountDownAsync()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+            while (IsWaiting && await timer.WaitForNextTickAsync(_cts.Token))
+            {
+                if (_confirming != Confirming.Nothing)
+                {
+                    await InvokeAsync(StateHasChanged);
+                }
+            }
+
+            // Once more for the render that has nothing left to count.
+            _cts.Token.ThrowIfCancellationRequested();
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            _isCountingDown = false;
+        }
+    }
+
+    /// <summary>What is left of the wait, zero once it has run out, and null while none stands.</summary>
+    private TimeSpan? Remaining
+    {
+        get
+        {
+            if (_waitUntil is not { } until)
+            {
+                return null;
+            }
+
+            var left = until - DateTimeOffset.UtcNow;
+            return left > TimeSpan.Zero ? left : TimeSpan.Zero;
+        }
+    }
+
+    /// <summary>Whether a guess sent now would be turned away without being looked at.</summary>
+    private bool IsWaiting => Remaining > TimeSpan.Zero;
+
+    /// <summary>What the overlay says above its password box; a wait outranks the refusal it came with.</summary>
+    private string? DialogNotice => Remaining is { } left ? PasswordAttempt.Waiting(left) : _dialogError;
 
     private async Task ConfirmRestoreAsync()
     {
         if (_restoreFile is not { } file)
         {
+            CloseDialog();
             return;
         }
 
         if (!await IsUnlockedAsync())
         {
-            _restoreStatus = "HostPinger is locked — unlock it to restore a backup.";
-            _isRestoreRefused = true;
-            _isUnlocked = false;
-            CancelRestore();
+            RefuseRestoreAsLocked();
+            return;
+        }
+
+        // The overlay's steps ask for the password before the file, but they are only what the
+        // page offers: a file can be put on the hidden input without them, from the browser's
+        // developer tools. This is what holds, and it holds before the upload, so nothing crosses
+        // the network for a restore that would be turned away. The file stays chosen, and the
+        // password step comes straight back here once it is given.
+        if (Gate.IsPasswordSet && !_restorePasswordGiven)
+        {
+            OpenDialog(Confirming.RestorePassword);
             return;
         }
 
         if (Backup.AvailableFreeBytes() < file.Size + DatabaseBackup.FreeSpaceMarginBytes)
         {
-            _restoreStatus = "Not enough free disk space beside the database to receive the file.";
-            _isRestoreRefused = true;
             CancelRestore();
+            ShowRestoreResult("Not enough free disk space beside the database to receive the file.", isRefused: true);
             return;
         }
 
@@ -549,8 +955,7 @@
 
                 if (await Backup.ValidateBackupAsync(tempPath, _cts.Token) is { } refusal)
                 {
-                    _restoreStatus = refusal;
-                    _isRestoreRefused = true;
+                    ShowRestoreResult(refusal, isRefused: true);
                     return;
                 }
 
@@ -567,16 +972,25 @@
         {
             // IOException is the file work on this side; JSException is the browser failing to
             // read what was chosen — a file changed or deleted since it was picked. Either is a
-            // failed restore to report beside the control, not a reason to tear the circuit down.
-            _restoreStatus = $"The restore failed: {ex.Message}";
-            _isRestoreRefused = true;
+            // failed restore to report in the overlay, not a reason to tear the circuit down.
+            ShowRestoreResult($"The restore failed: {ex.Message}", isRefused: true);
             return;
         }
         finally
         {
+            // The overlay stays up, saying it is restoring, until here, and then says what came
+            // of it.
             _isRestoring = false;
             CancelRestore();
         }
+
+        // Before the reads below, so a refresh that renders while they run already shows it.
+        ShowRestoreResult("Restored — the backup's hosts, history, settings and password now apply.", isRefused: false);
+
+        // Beside the password changes in the log, since that is one of the things a restore is.
+        Logger.LogInformation(
+            "Backup restored from {Address}; its password, or the lack of one, is in force now.",
+            RequestOrigin.Describe(Origin));
 
         // The restore is in force the moment it returns: the store already holds the backup's
         // settings, and the unlock answer below is already being judged against its password.
@@ -585,8 +999,14 @@
         // The file underneath is the backup's now.
         await LoadStatsAsync();
         _isUnlocked = await IsUnlockedAsync();
-        _restoreStatus = "Restored — the backup's hosts, history, settings and password now apply.";
-        _isRestoreRefused = false;
+    }
+
+    /// <summary>Turns the overlay to what came of a confirmed restore, which it shows until closed.</summary>
+    private void ShowRestoreResult(string result, bool isRefused)
+    {
+        _restoreResult = result;
+        _isRestoreRefused = isRefused;
+        OpenDialog(Confirming.Restored);
     }
 
     private static string StatusClass(bool isRefused) => isRefused ? "config-refused" : "config-saved";
@@ -642,7 +1062,27 @@
     };
 
     // Cancelled rather than disposed, because a read can land after the page has gone; see PageReads.
+    // Also what stops the overlay's countdown, if one is running.
     public void Dispose() => _cts.Cancel();
+
+    /// <summary>What the overlay is open for, and for a restore, which step of it.</summary>
+    private enum Confirming
+    {
+        Nothing,
+        Download,
+
+        /// <summary>The current password, which a restore asks for before anything else.</summary>
+        RestorePassword,
+
+        /// <summary>The password given, and the file still to choose.</summary>
+        RestoreFile,
+
+        /// <summary>The file chosen, and the restore to confirm.</summary>
+        Restore,
+
+        /// <summary>The restore confirmed, and what came of it: done, refused or failed.</summary>
+        Restored,
+    }
 
     private sealed class DatabaseForm
     {

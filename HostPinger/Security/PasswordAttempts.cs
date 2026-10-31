@@ -43,10 +43,11 @@ namespace HostPinger.Security
         /// it — so nothing left says to go ahead.
         /// </summary>
         /// <remarks>
-        /// In one place because four forms say it, and because the overlay says it again every
-        /// second as it counts a wait down, from what is left rather than from an attempt of its
-        /// own. Rounded up, so that the last fraction of a second reads as a second to wait rather
-        /// than as no wait at all — nothing but a wait that has genuinely run out reads that way.
+        /// In one place because every form that takes a password says it, and because the overlay
+        /// says it again every second as it counts a wait down, from what is left rather than from
+        /// an attempt of its own. Rounded up, so that the last fraction of a second reads as a
+        /// second to wait rather than as no wait at all — nothing but a wait that has genuinely run
+        /// out reads that way.
         /// </remarks>
         public static string Waiting(TimeSpan wait) =>
             wait > TimeSpan.Zero

@@ -165,7 +165,8 @@ and saved only when it is.
 - **Backup** — downloads a snapshot of the whole database: hosts, history, settings and the
   hashed password, if one is set, all travel with it. The copy is consistent — monitoring pauses
   for the moment it takes — and compacted, so it weighs what the data weighs rather than what the
-  file on disk does. Unlock to use it.
+  file on disk does. Unlock to use it; with a password set, it asks for the current one first, in
+  an overlay like the one that unlocks.
 - **Restore** — uploads a backup and, after a confirmation, replaces the current database with
   it. Everything comes from the backup, including its password or the lack of one, so a restore
   can lock the browser out — `--remove-password` is the recovery, as ever — or unlock the
@@ -179,7 +180,8 @@ and saved only when it is.
   back. Monitoring pauses only for the moment the swap takes. The restored database is put in
   SQLite's WAL mode, where reading the history never holds up a ping round's write. The database
   being replaced is kept beside the new one as `hostpinger.db.pre-restore`, one restore's worth of
-  undo, complete in that one file. Unlock to use it.
+  undo, complete in that one file. Unlock to use it; with a password set, it asks for the current
+  one first, in an overlay like the one that unlocks, before the file is chosen.
 - **Security** — whether a password is set, and the way to `/password` to set, change or remove
   one.
 
@@ -206,6 +208,10 @@ service, locked or not.
   how to end every unlock at once.
 - **Changing the password locks every browser again**, including the one that changed it, which is
   signed straight back in under the new one. Removing it unlocks everything for everyone.
+- **Whatever could take the password over asks for it again**, even in an unlocked browser, so that
+  a browser left open and walked away from is not enough: changing or removing it, downloading a
+  backup, which carries its hash, and restoring one, which puts the backup's password, or none, in
+  its place.
 - **Wrong passwords are made to wait.** The first three cost nothing, so mistyping a password from
   memory is free. Each one after that doubles the wait before another guess from the same address
   is looked at — five seconds, then ten, then twenty, and so on up to an hour, where it stops. That
@@ -215,8 +221,8 @@ service, locked or not.
   has to be a strong one. The right
   password is turned away along with the wrong ones while a wait stands; getting it right once the
   wait is over clears the tally, as does leaving the password alone for an hour afterwards. The
-  change and removal forms count against the same tally, so neither is a way round it, and an empty
-  box is never counted as a guess. Nothing is written to disk, so restarting the service forgets
+  current password given to change or remove it, or for a backup or a restore, counts against the
+  same tally, so none of them is a way round it, and an empty box is never counted as a guess. Nothing is written to disk, so restarting the service forgets
   every tally.
 - **The overlay counts the wait down**, second by second, and holds its **Unlock** button back until
   it has run out — so a wait is something to watch rather than something to keep trying at. Closing
@@ -228,9 +234,9 @@ service, locked or not.
   practice one wait for the whole service. A whole IPv6 /64 counts as one address, since a single
   machine there usually has billions to guess from.
 - **Every attempt is logged.** A wrong password — on the unlock page, or as the current password
-  when changing or removing one — is a warning naming the address it came from, and unlocking,
-  setting, changing and removing are recorded beside them, so a run of failures can be read
-  against whether any of them worked. A run long enough to earn a wait says so on its own line,
+  anywhere it is asked for — is a warning naming the address it came from, and unlocking, setting,
+  changing and removing it, downloading a backup and restoring one are recorded beside them, so a
+  run of failures can be read against whether any of them worked. A run long enough to earn a wait says so on its own line,
   once per wait rather than once per attempt, so nobody can fill the journal by guessing. The
   address is the one the connection was opened from, which behind a reverse proxy is the proxy: no
   forwarded headers are trusted, because a tally kept against a header anyone can set is no tally

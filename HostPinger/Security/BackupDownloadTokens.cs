@@ -5,9 +5,10 @@ namespace HostPinger.Security
 {
     /// <summary>
     /// Single-use tokens that let a backup download endpoint know the request came from an
-    /// unlocked page a moment ago. The page is a circuit and the download is a plain GET, so the
-    /// unlock decision has to travel between them somehow — this is that, and nothing more: the
-    /// endpoint still asks <see cref="PasswordGate"/> the real question.
+    /// unlocked page a moment ago, which had been given the current password if one is set. The
+    /// page is a circuit and the download is a plain GET, so that decision has to travel between
+    /// them somehow — this is that, and nothing more: the endpoint still asks
+    /// <see cref="PasswordGate"/> whether the browser is unlocked.
     /// </summary>
     public sealed class BackupDownloadTokens(TimeProvider? timeProvider = null)
     {

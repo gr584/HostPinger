@@ -79,6 +79,10 @@ namespace HostPinger
             // be no tally at all.
             builder.Services.AddSingleton<PasswordAttempts>();
 
+            // The address a guess on a circuit comes from, which has no request of its own to ask:
+            // the Configuration page asks for the current password before a backup or a restore.
+            builder.Services.AddHttpContextAccessor();
+
             builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
                 .AddCookie(UnlockCookie.Configure);
 
@@ -155,9 +159,10 @@ namespace HostPinger
 
             // The backup download. A plain GET rather than anything on the circuit, because a
             // gigabyte belongs on the HTTP pipe, not the SignalR one; the single-use token proves
-            // the request came from an unlocked page moments ago, and the cookie check keeps the
-            // endpoint exactly as locked as the button that leads here. NotFound either way, so a
-            // probe cannot tell a bad token from there being anything to find.
+            // the request came from an unlocked page moments ago, given the current password if one
+            // is set, and the cookie check keeps the endpoint exactly as locked as the button that
+            // leads here. NotFound either way, so a probe cannot tell a bad token from there being
+            // anything to find.
             app.MapGet("/database-backup", async (
                 string token,
                 HttpContext context,

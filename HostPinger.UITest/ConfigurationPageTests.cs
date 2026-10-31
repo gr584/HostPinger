@@ -1,3 +1,4 @@
+using HostPinger.Security;
 using Microsoft.Data.Sqlite;
 using Microsoft.Playwright;
 
@@ -8,8 +9,8 @@ namespace HostPinger.UITest
     /// and backup and restore, driven the way a person drives them. What the figures are is settled
     /// in DatabaseStatsTests and DatabaseReadsTests, and what <c>DatabaseBackup</c> does to files
     /// in DatabaseBackupTests; what only a browser can settle is that the page shows a figure it
-    /// actually read, and the transport around backup and restore — that the download button hands
-    /// over a database, and that the file
+    /// actually read, and the transport around backup and restore — that both ask for the current
+    /// password, that the download button hands over a database, and that the file
     /// chosen for a restore survives into the confirmation step. That last one is a regression
     /// test: the browser keeps the chosen file on the input element, and a confirm strip that
     /// replaced the input in the DOM lost the upload before it could be read.
@@ -91,27 +92,35 @@ namespace HostPinger.UITest
             return $"{bytes:0.#} {units[unit]}";
         }
 
+        /// <summary>
+        /// The download asks for the current password in an overlay, even in an unlocked browser,
+        /// because the file carries its hash. The overlay opens on its password box, an empty box
+        /// and a wrong password are each turned away inside it with their own sentence and the box
+        /// emptied, Escape closes it, and the right password hands over a database.
+        /// </summary>
         [Test]
-        public async Task Backup_DownloadsAnSqliteDatabase()
+        public async Task Backup_DownloadsAnSqliteDatabaseOnlyForTheCurrentPassword()
         {
             await UnlockedConfigurationPageAsync();
+            await ClickUntilAsync(Button("Download backup"), Overlay);
+            await Assertions.Expect(CurrentPassword).ToBeFocusedAsync();
 
-            // The click and the download are the same retry ClickUntilAsync makes elsewhere: a
-            // click can land in the beat between the circuit's socket and the components being
-            // attached, and that click does nothing at all.
-            IDownload? download = null;
-            for (var attempt = 0; download is null; attempt++)
-            {
-                try
-                {
-                    download = await Page.RunAndWaitForDownloadAsync(
-                        () => Button("Download backup").ClickAsync(),
-                        new PageRunAndWaitForDownloadOptions { Timeout = 2_000 });
-                }
-                catch (TimeoutException) when (attempt < 9)
-                {
-                }
-            }
+            await Button(Dialog, "Download").ClickAsync();
+            await Assertions.Expect(Dialog.GetByText("Enter the current password.")).ToBeVisibleAsync();
+
+            await CurrentPassword.FillAsync("not the password");
+            await Button(Dialog, "Download").ClickAsync();
+            await Assertions.Expect(Dialog.GetByText("That is not the current password.")).ToBeVisibleAsync();
+            await Assertions.Expect(CurrentPassword).ToHaveValueAsync(string.Empty);
+
+            await CurrentPassword.PressAsync("Escape");
+            await Assertions.Expect(Overlay).ToBeHiddenAsync();
+
+            // Which also clears the wrong one above off the tally the rest of the run shares.
+            await Button("Download backup").ClickAsync();
+            await CurrentPassword.FillAsync(WebApp.Password);
+            var download = await Page.RunAndWaitForDownloadAsync(() => Button(Dialog, "Download").ClickAsync());
+            await Assertions.Expect(Overlay).ToBeHiddenAsync();
 
             Assert.That(download.SuggestedFilename, Does.StartWith("hostpinger-backup-").And.EndWith(".db"));
 
@@ -125,8 +134,14 @@ namespace HostPinger.UITest
                 "what the browser saves must open as an SQLite database");
         }
 
+        /// <summary>
+        /// A restore asks for the current password before anything else, because what it installs
+        /// is the backup's: a wrong one is turned away before a file is even chosen, and the right
+        /// one leads on to choosing it. The chosen file survives into the confirmation, and
+        /// confirming restores it and says so in the overlay, which stays until it is closed.
+        /// </summary>
         [Test]
-        public async Task Restore_CarriesTheChosenFileThroughConfirmationAndRestoresIt()
+        public async Task Restore_AsksForTheCurrentPasswordFirstAndRestoresTheFileChosenAfter()
         {
             // A faithful copy of the running application's database, taken the way its own
             // backup takes one, so the restore changes nothing the other fixtures depend on.
@@ -144,30 +159,16 @@ namespace HostPinger.UITest
                 }
 
                 await UnlockedConfigurationPageAsync();
+                await ClickUntilAsync(Button("Restore backup…"), Overlay);
+                await Assertions.Expect(CurrentPassword).ToBeFocusedAsync();
 
-                // The restore button is a label for a hidden file input, so clicking it opens
-                // the browser's picker — that part needs no circuit at all. The choice retries
-                // for the same reason the click above does: the change event of a file chosen
-                // before the components attach is heard by nobody.
-                var restore = Button("Restore backup…");
-                var confirm = Button("Confirm restore");
-                for (var attempt = 0; ; attempt++)
-                {
-                    var chooser = await Page.RunAndWaitForFileChooserAsync(() => restore.ClickAsync());
-                    await chooser.SetFilesAsync(uploadPath);
-                    try
-                    {
-                        await confirm.WaitForAsync(new LocatorWaitForOptions
-                        {
-                            State = WaitForSelectorState.Visible,
-                            Timeout = 2_000,
-                        });
-                        break;
-                    }
-                    catch (TimeoutException) when (attempt < 9)
-                    {
-                    }
-                }
+                await CurrentPassword.FillAsync("not the password");
+                await Button(Dialog, "Continue").ClickAsync();
+                await Assertions.Expect(Dialog.GetByText("That is not the current password.")).ToBeVisibleAsync();
+                await Assertions.Expect(CurrentPassword).ToHaveValueAsync(string.Empty);
+                await Assertions.Expect(Button(Dialog, "Choose file…")).ToHaveCountAsync(0);
+
+                await GiveTheRestorePasswordAndChooseAsync(uploadPath);
 
                 // This process holds the file open too: whatever the fixtures seeded through sits in
                 // its connection pool, still attached to the file the restore is about to retire,
@@ -176,13 +177,18 @@ namespace HostPinger.UITest
                 // First rather than after, because a connection to a WAL database that closes last
                 // deletes the -wal file by name, and after the swap that name is the new file's.
                 SqliteConnection.ClearAllPools();
-                await confirm.ClickAsync();
+                await Button("Confirm restore").ClickAsync();
 
-                await Assertions.Expect(Page.GetByText(
+                await Assertions.Expect(Dialog.GetByText(
                         "Restored — the backup's hosts, history, settings and password now apply."))
                     .ToBeVisibleAsync();
+                await Assertions.Expect(Button(Dialog, "Cancel")).ToHaveCountAsync(0);
                 Assert.That(File.Exists(UiTestRun.DatabasePath + ".pre-restore"),
                     "the database that was replaced must be kept as the undo copy");
+
+                // The footer's, since the header's cross is called Close too.
+                await Button(Dialog.Locator(".modal-footer"), "Close").ClickAsync();
+                await Assertions.Expect(Overlay).ToBeHiddenAsync();
             }
             finally
             {
@@ -192,7 +198,7 @@ namespace HostPinger.UITest
 
         /// <summary>
         /// A backup that passes validation but will not open — here a faithful copy missing one of
-        /// its tables — is reported beside the control, with the page still working, and the
+        /// its tables — is reported in the overlay, with the page still working, and the
         /// database it was meant to replace is the one the application runs on afterwards. Before,
         /// the failure escaped the page's catch and ended the circuit, and the half-restored file
         /// stayed in place; now it is found out before the swap, and nothing is replaced.
@@ -228,33 +234,21 @@ namespace HostPinger.UITest
                 await UnlockedConfigurationPageAsync();
 
                 // Chosen and confirmed the same way, and for the same reasons, as the restore above.
-                var restore = Button("Restore backup…");
-                var confirm = Button("Confirm restore");
-                for (var attempt = 0; ; attempt++)
-                {
-                    var chooser = await Page.RunAndWaitForFileChooserAsync(() => restore.ClickAsync());
-                    await chooser.SetFilesAsync(uploadPath);
-                    try
-                    {
-                        await confirm.WaitForAsync(new LocatorWaitForOptions
-                        {
-                            State = WaitForSelectorState.Visible,
-                            Timeout = 2_000,
-                        });
-                        break;
-                    }
-                    catch (TimeoutException) when (attempt < 9)
-                    {
-                    }
-                }
-
+                await ClickUntilAsync(Button("Restore backup…"), Overlay);
+                await GiveTheRestorePasswordAndChooseAsync(uploadPath);
                 SqliteConnection.ClearAllPools();
-                await confirm.ClickAsync();
+                await Button("Confirm restore").ClickAsync();
 
-                await Assertions.Expect(Page.GetByText(
+                await Assertions.Expect(Dialog.GetByText(
                         "The restore failed: The backup has no ResolverErrors table. Nothing was replaced."))
                     .ToBeVisibleAsync();
                 await Assertions.Expect(Page.Locator("#blazor-error-ui")).ToBeHiddenAsync();
+
+                // The confirm button the keyboard was on is gone, so Escape only reaches the
+                // overlay if it has been handed the focus.
+                await Assertions.Expect(Page.Locator(".modal")).ToBeFocusedAsync();
+                await Page.Keyboard.PressAsync("Escape");
+                await Assertions.Expect(Overlay).ToBeHiddenAsync();
 
                 await using var check = new SqliteConnection($"Data Source={UiTestRun.DatabasePath};Mode=ReadOnly;Pooling=False");
                 await check.OpenAsync();
@@ -272,6 +266,137 @@ namespace HostPinger.UITest
             {
                 File.Delete(uploadPath);
             }
+        }
+
+        /// <summary>
+        /// The overlay asks for the password before the file, but that order is only what the page
+        /// offers: anyone with the browser's developer tools can put a file on the page's hidden
+        /// input directly, which opens the confirmation with no password given. Confirming then
+        /// asks for the password instead of restoring, and once it is given comes straight back to
+        /// the same file. A password given for an earlier restore, since cancelled, does not count.
+        /// </summary>
+        [Test]
+        public async Task Restore_ConfirmedWithoutThePasswordAsksForItInstead()
+        {
+            // A faithful copy, as above, in case it restores after all.
+            var uploadPath = Path.Combine(Path.GetTempPath(), $"hostpinger-ui-upload-{Guid.NewGuid():N}.db");
+            try
+            {
+                await using (var connection = new SqliteConnection(
+                    $"Data Source={UiTestRun.DatabasePath};Mode=ReadOnly;Pooling=False"))
+                {
+                    await connection.OpenAsync();
+                    await using var command = connection.CreateCommand();
+                    command.CommandText = "VACUUM INTO $path;";
+                    command.Parameters.AddWithValue("$path", uploadPath);
+                    await command.ExecuteNonQueryAsync();
+                }
+
+                await UnlockedConfigurationPageAsync();
+                await ClickUntilAsync(Button("Restore backup…"), Overlay);
+                await CurrentPassword.FillAsync(WebApp.Password);
+                await Button(Dialog, "Continue").ClickAsync();
+                await Assertions.Expect(Button(Dialog, "Choose file…")).ToBeVisibleAsync();
+                await Button(Dialog, "Cancel").ClickAsync();
+                await Assertions.Expect(Overlay).ToBeHiddenAsync();
+
+                await Page.Locator("#restore-file").SetInputFilesAsync(uploadPath);
+                var confirm = Button("Confirm restore");
+                await Assertions.Expect(confirm).ToBeVisibleAsync();
+                SqliteConnection.ClearAllPools();
+                await confirm.ClickAsync();
+                await Assertions.Expect(CurrentPassword).ToBeFocusedAsync();
+
+                await CurrentPassword.FillAsync(WebApp.Password);
+                await Button(Dialog, "Continue").ClickAsync();
+                await Assertions.Expect(confirm).ToBeVisibleAsync();
+                await Assertions.Expect(Dialog.Locator("code").First).ToHaveTextAsync(Path.GetFileName(uploadPath));
+
+                await Button(Dialog, "Cancel").ClickAsync();
+                await Assertions.Expect(Overlay).ToBeHiddenAsync();
+                await Assertions.Expect(Page.GetByText("Restored —")).ToHaveCountAsync(0);
+            }
+            finally
+            {
+                File.Delete(uploadPath);
+            }
+        }
+
+        /// <summary>
+        /// A wrong current password typed in this page's overlay is a guess like any other. Once
+        /// the schedule's free ones are spent, the next earns a wait there, and the overlay holds
+        /// its button back. It is also counted on the same tally as the unlock overlay's, so the
+        /// unlock overlay's next wrong answer is turned away with a wait too, where a tally of its
+        /// own would have let it go free. That is what stops this being a way round the unlock
+        /// overlay's wait, and it shows the page knows the address its clicks come from, which a
+        /// circuit is not handed the way a request is.
+        /// </summary>
+        /// <remarks>
+        /// The whole run reaches the application from one address, and nothing else runs while
+        /// this fixture does, which is what makes earning a wait here safe. The test sits it out
+        /// and unlocks afterwards, which clears the tally for whatever runs next.
+        /// </remarks>
+        [Test]
+        public async Task CurrentPassword_WaitsOnTheSameTallyAsTheUnlockOverlay()
+        {
+            await UnlockedConfigurationPageAsync();
+            await ClickUntilAsync(Button("Download backup"), Overlay);
+
+            var free = 0;
+            while (PasswordAttempts.WaitFor(free + 1) == TimeSpan.Zero)
+            {
+                free++;
+            }
+
+            var download = Button(Dialog, "Download");
+            for (var attempt = 0; attempt < free; attempt++)
+            {
+                await CurrentPassword.FillAsync("not the password");
+                await download.ClickAsync();
+
+                // Emptied once the attempt has been looked at, which is the round trip to wait
+                // for before the next one: the sentence above it reads the same each time.
+                await Assertions.Expect(CurrentPassword).ToHaveValueAsync(string.Empty);
+                await Assertions.Expect(Dialog.GetByText("That is not the current password.")).ToBeVisibleAsync();
+            }
+
+            await CurrentPassword.FillAsync("not the password");
+            await download.ClickAsync();
+            await Assertions.Expect(Dialog.GetByText("Too many wrong passwords")).ToBeVisibleAsync();
+            await Assertions.Expect(download).ToBeDisabledAsync();
+
+            await CurrentPassword.PressAsync("Escape");
+            await Assertions.Expect(Overlay).ToBeHiddenAsync();
+            await ClickUntilAsync(Button("Unlocked"), Overlay);
+            await Button(Dialog, "Lock").ClickAsync();
+            await OpenOverlayAsync();
+
+            // Turned away whether it arrives inside the wait just earned or after it, which then
+            // earns the next: a tally of its own would have let it go free, and said so instead.
+            await SubmitPasswordAsync("not the password");
+            await Assertions.Expect(Dialog.GetByText("Too many wrong passwords")).ToBeVisibleAsync();
+
+            var timeout = new LocatorAssertionsToBeVisibleOptions { Timeout = 90_000 };
+            await Assertions.Expect(Dialog.GetByText("You can try again now.")).ToBeVisibleAsync(timeout);
+            await SubmitPasswordAsync(WebApp.Password);
+            await Assertions.Expect(Button("Unlocked")).ToBeVisibleAsync();
+        }
+
+        /// <summary>The password box in the overlay that confirms a download or a restore.</summary>
+        private ILocator CurrentPassword => Page.Locator("#backup-current-password");
+
+        /// <summary>
+        /// Gives the right password to the restore overlay, open on its first step, then chooses
+        /// <paramref name="path"/> from the step after it and waits for the confirmation. The
+        /// overlay was opened over the circuit, so nothing here can run ahead of it.
+        /// </summary>
+        private async Task GiveTheRestorePasswordAndChooseAsync(string path)
+        {
+            await CurrentPassword.FillAsync(WebApp.Password);
+            await Button(Dialog, "Continue").ClickAsync();
+            var chooser = await Page.RunAndWaitForFileChooserAsync(() => Button(Dialog, "Choose file…").ClickAsync());
+            await chooser.SetFilesAsync(path);
+            await Assertions.Expect(Button("Confirm restore")).ToBeVisibleAsync();
         }
 
         /// <summary>
