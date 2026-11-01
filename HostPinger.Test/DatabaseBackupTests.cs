@@ -322,21 +322,38 @@ namespace HostPinger.Test
             });
         }
 
+        /// <summary>
+        /// What a run stopped partway through a snapshot or a restore leaves: the temp file, and
+        /// the journal, -wal or -shm SQLite was keeping beside it, which used to stay for good. The
+        /// database's own files, and anything else that only starts with the same name, stay.
+        /// </summary>
         [Test]
         public async Task DeleteLeftoverTempFiles_SweepsOnlyItsOwn()
         {
-            var snapshotLeftover = Path.Combine(_directory, "hostpinger-backup-dead.tmp");
-            var restoreLeftover = Path.Combine(_directory, "hostpinger-restore-dead.tmp");
-            await File.WriteAllTextAsync(snapshotLeftover, "left behind by a crash");
-            await File.WriteAllTextAsync(restoreLeftover, "left behind by a crash");
+            string[] leftovers =
+            [
+                "hostpinger-backup-dead.tmp", "hostpinger-backup-dead.tmp-journal",
+                "hostpinger-restore-dead.tmp", "hostpinger-restore-dead.tmp-journal",
+                "hostpinger-restore-dead.tmp-wal", "hostpinger-restore-dead.tmp-shm",
+            ];
+            foreach (var leftover in leftovers)
+            {
+                await File.WriteAllTextAsync(Path.Combine(_directory, leftover), "left behind by a crash");
+            }
+
+            var notOurs = Path.Combine(_directory, "hostpinger-backup-notes.txt");
+            await File.WriteAllTextAsync(notOurs, "somebody's own file");
+            var databaseFiles = Directory.GetFiles(_directory, "hostpinger.db*");
 
             DatabaseBackup.DeleteLeftoverTempFiles(new PingerPaths(_dbPath));
 
             Assert.Multiple(() =>
             {
-                Assert.That(File.Exists(snapshotLeftover), Is.False);
-                Assert.That(File.Exists(restoreLeftover), Is.False);
-                Assert.That(File.Exists(_dbPath), "the database itself is not a leftover");
+                Assert.That(leftovers.Where(leftover => File.Exists(Path.Combine(_directory, leftover))), Is.Empty);
+                Assert.That(databaseFiles, Does.Contain(_dbPath));
+                Assert.That(databaseFiles.Where(File.Exists), Is.EquivalentTo(databaseFiles),
+                    "the database and whatever SQLite keeps beside it are not leftovers");
+                Assert.That(File.Exists(notOurs), "a name the sweep does not make is not one of its files");
             });
         }
 

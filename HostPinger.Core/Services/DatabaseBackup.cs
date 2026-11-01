@@ -33,6 +33,9 @@ namespace HostPinger.Core.Services
         private const string RestorePrefix = "hostpinger-restore-";
         private const string TempExtension = ".tmp";
 
+        /// <summary>A temp file itself, and the names SQLite gives what it keeps beside one.</summary>
+        private static readonly string[] TempFileSuffixes = [string.Empty, "-journal", "-wal", "-shm"];
+
         private static readonly byte[] SqliteHeader = "SQLite format 3\0"u8.ToArray();
 
         private const string DefinesCodeRefusal = "This file defines triggers or views, which a HostPinger database never has.";
@@ -910,15 +913,20 @@ namespace HostPinger.Core.Services
 
         /// <summary>
         /// Sweeps snapshot and upload temp files an earlier run left behind — a download that
-        /// died with the process, an upload interrupted by a restart. Anything current is held
-        /// open, so at startup every one of them is an orphan.
+        /// died with the process, an upload interrupted by a restart — and what SQLite keeps beside
+        /// them while it writes one. VACUUM INTO journals the copy it writes, and a restore migrates
+        /// an upload in rollback-journal mode and then puts it in WAL mode, so a run stopped partway
+        /// through leaves a journal, a -wal or a -shm under the temp file's name; the migration's
+        /// journal can reach a third of the upload. Anything current is held open, so at startup
+        /// every one of them is an orphan.
         /// </summary>
         public static void DeleteLeftoverTempFiles(PingerPaths paths)
         {
             var directory = Path.GetDirectoryName(paths.DatabasePath)!;
-            foreach (var pattern in new[] { SnapshotPrefix + "*" + TempExtension, RestorePrefix + "*" + TempExtension })
+            foreach (var prefix in new[] { SnapshotPrefix, RestorePrefix })
             {
-                foreach (var leftover in Directory.EnumerateFiles(directory, pattern))
+                foreach (var leftover in Directory.EnumerateFiles(directory, prefix + "*")
+                    .Where(path => TempFileSuffixes.Any(suffix => path.EndsWith(TempExtension + suffix, StringComparison.Ordinal))))
                 {
                     try
                     {

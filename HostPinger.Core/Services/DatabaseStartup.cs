@@ -26,7 +26,8 @@ namespace HostPinger.Core.Services
             await HostPingerDatabase.OpenAsync(services, cancellationToken);
 
             // A download that died with the process or an upload cut off by a restart leaves its
-            // temp file beside the database; nothing holds them now, so they go.
+            // temp file beside the database, with whatever SQLite was keeping beside that; nothing
+            // holds them now, so they go.
             DatabaseBackup.DeleteLeftoverTempFiles(paths);
         }
 
