@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using HostPinger.Core.Data;
 using HostPinger.Core.Options;
 using Microsoft.Data.Sqlite;
@@ -7,11 +8,12 @@ using Microsoft.EntityFrameworkCore.Metadata;
 namespace HostPinger.Core.Services
 {
     /// <summary>
-    /// Copies the database out as a backup and swaps a validated backup in as a restore. Both
-    /// operations hold the <see cref="MaintenanceGate"/>, so they never overlap a ping round or
-    /// each other, and both work beside the live file: the hardened service deployments leave the
-    /// data directory as the only place this process can write. The swap also shuts the
-    /// <see cref="DatabaseFileGate"/>, which keeps every other connection off the file meanwhile.
+    /// Copies the database out as a backup and swaps a validated backup in as a restore. One of
+    /// the two runs at a time, and the other is turned away while it does. Both hold the
+    /// <see cref="MaintenanceGate"/>, so they never overlap a ping round, and both work beside the
+    /// live file: the hardened service deployments leave the data directory as the only place this
+    /// process can write. The swap also shuts the <see cref="DatabaseFileGate"/>, which keeps every
+    /// other connection off the file meanwhile.
     /// </summary>
     public sealed class DatabaseBackup(
         PingerPaths paths,
@@ -41,6 +43,16 @@ namespace HostPinger.Core.Services
             "SELECT (page_count - freelist_count) * page_size FROM pragma_page_count(), pragma_freelist_count(), pragma_page_size();";
 
         private const string StayedInUse = "The database stayed in use, so nothing was replaced. Try the restore again.";
+
+        private const string SnapshotUnderWay = "A backup is being written";
+
+        private const string RestoreUnderWay = "A restore is under way";
+
+        private readonly object _turnLock = new();
+
+        // Which of the two holds the turn they share, to tell whichever asks next; null while
+        // neither does. See TryTakeTurn.
+        private string? _underWay;
 
         /// <summary>
         /// How long a restore waits for the file it is retiring to be let go of before it gives up,
@@ -76,8 +88,54 @@ namespace HostPinger.Core.Services
         /// </summary>
         public string PreRestorePath => paths.DatabasePath + ".pre-restore";
 
-        /// <summary>A fresh path beside the database for an upload to stream into.</summary>
-        public string CreateRestoreTempPath() => TempPath(RestorePrefix);
+        /// <summary>A fresh path beside the database for an upload to be received into.</summary>
+        internal string CreateRestoreTempPath() => TempPath(RestorePrefix);
+
+        /// <summary>
+        /// Takes the one turn a snapshot and a restore share, or says which of them holds it. One at
+        /// a time, for two reasons. Each writes a file the size of the database beside it, having
+        /// checked the disk has room for one, and two at once would each count on the same room.
+        /// And a restore retires the database it replaces as the undo copy, so a second restore
+        /// finishing after the first would retire the first one's file in place of the database
+        /// the person meant to keep.
+        /// </summary>
+        private bool TryTakeTurn(string what, [NotNullWhen(false)] out string? refusal)
+        {
+            lock (_turnLock)
+            {
+                if (_underWay is { } other)
+                {
+                    refusal = $"{other}. Try again once it has finished.";
+                    return false;
+                }
+
+                _underWay = what;
+            }
+
+            refusal = null;
+            return true;
+        }
+
+        private void ReleaseTurn()
+        {
+            lock (_turnLock)
+            {
+                _underWay = null;
+            }
+        }
+
+        /// <summary>
+        /// Null when the disk beside the database has <paramref name="bytes"/> free beyond the
+        /// margin, and otherwise the sentence that says <paramref name="what"/> needs more.
+        /// </summary>
+        private string? RoomRefusal(long bytes, string what)
+        {
+            var needed = bytes + FreeSpaceMarginBytes;
+            var free = MeasureFreeBytes();
+            return free < needed
+                ? $"{what} needs about {needed >> 20} MB free beside the database. The disk has {free >> 20} MB."
+                : null;
+        }
 
         /// <summary>
         /// Writes a consistent, compacted copy of the database beside it and returns the path.
@@ -107,13 +165,32 @@ namespace HostPinger.Core.Services
         /// </para>
         /// <para>
         /// Every failure is an <see cref="IOException"/>, as a restore's are, and a cancel is an
-        /// <see cref="OperationCanceledException"/>.
+        /// <see cref="OperationCanceledException"/>. So is a refusal before anything is written: a
+        /// snapshot or a restore already under way, or too little room beside the database for the
+        /// copy, which is checked here, in turn, rather than by the page before it.
         /// </para>
         /// </remarks>
         public Task<string> CreateSnapshotAsync(IProgress<double>? progress = null, CancellationToken cancellationToken = default) =>
             Task.Run(() => CreateSnapshotOnThisThreadAsync(progress, cancellationToken), cancellationToken);
 
         private async Task<string> CreateSnapshotOnThisThreadAsync(IProgress<double>? progress, CancellationToken cancellationToken)
+        {
+            if (!TryTakeTurn(SnapshotUnderWay, out var refusal))
+            {
+                throw new IOException(refusal);
+            }
+
+            try
+            {
+                return await WriteSnapshotAsync(progress, cancellationToken);
+            }
+            finally
+            {
+                ReleaseTurn();
+            }
+        }
+
+        private async Task<string> WriteSnapshotAsync(IProgress<double>? progress, CancellationToken cancellationToken)
         {
             var snapshotPath = TempPath(SnapshotPrefix);
             using var maintenanceHold = await maintenanceGate.AcquireAsync(cancellationToken);
@@ -125,6 +202,14 @@ namespace HostPinger.Core.Services
                 {
                     var connection = (SqliteConnection)db.Database.GetDbConnection();
                     var dataBytes = Convert.ToInt64(await ScalarAsync(connection, DataBytesQuery, cancellationToken));
+
+                    // The copy weighs about what the data does. Checked in turn, so nothing else of
+                    // this class is writing beside the database meanwhile; a snapshot still waiting
+                    // to be downloaded is on the disk already, and counted.
+                    if (RoomRefusal(dataBytes, "Writing the snapshot") is { } noRoom)
+                    {
+                        throw new IOException(noRoom);
+                    }
 
                     await using var command = connection.CreateCommand();
                     command.CommandText = "VACUUM INTO $path;";
@@ -233,7 +318,7 @@ namespace HostPinger.Core.Services
         /// check reads the whole file, which for a gigabyte is seconds the page asking would
         /// otherwise sit frozen through.
         /// </remarks>
-        public Task<string?> ValidateBackupAsync(string candidatePath, CancellationToken cancellationToken = default) =>
+        internal Task<string?> ValidateBackupAsync(string candidatePath, CancellationToken cancellationToken = default) =>
             Task.Run(() => ValidateOnThisThreadAsync(candidatePath, cancellationToken), cancellationToken);
 
         private async Task<string?> ValidateOnThisThreadAsync(string candidatePath, CancellationToken cancellationToken)
@@ -309,15 +394,10 @@ namespace HostPinger.Core.Services
             // migrations since 1.12.0 rebuild the history's indexes: on a production-sized file the
             // journal for that reached about a third of the file. Refused here rather than left to
             // fill the disk partway through, with half the file's size as the room it needs.
-            if (known.Except(applied).Any())
+            if (known.Except(applied).Any()
+                && RoomRefusal(new FileInfo(candidatePath).Length / 2, "This backup is from an older version, and migrating it") is { } noRoom)
             {
-                var needed = new FileInfo(candidatePath).Length / 2 + FreeSpaceMarginBytes;
-                var free = MeasureFreeBytes();
-                if (free < needed)
-                {
-                    return $"This backup is from an older version, and migrating it needs about {needed >> 20} MB "
-                        + $"free beside the database. The disk has {free >> 20} MB.";
-                }
+                return noRoom;
             }
 
             return null;
@@ -349,8 +429,126 @@ namespace HostPinger.Core.Services
         /// backup's migration would otherwise hold the page asking for minutes.
         /// </para>
         /// </summary>
-        public Task RestoreAsync(string candidatePath, CancellationToken cancellationToken = default) =>
-            Task.Run(() => RestoreOnThisThreadAsync(candidatePath, cancellationToken), CancellationToken.None);
+        internal Task RestoreAsync(string candidatePath, CancellationToken cancellationToken = default) =>
+            Task.Run(
+                async () =>
+                {
+                    if (!TryTakeTurn(RestoreUnderWay, out var refusal))
+                    {
+                        throw new IOException(refusal);
+                    }
+
+                    try
+                    {
+                        await RestoreOnThisThreadAsync(candidatePath, cancellationToken);
+                    }
+                    finally
+                    {
+                        ReleaseTurn();
+                    }
+                },
+                CancellationToken.None);
+
+        /// <summary>
+        /// Restores the backup <paramref name="source"/> delivers, <paramref name="length"/> bytes of
+        /// it: receives it beside the database, checks it as <see cref="ValidateBackupAsync"/> does,
+        /// and puts it in place as <see cref="RestoreAsync"/> does, all in the one turn, so that
+        /// nothing else of this class writes beside the database from the room check to the swap.
+        /// <paramref name="progress"/> hears which of the three is under way, and how much of the
+        /// upload has arrived while it arrives.
+        /// </summary>
+        /// <returns>
+        /// Null once the backup is in force. Otherwise the sentence to show whoever sent it, which
+        /// means nothing was replaced: a snapshot or another restore under way, too little room
+        /// beside the database for the file, or a refusal of the file itself.
+        /// </returns>
+        /// <remarks>
+        /// Every failure is an <see cref="IOException"/>, as <see cref="RestoreAsync"/>'s are,
+        /// except whatever reading <paramref name="source"/> throws, which comes out as it is: for a
+        /// page, the browser failing to read the file it chose. However it ends, the file received
+        /// does not outlive this call.
+        /// </remarks>
+        public async Task<string?> RestoreUploadAsync(
+            Stream source,
+            long length,
+            IProgress<RestoreProgress>? progress = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (!TryTakeTurn(RestoreUnderWay, out var refusal))
+            {
+                return refusal;
+            }
+
+            try
+            {
+                if (RoomRefusal(length, "Receiving the backup") is { } noRoom)
+                {
+                    return noRoom;
+                }
+
+                var candidatePath = CreateRestoreTempPath();
+                try
+                {
+                    progress?.Report(new RestoreProgress(RestoreStep.Receiving, 0));
+                    await ReceiveAsync(source, candidatePath, length, progress, cancellationToken);
+
+                    progress?.Report(new RestoreProgress(RestoreStep.Checking, null));
+                    if (await ValidateBackupAsync(candidatePath, cancellationToken) is { } invalid)
+                    {
+                        return invalid;
+                    }
+
+                    progress?.Report(new RestoreProgress(RestoreStep.Replacing, null));
+                    await Task.Run(() => RestoreOnThisThreadAsync(candidatePath, cancellationToken), CancellationToken.None);
+                    return null;
+                }
+                finally
+                {
+                    // The swap consumes the file; this catches every earlier exit — an upload that
+                    // failed, a file refused, a restore that replaced nothing.
+                    File.Delete(candidatePath);
+                }
+            }
+            finally
+            {
+                ReleaseTurn();
+            }
+        }
+
+        /// <summary>
+        /// Writes what <paramref name="source"/> delivers to <paramref name="path"/>, telling
+        /// <paramref name="progress"/> how much of <paramref name="length"/> has arrived, and
+        /// refuses anything past <paramref name="length"/>, which is all the room was checked for.
+        /// </summary>
+        /// <remarks>
+        /// Asynchronous all the way down rather than on the thread pool: the file is opened for
+        /// asynchronous writes, and a page's upload arrives over its circuit, so a page that awaits
+        /// this is free between the pieces.
+        /// </remarks>
+        private static async Task ReceiveAsync(
+            Stream source,
+            string path,
+            long length,
+            IProgress<RestoreProgress>? progress,
+            CancellationToken cancellationToken)
+        {
+            await using var target = new FileStream(
+                path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81_920, FileOptions.Asynchronous);
+            var buffer = new byte[81_920];
+            long received = 0;
+            int read;
+            while ((read = await source.ReadAsync(buffer, cancellationToken)) > 0)
+            {
+                received += read;
+                if (received > length)
+                {
+                    throw new IOException($"More arrived than the {length:N0} bytes the file was said to hold.");
+                }
+
+                await target.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                progress?.Report(new RestoreProgress(RestoreStep.Receiving, length > 0 ? (double)received / length : 1));
+            }
+        }
 
         private async Task RestoreOnThisThreadAsync(string candidatePath, CancellationToken cancellationToken)
         {
@@ -685,7 +883,7 @@ namespace HostPinger.Core.Services
         }
 
         /// <summary>What the data directory's disk has free, for the headroom checks.</summary>
-        public long AvailableFreeBytes() => MeasureFreeBytes();
+        internal long AvailableFreeBytes() => MeasureFreeBytes();
 
         /// <summary>
         /// Sweeps snapshot and upload temp files an earlier run left behind — a download that
@@ -765,4 +963,25 @@ namespace HostPinger.Core.Services
             Path.GetDirectoryName(paths.DatabasePath)!,
             $"{prefix}{Guid.NewGuid():N}{TempExtension}");
     }
+
+    /// <summary>Which part of a restore from an upload is under way.</summary>
+    public enum RestoreStep
+    {
+        /// <summary>The upload arriving, and being written beside the database.</summary>
+        Receiving,
+
+        /// <summary>The file received being checked, as <see cref="DatabaseBackup.ValidateBackupAsync"/> checks it.</summary>
+        Checking,
+
+        /// <summary>The file being migrated if it needs it, and swapped in.</summary>
+        Replacing,
+    }
+
+    /// <summary>How far a restore from an upload has got.</summary>
+    /// <param name="Step">The part under way.</param>
+    /// <param name="Fraction">
+    /// How much of the upload has arrived, while it is arriving; null for the parts SQLite gives no
+    /// measure of.
+    /// </param>
+    public readonly record struct RestoreProgress(RestoreStep Step, double? Fraction);
 }

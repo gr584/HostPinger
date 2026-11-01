@@ -421,7 +421,7 @@ namespace HostPinger.Test
             await FillAsync(_dbPath, megabytes: 40);
             var reports = new List<double>();
 
-            await SnapshotsWatchedEvery(TimeSpan.FromMilliseconds(1)).CreateSnapshotAsync(new Recorder(reports.Add));
+            await SnapshotsWatchedEvery(TimeSpan.FromMilliseconds(1)).CreateSnapshotAsync(new Recorder<double>(reports.Add));
 
             Assert.Multiple(() =>
             {
@@ -447,7 +447,7 @@ namespace HostPinger.Test
 
             // Once the copy has begun writing, so there is a part-written file to delete.
             var cancelled = backup.CreateSnapshotAsync(
-                new Recorder(fraction =>
+                new Recorder<double>(fraction =>
                 {
                     reports.Add(fraction);
                     if (fraction > 0)
@@ -1071,6 +1071,222 @@ namespace HostPinger.Test
             });
         }
 
+        /// <summary>
+        /// The page hands the browser's upload over as it is read, and the backup does the rest in
+        /// one turn: receives the file beside the database, checks it and puts it in place, saying
+        /// which it is on, the upload by how far it has got. Nothing of the upload is left.
+        /// </summary>
+        [Test]
+        public async Task RestoreUpload_ReceivesChecksAndRestoresTheFileSayingWhichStepItIsOn()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", "backup-hash")));
+            var reports = new List<RestoreProgress>();
+
+            var refusal = await _backup.RestoreUploadAsync(upload, upload.Size, new Recorder<RestoreProgress>(reports.Add));
+
+            var received = reports.Where(r => r.Step == RestoreStep.Receiving).Select(r => r.Fraction).ToList();
+            Assert.Multiple(async () =>
+            {
+                Assert.That(refusal, Is.Null);
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example" }));
+                Assert.That(_store.PasswordHash, Is.EqualTo("backup-hash"));
+                Assert.That(reports.Select(r => r.Step).Distinct(), Is.EqualTo(new[]
+                {
+                    RestoreStep.Receiving, RestoreStep.Checking, RestoreStep.Replacing,
+                }));
+                Assert.That(received, Is.Ordered.And.Not.Empty);
+                Assert.That(received[^1], Is.EqualTo(1));
+                Assert.That(received.Count(fraction => fraction is > 0 and < 1), Is.Positive, "partway, not only before and after");
+                Assert.That(reports.Where(r => r.Step != RestoreStep.Receiving).Select(r => r.Fraction), Has.All.Null);
+                Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-restore-*"), Is.Empty);
+            });
+        }
+
+        /// <summary>A file the check turns away is refused in so many words, and none of it is kept.</summary>
+        [Test]
+        public async Task RestoreUpload_RefusesAFileThatFailsTheCheckAndKeepsNothingOfIt()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var upload = new UploadStream(Enumerable.Repeat((byte)0x2A, 100_000).ToArray());
+
+            var refusal = await _backup.RestoreUploadAsync(upload, upload.Size);
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(refusal, Is.EqualTo("This file is not an SQLite database."));
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }));
+                Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-restore-*"), Is.Empty);
+            });
+        }
+
+        /// <summary>
+        /// Without room beside the database for the file, the restore is refused before any of the
+        /// upload is read: the page used to check this itself, out of turn, where two uploads at
+        /// once could each count on the same room.
+        /// </summary>
+        [Test]
+        public async Task RestoreUpload_RefusesWithoutRoomForTheFileBeforeReadingAnyOfIt()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", "backup-hash")));
+            var cramped = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries)
+            {
+                MeasureFreeBytes = () => 3L << 20,
+            };
+
+            var refusal = await cramped.RestoreUploadAsync(upload, upload.Size);
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(refusal, Is.EqualTo(
+                    "Receiving the backup needs about 64 MB free beside the database. The disk has 3 MB."));
+                Assert.That(upload.Position, Is.Zero, "nothing of the upload was read");
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }));
+                Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-restore-*"), Is.Empty);
+            });
+        }
+
+        /// <summary>
+        /// An upload that stops partway — the browser can no longer read the file — fails the
+        /// restore with what the browser said, leaves nothing of what had arrived, and gives the
+        /// turn back for the next backup or restore.
+        /// </summary>
+        [Test]
+        public async Task RestoreUpload_DeletesWhatItReceivedWhenTheUploadFails()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", "backup-hash")), fail: true);
+
+            var failure = await Assert.ThrowsAsync<IOException>(() => _backup.RestoreUploadAsync(upload, upload.Size));
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(failure!.Message, Is.EqualTo("The browser could not read the file."));
+                Assert.That(upload.Position, Is.Positive, "it failed partway, not before the upload began");
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }));
+                Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-restore-*"), Is.Empty);
+                Assert.That(File.Exists(await _backup.CreateSnapshotAsync().WaitAsync(Patience)), "the turn was given back");
+            });
+        }
+
+        /// <summary>
+        /// The room was checked for the length the page gave, so more arriving than that is a
+        /// failure rather than something to go on writing until the disk is full.
+        /// </summary>
+        [Test]
+        public async Task RestoreUpload_RefusesMoreThanTheLengthItWasGiven()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", "backup-hash")));
+
+            var failure = await Assert.ThrowsAsync<IOException>(() => _backup.RestoreUploadAsync(upload, 50_000));
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(failure!.Message, Is.EqualTo("More arrived than the 50,000 bytes the file was said to hold."));
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }));
+                Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-restore-*"), Is.Empty);
+            });
+        }
+
+        /// <summary>
+        /// While one restore is under way, another restore or a backup is turned away before it
+        /// starts. A second restore used to go ahead alongside, counting on the room the first had
+        /// counted on, and finishing second it retired the first one's file as the undo copy in
+        /// place of the database both had meant to replace.
+        /// </summary>
+        [TestCase("restore")]
+        [TestCase("backup")]
+        public async Task WhileARestoreIsUnderWay_AnotherIsTurnedAway(string asked)
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var first = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("first.example", "first-hash")), hold: true);
+            var second = new UploadStream(
+                await File.ReadAllBytesAsync(await BackupWithAsync("second.example", "second-hash", "second.db")));
+            var restoring = _backup.RestoreUploadAsync(first, first.Size);
+            await first.Held.Task.WaitAsync(Patience);
+
+            var refusal = asked == "restore"
+                ? await _backup.RestoreUploadAsync(second, second.Size)
+                : (await Assert.ThrowsAsync<IOException>(() => _backup.CreateSnapshotAsync()))!.Message;
+            first.Release();
+
+            Assert.That(await restoring.WaitAsync(Patience), Is.Null);
+            Assert.Multiple(async () =>
+            {
+                Assert.That(refusal, Is.EqualTo("A restore is under way. Try again once it has finished."));
+                Assert.That(second.Position, Is.Zero, "nothing of the second upload was read");
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "first.example" }));
+                Assert.That(await AddressesAsync(_backup.PreRestorePath), Is.EqualTo(new[] { "current.example" }),
+                    "the undo copy is the database the restore replaced");
+                Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-backup-*"), Is.Empty, "no snapshot was written");
+            });
+        }
+
+        /// <summary>
+        /// While a backup is being written, a restore or another backup is turned away before it
+        /// starts, rather than writing a second file beside the database on the room the first one
+        /// counted on. The backup is held at its last report of progress, which comes before it
+        /// gives its turn back.
+        /// </summary>
+        [TestCase("restore")]
+        [TestCase("backup")]
+        public async Task WhileABackupIsBeingWritten_AnotherIsTurnedAway(string asked)
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", "backup-hash")));
+            using var held = new ManualResetEventSlim();
+            var reporting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var writing = _backup.CreateSnapshotAsync(new Recorder<double>(fraction =>
+            {
+                if (fraction == 1)
+                {
+                    reporting.TrySetResult();
+                    held.Wait(Patience);
+                }
+            }));
+            await reporting.Task.WaitAsync(Patience);
+
+            var refusal = asked == "restore"
+                ? await _backup.RestoreUploadAsync(upload, upload.Size)
+                : (await Assert.ThrowsAsync<IOException>(() => _backup.CreateSnapshotAsync()))!.Message;
+            held.Set();
+            var snapshot = await writing.WaitAsync(Patience);
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(refusal, Is.EqualTo("A backup is being written. Try again once it has finished."));
+                Assert.That(upload.Position, Is.Zero, "nothing of the upload was read");
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }), "nothing was restored");
+                Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-backup-*"), Is.EqualTo(new[] { snapshot }),
+                    "and no second snapshot written");
+            });
+        }
+
+        /// <summary>
+        /// Without room beside the database for the copy, the backup is refused before it writes
+        /// anything, in so many words, which the page shows as the reason it could not be written.
+        /// </summary>
+        [Test]
+        public async Task CreateSnapshot_RefusesWithoutRoomForTheCopyAndWritesNothing()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var cramped = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries)
+            {
+                MeasureFreeBytes = () => 3L << 20,
+            };
+
+            var refusal = await Assert.ThrowsAsync<IOException>(() => cramped.CreateSnapshotAsync());
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(refusal!.Message, Is.EqualTo(
+                    "Writing the snapshot needs about 64 MB free beside the database. The disk has 3 MB."));
+                Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-backup-*"), Is.Empty);
+            });
+        }
+
         /// <summary>Snapshots that say how far they have got every <paramref name="interval"/>.</summary>
         private DatabaseBackup SnapshotsWatchedEvery(TimeSpan interval) =>
             new(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries)
@@ -1086,9 +1302,9 @@ namespace HostPinger.Test
             };
 
         /// <summary>A current backup holding one host and a password, as an upload would be.</summary>
-        private async Task<string> BackupWithAsync(string address, string hash)
+        private async Task<string> BackupWithAsync(string address, string hash, string fileName = "uploaded.db")
         {
-            var backupPath = Path.Combine(_directory, "uploaded.db");
+            var backupPath = Path.Combine(_directory, fileName);
             var backupOptions = OptionsFor(backupPath);
             await using (var db = new HostPingerDbContext(backupOptions))
             {
@@ -1253,12 +1469,82 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// A backup's bytes handed over the way a browser's upload is, a piece at a time: held after
+        /// the first piece until <see cref="Release"/>, when asked to, or failing there, as an
+        /// upload does when the browser can no longer read the file.
+        /// </summary>
+        private sealed class UploadStream(byte[] bytes, bool hold = false, bool fail = false) : Stream
+        {
+            private const int Piece = 16 * 1024;
+
+            private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            private int _position;
+
+            /// <summary>How long the upload is, which the page is told by the browser.</summary>
+            public long Size => bytes.Length;
+
+            /// <summary>Set once the first piece has been read, which is where a held upload waits.</summary>
+            public TaskCompletionSource Held { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            public override bool CanRead => true;
+
+            public override bool CanSeek => false;
+
+            public override bool CanWrite => false;
+
+            public override long Length => throw new NotSupportedException();
+
+            /// <summary>How much has been read so far.</summary>
+            public override long Position
+            {
+                get => _position;
+                set => throw new NotSupportedException();
+            }
+
+            public void Release() => _released.TrySetResult();
+
+            public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+            {
+                if (_position > 0)
+                {
+                    Held.TrySetResult();
+                    if (fail)
+                    {
+                        throw new IOException("The browser could not read the file.");
+                    }
+
+                    if (hold)
+                    {
+                        await _released.Task.WaitAsync(cancellationToken);
+                    }
+                }
+
+                var count = Math.Min(Math.Min(buffer.Length, Piece), bytes.Length - _position);
+                bytes.AsMemory(_position, count).CopyTo(buffer);
+                _position += count;
+                return count;
+            }
+
+            public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+            public override void Flush()
+            {
+            }
+
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+            public override void SetLength(long value) => throw new NotSupportedException();
+
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        }
+
+        /// <summary>
         /// Hears each report as it is made, on the thread that makes it, where Progress&lt;T&gt;
         /// would post them to the thread pool to arrive in any order.
         /// </summary>
-        private sealed class Recorder(Action<double> report) : IProgress<double>
+        private sealed class Recorder<T>(Action<T> report) : IProgress<T>
         {
-            public void Report(double value) => report(value);
+            public void Report(T value) => report(value);
         }
     }
 }

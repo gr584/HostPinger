@@ -379,9 +379,10 @@
     // which is well past useful.
     private const int RetryAttemptsUpperBound = 1_000;
 
-    // A sanity bound on a restore upload, not the real guard: free disk space is checked before
-    // the upload starts, and a backup larger than this install's size limit is legitimate — it
-    // came from an install with a bigger one, and the pruner trims it after the restore.
+    // A sanity bound on a restore upload, not the real guard: the restore checks the disk has room
+    // for the file before it writes any of it, and a backup larger than this install's size limit
+    // is legitimate — it came from an install with a bigger one, and the pruner trims it after the
+    // restore.
     private const long MaxRestoreUploadBytes = 16L * 1024 * 1024 * 1024;
 
     [CascadingParameter]
@@ -744,16 +745,9 @@
         }
 
         // The snapshot lands beside the database before the browser starts pulling it, so the
-        // disk has to hold a second copy of the file for the duration of the download.
-        await LoadStatsAsync();
-        if (_stats is { } stats
-            && Backup.AvailableFreeBytes() < stats.SizeBytes + DatabaseBackup.FreeSpaceMarginBytes)
-        {
-            CloseDialog();
-            _backupStatus = "Not enough free disk space beside the database to write the snapshot.";
-            return;
-        }
-
+        // disk has to hold a second copy of the data for the duration of the download. The backup
+        // checks there is room for it, taking turns with any other backup or restore, and says so
+        // as a failure when there is not.
         _backupStatus = null;
         using var preparation = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
         _preparation = preparation;
@@ -958,6 +952,35 @@
 
     private int? ProgressPercent => _progress is { } fraction ? (int)(fraction * 100) : null;
 
+    /// <summary>
+    /// Follows a restore through its steps: the upload by how far it has got, the check and the
+    /// swap without a measure. The reports reach the circuit in the order they were made and ahead
+    /// of the restore's end, so one arriving once the overlay has moved on is only ever a stray.
+    /// </summary>
+    private void ShowRestoreStep(RestoreProgress progress)
+    {
+        if (!_isRestoring)
+        {
+            return;
+        }
+
+        var label = progress.Step switch
+        {
+            RestoreStep.Receiving => "Uploading the backup…",
+            RestoreStep.Checking => "Checking the backup…",
+            _ => "Putting the backup in place…",
+        };
+
+        if (label == _progressLabel && progress.Fraction is { } fraction)
+        {
+            ShowProgress(fraction);
+        }
+        else
+        {
+            ShowStep(label, progress.Fraction);
+        }
+    }
+
     private void OnDialogKeyDown(KeyboardEventArgs e)
     {
         if (e.Key == "Escape" && !_isRestoring)
@@ -1057,53 +1080,16 @@
             return;
         }
 
-        if (Backup.AvailableFreeBytes() < file.Size + DatabaseBackup.FreeSpaceMarginBytes)
-        {
-            CancelRestore();
-            ShowRestoreResult("Not enough free disk space beside the database to receive the file.", isRefused: true);
-            return;
-        }
-
         _isRestoring = true;
         ShowStep("Uploading the backup…", 0);
+        string? refusal;
         try
         {
-            var tempPath = Backup.CreateRestoreTempPath();
-            try
-            {
-                await using (var target = new FileStream(
-                    tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81_920,
-                    FileOptions.Asynchronous))
-                {
-                    // By hand rather than CopyToAsync, so the bar can follow the upload.
-                    await using var source = file.OpenReadStream(MaxRestoreUploadBytes, _cts.Token);
-                    var buffer = new byte[81_920];
-                    long uploaded = 0;
-                    int read;
-                    while ((read = await source.ReadAsync(buffer, _cts.Token)) > 0)
-                    {
-                        await target.WriteAsync(buffer.AsMemory(0, read), _cts.Token);
-                        uploaded += read;
-                        ShowProgress(file.Size > 0 ? (double)uploaded / file.Size : 1);
-                    }
-                }
-
-                ShowStep("Checking the backup…", null);
-                if (await Backup.ValidateBackupAsync(tempPath, _cts.Token) is { } refusal)
-                {
-                    ShowRestoreResult(refusal, isRefused: true);
-                    return;
-                }
-
-                ShowStep("Putting the backup in place…", null);
-                await Backup.RestoreAsync(tempPath, _cts.Token);
-            }
-            finally
-            {
-                // The swap consumes the temp file; this catches every earlier exit — a failed
-                // upload, a refused validation — where it would otherwise be left behind.
-                File.Delete(tempPath);
-            }
+            // The backup receives the file beside the database, checks it and puts it in place,
+            // saying which it is on; a backup or restore already under way, or a disk without
+            // room for the file, comes back as a refusal before any of it is read.
+            await using var source = file.OpenReadStream(MaxRestoreUploadBytes, _cts.Token);
+            refusal = await Backup.RestoreUploadAsync(source, file.Size, new Progress<RestoreProgress>(ShowRestoreStep), _cts.Token);
         }
         catch (Exception ex) when (ex is IOException or Microsoft.JSInterop.JSException)
         {
@@ -1119,6 +1105,12 @@
             // of it.
             _isRestoring = false;
             CancelRestore();
+        }
+
+        if (refusal is not null)
+        {
+            ShowRestoreResult(refusal, isRefused: true);
+            return;
         }
 
         // Before the reads below, so a refresh that renders while they run already shows it.
