@@ -162,12 +162,19 @@ and saved only when it is.
   fits: the page shows that figure under the box and refuses a larger one. Half of the database's
   own room rather than of the disk, since the disk is usually shared with the operating system and
   everything else. If something else fills the disk later, the page says the limit in force is more
-  than is safe, and that is all: pruning to make room would hand the history's space to whatever is
-  filling the disk. 0, which used to turn pruning off, is refused, and a 0 already set is replaced
-  at the next start by the safe limit, or by the database's own size where that is more, so the
-  upgrade itself deletes nothing. A limit lowered below the file is worked down a slice a round,
-  each round pruning for at most a quarter of the interval, so monitoring carries on meanwhile; on
-  the benchmarks' database that comes to about 2.5 MB a second of pruning.
+  than is safe, and nothing is pruned for it: pruning to make room would hand the history's space to
+  whatever is filling the disk. Once less than 64 MB is free, the database stops growing instead.
+  Each round makes room for what it records by deleting the oldest history, and writes into the
+  space that leaves inside the file, where nothing else can take it, so monitoring carries on with
+  the history there is. That history settles a little shorter at first, by about a fifth in the
+  tests, as the indexes fill to how they stay under turnover, and holds steady from there. The log
+  says when the hold starts and when it ends, and the database grows again, up to its limit, once
+  the disk has room. A disk with nothing free at all can still fail a round, since SQLite needs a
+  little room for its write-ahead log. 0, which used to turn pruning off, is refused, and a 0
+  already set is replaced at the next start by the safe limit, or by the database's own size where
+  that is more, so the upgrade itself deletes nothing. A limit lowered below the file is worked down
+  a slice a round, each round pruning for at most a quarter of the interval, so monitoring carries
+  on meanwhile; on the benchmarks' database that comes to about 2.5 MB a second of pruning.
 - **Capacity estimate** — the current file size, how fast it is growing at the present host count
   and interval, and roughly how much history fits inside the limit at that rate.
 - **Backup** — downloads a snapshot of the whole database: hosts, history, settings and the hashed
@@ -863,7 +870,7 @@ A lightweight tag (`git tag v1.15.0`) has no message, and its release carries th
 the Hosts summary, opening and refreshing the graph, the Configuration and Resolver errors reads,
 the changes `HostStore` and `UserSettingsStore` make, writing a backup's snapshot with a ping round
 landing alongside it, checking a backup and restoring one, the round after the size limit is
-lowered, opening the database at startup, and
+lowered, ten rounds on a nearly full disk, opening the database at startup, and
 upgrading it from the schema the last release left, which is what the first start of a new release
 does; while no migration has been added since that release, that last one has nothing to do. Each
 benchmark starts from a fresh copy of a seeded database shaped like the production one the page
@@ -891,8 +898,9 @@ run with the file dropped from the page cache, which is how they behave on a ser
 the rest of the machine has pushed out of memory. Those cold cases need Linux and are left out
 elsewhere. The delete with its history runs one warmup and five iterations, since each needs a fresh
 copy of the database, the backup and restore benchmarks one warmup and three, since each writes or
-restores a gigabyte, and so does the round after the limit is lowered, which prunes the copy it
-runs on; `--iterationCount` does not apply to them. The results land in
+restores a gigabyte, and so do the round after the limit is lowered, which prunes the copy it runs
+on, and the rounds on a nearly full disk, which delete from it; `--iterationCount` does not apply to
+them. The results land in
 `BenchmarkDotNet.Artifacts/results`, with every table together in `summary.md`.
 
 CI runs them on every push to main and every pull request and puts `summary.md` on the run's summary

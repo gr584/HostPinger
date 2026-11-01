@@ -173,6 +173,53 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// What ages out gives its space back to the disk, unless the call says to keep it inside
+        /// the file, as a round does while the disk is nearly full.
+        /// </summary>
+        [TestCase(true)]
+        [TestCase(false)]
+        public async Task EnforceResolverErrorRetention_GivesTheSpaceBackOnlyWhenToldTo(bool reclaimSpace)
+        {
+            await using var db = new HostPingerDbContext(_options);
+            await SeedResolverErrorsAsync(db, 5_000);
+            var sizeBefore = await DatabasePruner.GetDatabaseSizeBytesAsync(db);
+
+            var deleted = await new DatabasePruner().EnforceResolverErrorRetentionAsync(db, BaseTime.AddDays(60), reclaimSpace);
+
+            var size = await DatabasePruner.GetDatabaseSizeBytesAsync(db);
+            Assert.Multiple(() =>
+            {
+                Assert.That(deleted, Is.EqualTo(5_000));
+                Assert.That(size, reclaimSpace ? Is.LessThan(sizeBefore) : Is.EqualTo(sizeBefore));
+            });
+        }
+
+        /// <summary>
+        /// A batch of the oldest of each history goes, and the space they took stays inside the
+        /// file, free for what is written next: a round holding the database at its size stores
+        /// into it.
+        /// </summary>
+        [Test]
+        public async Task DeleteOldest_TakesABatchOfEachHistoryAndLeavesTheirSpaceInsideTheFile()
+        {
+            await using var db = new HostPingerDbContext(_options);
+            await SeedAttemptsAsync(db, 5_000);
+            await SeedResolverErrorsAsync(db, 5_000);
+            var sizeBefore = await DatabasePruner.GetDatabaseSizeBytesAsync(db);
+
+            var deleted = await new DatabasePruner().DeleteOldestAsync(db);
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(deleted, Is.EqualTo(2_000));
+                Assert.That(await db.PingAttempts.MinAsync(a => a.TimestampUtc), Is.EqualTo(BaseTime.AddSeconds(1_000)));
+                Assert.That(await db.ResolverErrors.MinAsync(e => e.TimestampUtc), Is.EqualTo(BaseTime.AddSeconds(1_000)));
+                Assert.That(await DatabasePruner.GetDatabaseSizeBytesAsync(db), Is.EqualTo(sizeBefore), "the file is as large");
+                Assert.That(await FreePagesAsync(db), Is.Positive, "with the space free inside it");
+            });
+        }
+
+        /// <summary>
         /// A call stops once its budget is spent, after the batch it is on, and the next call goes
         /// on from where it stopped: with a budget of nothing, each call gets one batch in.
         /// </summary>
@@ -237,6 +284,15 @@ namespace HostPinger.Test
                 await db.SaveChangesAsync();
                 db.ChangeTracker.Clear();
             }
+        }
+
+        private static async Task<long> FreePagesAsync(HostPingerDbContext db)
+        {
+            var connection = db.Database.GetDbConnection();
+            await db.Database.OpenConnectionAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA freelist_count;";
+            return Convert.ToInt64(await command.ExecuteScalarAsync());
         }
 
         /// <summary>One failure a second from <see cref="BaseTime"/>, as a name that never resolves records them.</summary>

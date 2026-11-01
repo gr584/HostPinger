@@ -22,6 +22,8 @@ namespace HostPinger.Core.Services
     /// Nothing here prunes because the room shrinks afterwards, when something else fills the
     /// disk; the page says so instead. Pruning to keep up with the room would hand whatever was
     /// filling the disk the history's space a slice at a time, until there was no history left.
+    /// Once the disk is nearly full the rounds stop the database growing instead, which hands it
+    /// nothing (see <see cref="DatabaseRoom.IsDiskNearlyFull"/>).
     /// </para>
     /// </remarks>
     public sealed class DatabaseSizeLimit(PingerPaths paths, UserSettingsStore settings, ILogger<DatabaseSizeLimit> logger)
@@ -36,7 +38,17 @@ namespace HostPinger.Core.Services
             () => new DriveInfo(Path.GetDirectoryName(paths.DatabasePath)!).AvailableFreeSpace;
 
         /// <summary>The largest limit that is safe for the database on its disk as it is now, in MB.</summary>
-        public int SafeLimitMb() => SafeLimitMbFor(FootprintBytes(paths.DatabasePath) + MeasureFreeBytes());
+        public int SafeLimitMb() => MeasureRoom().SafeLimitMb;
+
+        /// <summary>
+        /// What the disk beside the database has free and the safe limit that makes, measured
+        /// together, so that a page showing both shows one moment of them.
+        /// </summary>
+        public DatabaseRoom MeasureRoom()
+        {
+            var free = MeasureFreeBytes();
+            return new DatabaseRoom(free, SafeLimitMbFor(FootprintBytes(paths.DatabasePath) + free));
+        }
 
         /// <summary>
         /// Saves <paramref name="limitMb"/> as the size limit, or says why not: it is under 1 MB, or
@@ -114,5 +126,20 @@ namespace HostPinger.Core.Services
 
             return bytes;
         }
+    }
+
+    /// <summary>The room the database has on its disk at one moment; see <see cref="DatabaseSizeLimit.MeasureRoom"/>.</summary>
+    /// <param name="FreeBytes">What the disk beside the database has free.</param>
+    /// <param name="SafeLimitMb">The largest size limit that is safe for the database there, in MB.</param>
+    public sealed record DatabaseRoom(long FreeBytes, int SafeLimitMb)
+    {
+        /// <summary>
+        /// Whether the disk has less free than <see cref="DatabaseBackup.FreeSpaceMarginBytes"/>.
+        /// While it does, the ping rounds hold the database at the size it is: each makes room for
+        /// what it records by deleting the oldest history and writing into the space that frees
+        /// inside the file, rather than growing it. Whatever is filling the disk gets none of the
+        /// history's space that way, and the margin stays for SQLite's -wal.
+        /// </summary>
+        public bool IsDiskNearlyFull => FreeBytes < DatabaseBackup.FreeSpaceMarginBytes;
     }
 }

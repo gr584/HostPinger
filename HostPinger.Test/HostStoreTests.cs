@@ -544,6 +544,15 @@ namespace HostPinger.Test
                 .AddSingleton(_summaries)
                 .AddSingleton<MaintenanceGate>()
                 .AddSingleton<DatabasePruner>()
+
+                // The database is in memory, with no disk to measure: this one has room.
+                .AddSingleton(new DatabaseSizeLimit(
+                    new PingerPaths(Path.Combine(Path.GetTempPath(), $"hostpinger-in-memory-{Guid.NewGuid():N}.db")),
+                    _settings,
+                    NullLogger<DatabaseSizeLimit>.Instance)
+                {
+                    MeasureFreeBytes = () => 100L * 1024 * 1024 * 1024,
+                })
                 .AddSingleton<IPingSender>(pinger)
                 .AddSingleton<TimeProvider>(new StubClock(Now))
                 .AddSingleton(typeof(ILogger<>), typeof(NullLogger<>))

@@ -14,6 +14,13 @@ namespace HostPinger.Core.Services
         private const int DeleteBatchSize = 1000;
 
         /// <summary>
+        /// Run once <see cref="DeleteOldestAsync"/> has deleted its batch. For the tests, which have
+        /// no other way to have a delete take a page of its own, as one that splits an index's
+        /// interior page now and then does.
+        /// </summary>
+        internal Func<HostPingerDbContext, Task>? AfterDeletingOldest { get; init; }
+
+        /// <summary>
         /// One statement per table that holds recorded history, each deleting a batch of that
         /// table's oldest rows. The hosts and the settings are not history and are never deleted to
         /// make room.
@@ -49,12 +56,22 @@ namespace HostPinger.Core.Services
         /// Age rather than size, and so unconditional: the resolver errors page counts over thirty
         /// days and nothing reads past it, so rows older than that are not history being kept for
         /// anyone — they are rows no page can show. This runs whatever the size limit is set to,
-        /// including the zero that disables size pruning, because that setting is about how much
-        /// disk the file may take rather than about keeping what cannot be read.
+        /// because that setting is about how much disk the file may take rather than about keeping
+        /// what cannot be read.
         /// </remarks>
+        /// <param name="db">The context to delete through.</param>
+        /// <param name="nowUtc">The moment the retention is counted back from.</param>
+        /// <param name="reclaimSpace">
+        /// Whether to give the space they took back to the disk. Not while the disk is nearly full,
+        /// when the round holds the database at its size and writes into that space instead (see
+        /// <see cref="DatabaseRoom.IsDiskNearlyFull"/>): it would otherwise be given back, and the
+        /// history deleted to make the same room again.
+        /// </param>
+        /// <param name="cancellationToken">Cancels the delete.</param>
         public async Task<int> EnforceResolverErrorRetentionAsync(
             HostPingerDbContext db,
             DateTime nowUtc,
+            bool reclaimSpace = true,
             CancellationToken cancellationToken = default)
         {
             // Computed here rather than inside the predicate so the comparison is against a plain
@@ -63,7 +80,7 @@ namespace HostPinger.Core.Services
             var deleted = await db.ResolverErrors
                 .Where(e => e.TimestampUtc < cutoffUtc)
                 .ExecuteDeleteAsync(cancellationToken);
-            if (deleted > 0)
+            if (deleted > 0 && reclaimSpace)
             {
                 await db.Database.ExecuteSqlRawAsync("PRAGMA incremental_vacuum;", cancellationToken);
             }
@@ -103,20 +120,7 @@ namespace HostPinger.Core.Services
             var totalDeleted = 0;
             while (await GetDatabaseSizeBytesAsync(db, cancellationToken) > maxSizeBytes)
             {
-                // Every table is trimmed on each pass rather than one being emptied before the next
-                // is touched, because either can be the one filling the file: an address that never
-                // resolves records an error every round for as long as it stays configured. A limit
-                // enforced against the attempts alone would be held above it by the errors, with
-                // nothing left to delete and no way back under the limit.
-                var deleted = 0;
-                foreach (var statement in DeleteOldestStatements)
-                {
-                    deleted += await db.Database.ExecuteSqlRawAsync(
-                        statement,
-                        new object[] { DeleteBatchSize },
-                        cancellationToken);
-                }
-
+                var deleted = await DeleteOldestAsync(db, cancellationToken);
                 if (deleted == 0)
                 {
                     break;
@@ -131,6 +135,37 @@ namespace HostPinger.Core.Services
             }
 
             return totalDeleted;
+        }
+
+        /// <summary>
+        /// Deletes a batch of the oldest rows of every history table, and returns how many went.
+        /// The pages they took stay inside the file, free for whatever is written next, until a
+        /// vacuum gives them back to the disk.
+        /// </summary>
+        /// <remarks>
+        /// Every table is trimmed on each pass rather than one being emptied before the next is
+        /// touched, because either can be the one filling the file: an address that never resolves
+        /// records an error every round for as long as it stays configured. A limit enforced
+        /// against the attempts alone would be held above it by the errors, with nothing left to
+        /// delete and no way back under the limit.
+        /// </remarks>
+        internal async Task<int> DeleteOldestAsync(HostPingerDbContext db, CancellationToken cancellationToken = default)
+        {
+            var deleted = 0;
+            foreach (var statement in DeleteOldestStatements)
+            {
+                deleted += await db.Database.ExecuteSqlRawAsync(
+                    statement,
+                    new object[] { DeleteBatchSize },
+                    cancellationToken);
+            }
+
+            if (AfterDeletingOldest is { } afterDeleting)
+            {
+                await afterDeleting(db);
+            }
+
+            return deleted;
         }
 
         internal static async Task<long> GetDatabaseSizeBytesAsync(HostPingerDbContext db, CancellationToken cancellationToken = default)

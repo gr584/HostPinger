@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using HostPinger.Benchmarks.Seeding;
 using HostPinger.Core.Data;
 using HostPinger.Core.Options;
@@ -36,13 +37,15 @@ namespace HostPinger.Benchmarks.Infrastructure
         private readonly ServiceProvider _services;
         private readonly SteppingClock _clock;
         private readonly PingMonitorService _monitor;
+        private readonly StrongBox<long?> _freeBytes;
         private bool _summaryLoopStarted;
 
-        private WorkingDatabase(string path, ServiceProvider services, SteppingClock clock)
+        private WorkingDatabase(string path, ServiceProvider services, SteppingClock clock, StrongBox<long?> freeBytes)
         {
             Path = path;
             _services = services;
             _clock = clock;
+            _freeBytes = freeBytes;
             _monitor = services.GetRequiredService<PingMonitorService>();
             Factory = services.GetRequiredService<IDbContextFactory<HostPingerDbContext>>();
             Settings = services.GetRequiredService<UserSettingsStore>();
@@ -53,6 +56,16 @@ namespace HostPinger.Benchmarks.Infrastructure
         }
 
         public string Path { get; }
+
+        /// <summary>
+        /// What the rounds are told the disk beside the database has free, or null for what it does
+        /// have: for the round on a nearly full disk, since a benchmark cannot fill one.
+        /// </summary>
+        public long? FreeBytes
+        {
+            get => _freeBytes.Value;
+            set => _freeBytes.Value = value;
+        }
 
         public IDbContextFactory<HostPingerDbContext> Factory { get; }
 
@@ -87,6 +100,7 @@ namespace HostPinger.Benchmarks.Infrastructure
 
             var clock = new SteppingClock();
             var pingSender = new ReplayPingSender();
+            var freeBytes = new StrongBox<long?>();
             var services = new ServiceCollection()
                 .AddLogging(logging => logging.AddProvider(new ConsoleWarnings()).SetMinimumLevel(LogLevel.Warning))
                 .Configure<PingerOptions>(_ => { })
@@ -97,6 +111,14 @@ namespace HostPinger.Benchmarks.Infrastructure
                 .AddSingleton<IPingSender>(pingSender)
                 .AddSingleton<TimeProvider>(clock)
                 .AddSingleton<DatabasePruner>()
+                .AddSingleton(provider => new DatabaseSizeLimit(
+                    provider.GetRequiredService<PingerPaths>(),
+                    provider.GetRequiredService<UserSettingsStore>(),
+                    provider.GetRequiredService<ILogger<DatabaseSizeLimit>>())
+                {
+                    MeasureFreeBytes = () =>
+                        freeBytes.Value ?? new DriveInfo(System.IO.Path.GetDirectoryName(path)!).AvailableFreeSpace,
+                })
                 .AddSingleton<MaintenanceGate>()
                 .AddSingleton<PingMonitorService>()
                 .AddSingleton<HostSummaryCache>()
@@ -105,7 +127,7 @@ namespace HostPinger.Benchmarks.Infrastructure
                 .AddSingleton<DatabaseBackup>()
                 .BuildServiceProvider();
 
-            var database = new WorkingDatabase(path, services, clock);
+            var database = new WorkingDatabase(path, services, clock, freeBytes);
             await HostPingerDatabase.OpenAsync(services);
 
             var current = database.Summaries.Current;

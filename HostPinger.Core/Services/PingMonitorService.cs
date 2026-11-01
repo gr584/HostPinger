@@ -1,6 +1,7 @@
 using HostPinger.Core.Data;
 using HostPinger.Core.Options;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -18,13 +19,28 @@ namespace HostPinger.Core.Services
         /// </summary>
         private const int MaxTimeoutSeconds = 60;
 
+        /// <summary>Where a round holding the database at its size can take back what it stored.</summary>
+        private const string BeforeStoring = "BeforeStoring";
+
+        private const long BytesPerMb = 1024 * 1024;
+
         private readonly IDbContextFactory<HostPingerDbContext> _dbFactory;
         private readonly IPingSender _pingSender;
         private readonly UserSettingsStore _settings;
         private readonly DatabasePruner _pruner;
+        private readonly DatabaseSizeLimit _sizeLimit;
         private readonly MaintenanceGate _maintenanceGate;
         private readonly ILogger<PingMonitorService> _logger;
         private readonly TimeProvider _timeProvider;
+
+        /// <summary>
+        /// Whether the last round held the database at its size, so that the log says when that
+        /// starts and when it ends rather than on every round in between.
+        /// </summary>
+        private bool _holdingSize;
+
+        /// <summary>Whether the free space has failed to measure, which the log says the first time only.</summary>
+        private bool _roomUnmeasurable;
 
         /// <summary>
         /// How long a round may spend pruning, from the settings it runs with. Settable for the
@@ -37,6 +53,7 @@ namespace HostPinger.Core.Services
             IPingSender pingSender,
             UserSettingsStore settings,
             DatabasePruner pruner,
+            DatabaseSizeLimit sizeLimit,
             MaintenanceGate maintenanceGate,
             ILogger<PingMonitorService> logger,
             TimeProvider? timeProvider = null)
@@ -45,6 +62,7 @@ namespace HostPinger.Core.Services
             _pingSender = pingSender;
             _settings = settings;
             _pruner = pruner;
+            _sizeLimit = sizeLimit;
             _maintenanceGate = maintenanceGate;
             _logger = logger;
             _timeProvider = timeProvider ?? TimeProvider.System;
@@ -119,19 +137,77 @@ namespace HostPinger.Core.Services
             using var maintenanceHold = await _maintenanceGate.AcquireAsync(cancellationToken);
 
             var options = _settings.CurrentPinger;
+            var holdSize = HoldsSize();
             await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
             var timestampUtc = _timeProvider.GetUtcNow().UtcDateTime;
 
-            var recorded = await PingAndStoreAsync(db, options, timestampUtc, cancellationToken);
+            var recorded = await PingAndStoreAsync(db, options, timestampUtc, holdSize, cancellationToken);
 
             // Pruning runs whether or not there was anything to ping. A service whose hosts have
             // all been deleted or paused still holds a database, and what has aged out of the
             // resolver errors has aged out regardless — tying that to a round having recorded
             // something would leave the last failures of a host that is gone sitting there for
-            // good.
-            await _pruner.EnforceResolverErrorRetentionAsync(db, timestampUtc, cancellationToken);
+            // good. The size limit still gives what it prunes back to the disk while the database
+            // is held: the file does not grow then, so it is only over the limit once someone
+            // lowers it, and lowering it is how they free the disk.
+            await _pruner.EnforceResolverErrorRetentionAsync(db, timestampUtc, reclaimSpace: !holdSize, cancellationToken);
             await _pruner.EnforceSizeLimitAsync(db, options.MaxDatabaseSizeBytes, PruneBudgetFor(options), cancellationToken);
             return recorded;
+        }
+
+        /// <summary>
+        /// Whether this round holds the database at its size, which it does while the disk is nearly
+        /// full (see <see cref="DatabaseRoom.IsDiskNearlyFull"/>). The log has a warning when that
+        /// starts and a line when it ends.
+        /// </summary>
+        /// <remarks>
+        /// A free space that will not measure leaves the round as it was before there was a hold,
+        /// with a warning the first time: a check that only decides how the round makes room is no
+        /// reason to stop the monitoring.
+        /// </remarks>
+        private bool HoldsSize()
+        {
+            DatabaseRoom room;
+            try
+            {
+                room = _sizeLimit.MeasureRoom();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                if (!_roomUnmeasurable)
+                {
+                    _roomUnmeasurable = true;
+                    _logger.LogWarning(
+                        ex,
+                        "The free space beside the database will not measure, so the rounds cannot tell whether the "
+                        + "disk is nearly full.");
+                }
+
+                return false;
+            }
+
+            var hold = room.IsDiskNearlyFull;
+            if (hold != _holdingSize)
+            {
+                _holdingSize = hold;
+                if (hold)
+                {
+                    _logger.LogWarning(
+                        "The disk beside the database has {FreeMb} MB free, less than the {MarginMb} MB kept in hand, so the "
+                        + "database is held at its size: each round deletes the oldest history it needs to make room for what "
+                        + "it records. Free space on the disk to let it grow again.",
+                        room.FreeBytes / BytesPerMb,
+                        DatabaseBackup.FreeSpaceMarginBytes / BytesPerMb);
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "The disk beside the database has {FreeMb} MB free again, so the database may grow to its size limit.",
+                        room.FreeBytes / BytesPerMb);
+                }
+            }
+
+            return hold;
         }
 
         /// <summary>
@@ -142,6 +218,7 @@ namespace HostPinger.Core.Services
             HostPingerDbContext db,
             PingerOptions options,
             DateTime timestampUtc,
+            bool holdSize,
             CancellationToken cancellationToken)
         {
             var hosts = await db.Hosts.AsNoTracking().Where(h => h.IsEnabled).ToListAsync(cancellationToken);
@@ -204,9 +281,82 @@ namespace HostPinger.Core.Services
 
             db.PingAttempts.AddRange(attempts);
             db.ResolverErrors.AddRange(resolverErrors);
-            await db.SaveChangesAsync(cancellationToken);
+            if (holdSize)
+            {
+                await SaveHoldingSizeAsync(db, transaction, attempts, resolverErrors, cancellationToken);
+            }
+            else
+            {
+                await db.SaveChangesAsync(cancellationToken);
+            }
+
             await transaction.CommitAsync(cancellationToken);
             return attempts.Count;
+        }
+
+        /// <summary>
+        /// Saves what <see cref="PingAndStoreAsync"/> added without growing the file, for a round
+        /// holding the database at its size: into pages the file already has free, and where those
+        /// are too few, into the pages a batch of the oldest history leaves once it is deleted. The
+        /// rows go in, and if they took the file past its size they come out again, the batch is
+        /// deleted, and they go in again.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Deleting only once the rows do not fit, rather than as many as each round adds, has the
+        /// rounds use up whatever room the file has before any history goes. The history held
+        /// settles a little shorter at first, as the indexes fill to how they stay under turnover,
+        /// and from then on goes no faster than it arrives. Nothing here vacuums, so the space
+        /// deleted stays inside the file, where nothing but the database can take it.
+        /// </para>
+        /// <para>
+        /// The size is taken again before each save, after any delete, because a delete can take a
+        /// page of its own: replacing a key in an index's interior page with a longer one splits the
+        /// page, now and then, before the delete has freed any. Measured against the file as it was
+        /// before that, the rows would never fit again however much was deleted, and one round went
+        /// on until the whole history was gone. So the file can grow by such a page now and then, and
+        /// the rows still only go where there is room.
+        /// </para>
+        /// <para>
+        /// Inside the round's transaction, so a round that fails deletes nothing. The size is read
+        /// before the round commits, so it is the file's own growth that makes room, and never
+        /// SQLite's -wal failing to grow on a disk with nothing free at all: deleting would not
+        /// help that, since the delete needs the -wal too. A file with no history left to delete
+        /// grows as it would have before.
+        /// </para>
+        /// </remarks>
+        private async Task SaveHoldingSizeAsync(
+            HostPingerDbContext db,
+            IDbContextTransaction transaction,
+            List<PingAttempt> attempts,
+            List<ResolverError> resolverErrors,
+            CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                var sizeBytes = await DatabasePruner.GetDatabaseSizeBytesAsync(db, cancellationToken);
+                await transaction.CreateSavepointAsync(BeforeStoring, cancellationToken);
+                await db.SaveChangesAsync(cancellationToken);
+                if (await DatabasePruner.GetDatabaseSizeBytesAsync(db, cancellationToken) <= sizeBytes)
+                {
+                    return;
+                }
+
+                // Back out, and added again as rows not yet stored: the save gave each the id it
+                // went in under, and the ids are handed out again once there is room.
+                await transaction.RollbackToSavepointAsync(BeforeStoring, cancellationToken);
+                db.ChangeTracker.Clear();
+                attempts.ForEach(attempt => attempt.Id = 0);
+                resolverErrors.ForEach(error => error.Id = 0);
+                db.PingAttempts.AddRange(attempts);
+                db.ResolverErrors.AddRange(resolverErrors);
+
+                if (await _pruner.DeleteOldestAsync(db, cancellationToken) == 0)
+                {
+                    await db.SaveChangesAsync(cancellationToken);
+                    return;
+                }
+            }
         }
     }
 }

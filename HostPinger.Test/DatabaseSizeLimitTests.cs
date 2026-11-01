@@ -65,6 +65,34 @@ namespace HostPinger.Test
             Assert.That(DatabaseSizeLimit.FootprintBytes(path), Is.EqualTo(321_000));
         }
 
+        /// <summary>
+        /// The disk counts as nearly full under the margin and not at it, and the room measured
+        /// carries the safe limit that the database's files and the same free space make: here a
+        /// 4 MB file, with 64 MB free coming to (4 + 64 − 64) / 2 = 2 MB.
+        /// </summary>
+        [TestCase(0, true, 1)]
+        [TestCase(DatabaseBackup.FreeSpaceMarginBytes - 1, true, 1)]
+        [TestCase(DatabaseBackup.FreeSpaceMarginBytes, false, 2)]
+        [TestCase(DatabaseBackup.FreeSpaceMarginBytes + (10 * Mb), false, 7)]
+        public void MeasureRoom_SaysTheDiskIsNearlyFullUnderTheMargin(long freeBytes, bool nearlyFull, int safeLimitMb)
+        {
+            var path = Path.Combine(_directory, "measured.db");
+            File.WriteAllBytes(path, new byte[4 * Mb]);
+            var sizeLimit = new DatabaseSizeLimit(new PingerPaths(path), Store(new PingerOptions()), new TestLogger<DatabaseSizeLimit>())
+            {
+                MeasureFreeBytes = () => freeBytes,
+            };
+
+            var room = sizeLimit.MeasureRoom();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(room.FreeBytes, Is.EqualTo(freeBytes));
+                Assert.That(room.IsDiskNearlyFull, Is.EqualTo(nearlyFull));
+                Assert.That(room.SafeLimitMb, Is.EqualTo(safeLimitMb));
+            });
+        }
+
         [Test]
         public async Task Save_TakesALimitUpToTheSafeOne()
         {

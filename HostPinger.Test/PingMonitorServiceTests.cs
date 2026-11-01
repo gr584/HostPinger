@@ -12,6 +12,14 @@ namespace HostPinger.Test
 {
     public class PingMonitorServiceTests
     {
+        /// <summary>What a disk with room is said to have free: far more than any test here writes.</summary>
+        private const long PlentyFree = 100L * 1024 * 1024 * 1024;
+
+        private static readonly DateTime SeedStart = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        /// <summary>A path for the size limit's paths, which no file is at: the database here is in memory.</summary>
+        private static readonly string NoFile = Path.Combine(Path.GetTempPath(), $"hostpinger-in-memory-{Guid.NewGuid():N}.db");
+
         private SqliteConnection _connection = null!;
         private DbContextOptions<HostPingerDbContext> _options = null!;
 
@@ -321,6 +329,252 @@ namespace HostPinger.Test
             Assert.That(
                 PingMonitorService.PruneBudget(new PingerOptions { IntervalSeconds = intervalSeconds }),
                 Is.EqualTo(TimeSpan.FromMilliseconds(expectedMilliseconds)));
+        }
+
+        /// <summary>
+        /// While the disk is nearly full the file does not grow. Each round's attempts go into pages
+        /// the file has free, and where there are none, into those a batch of the oldest history
+        /// leaves: every host's attempt is stored on every round, and the history goes from its
+        /// oldest end, no faster than the rounds need the room.
+        /// </summary>
+        [Test]
+        public async Task RunRound_HoldsTheFileAtItsSizeWhileTheDiskIsNearlyFull()
+        {
+            const int hosts = 50;
+            const int rounds = 60;
+            var seeded = await SeedHistoryAsync(hosts, rounds: 400);
+            var sizeBefore = await SizeAsync();
+            var service = CreateService(AnsweringAll(hosts), freeBytes: () => 0);
+
+            var recorded = 0;
+            var largest = sizeBefore;
+            for (var round = 0; round < rounds; round++)
+            {
+                recorded += await service.RunRoundAsync();
+                largest = Math.Max(largest, await SizeAsync());
+            }
+
+            await using var verify = new HostPingerDbContext(_options);
+            var kept = await verify.PingAttempts.CountAsync();
+            Assert.Multiple(async () =>
+            {
+                Assert.That(largest, Is.EqualTo(sizeBefore), "the file never grew");
+                Assert.That(recorded, Is.EqualTo(hosts * rounds), "every host, every round");
+                Assert.That(await verify.PingAttempts.CountAsync(a => a.TimestampUtc > SeedStart.AddDays(1)), Is.EqualTo(recorded),
+                    "and every attempt they stored is there");
+                Assert.That(kept, Is.LessThan(seeded + recorded), "the oldest made room");
+                Assert.That(kept, Is.GreaterThan(seeded / 2), "and no more of it than the rounds took, give or take a batch");
+                Assert.That(await verify.PingAttempts.MinAsync(a => a.TimestampUtc), Is.GreaterThan(SeedStart), "from the oldest end");
+            });
+        }
+
+        /// <summary>
+        /// History goes only once a round's rows no longer fit. While the file has pages free the
+        /// rounds store into those and delete nothing, so the history held stays as long as it was
+        /// rather than shortening by a batch whenever a round runs.
+        /// </summary>
+        [Test]
+        public async Task RunRound_DeletesNothingWhileTheFileHasRoomInside()
+        {
+            const int hosts = 50;
+            var seeded = await SeedHistoryAsync(hosts, rounds: 400);
+            int freed;
+            await using (var db = new HostPingerDbContext(_options))
+            {
+                // Room inside the file for far more than the rounds below store: a database in
+                // memory never vacuums, so what is deleted stays there as free pages.
+                freed = await db.Database.ExecuteSqlRawAsync("DELETE FROM PingAttempts WHERE Id <= 5000;");
+            }
+
+            var sizeBefore = await SizeAsync();
+            var service = CreateService(AnsweringAll(hosts), freeBytes: () => 0);
+            var recorded = 0;
+            for (var round = 0; round < 10; round++)
+            {
+                recorded += await service.RunRoundAsync();
+            }
+
+            await using var verify = new HostPingerDbContext(_options);
+            Assert.Multiple(async () =>
+            {
+                Assert.That(await verify.PingAttempts.CountAsync(), Is.EqualTo(seeded - freed + recorded), "nothing deleted");
+                Assert.That(await SizeAsync(), Is.EqualTo(sizeBefore));
+            });
+        }
+
+        /// <summary>
+        /// A round with more to store than one batch of the oldest history makes room for deletes
+        /// as many batches as its rows take, each going on from the last, and still leaves the file
+        /// the size it was.
+        /// </summary>
+        [Test]
+        public async Task RunRound_DeletesAsManyBatchesAsItsRowsNeedRoomFor()
+        {
+            const int hosts = 1500;
+            var seeded = await SeedHistoryAsync(hosts, rounds: 20);
+            var sizeBefore = await SizeAsync();
+
+            // Sent off and bounded, as the pruner's own tests do: a round going round for ever
+            // finding no room would otherwise never hand back a task to bound.
+            var service = CreateService(AnsweringAll(hosts), freeBytes: () => 0);
+            var recorded = await Task.Run(() => service.RunRoundAsync()).WaitAsync(TimeSpan.FromSeconds(60));
+
+            await using var verify = new HostPingerDbContext(_options);
+            Assert.Multiple(async () =>
+            {
+                Assert.That(recorded, Is.EqualTo(hosts));
+                Assert.That(await SizeAsync(), Is.EqualTo(sizeBefore));
+                Assert.That(await verify.PingAttempts.CountAsync(), Is.LessThanOrEqualTo(seeded + recorded - 2000),
+                    "more than one batch of a thousand went");
+            });
+        }
+
+        /// <summary>
+        /// A delete can take a page of its own, as one splitting an index's interior page does now
+        /// and then, and the round's rows still go into the room it made. Measured against the file
+        /// as it was before the delete, which no amount of deleting gets back to without a vacuum,
+        /// they never fitted again, and a round deleted the whole history.
+        /// </summary>
+        [Test]
+        public async Task RunRound_MakesRoomOnceWhenTheDeleteItselfTakesAPage()
+        {
+            const int hosts = 500;
+            var seeded = await SeedHistoryAsync(hosts, rounds: 40);
+            var pruner = new DatabasePruner { AfterDeletingOldest = TakeAPageAsync };
+            var service = CreateService(AnsweringAll(hosts), freeBytes: () => 0, pruner: pruner);
+
+            var recorded = await Task.Run(() => service.RunRoundAsync()).WaitAsync(TimeSpan.FromSeconds(60));
+
+            await using var verify = new HostPingerDbContext(_options);
+            Assert.That(await verify.PingAttempts.CountAsync(),
+                Is.LessThan(seeded + recorded).And.AtLeast(seeded + recorded - 3000), "a batch or so, not the history");
+        }
+
+        /// <summary>
+        /// With no history left to delete, a round on a nearly full disk stores what it has anyway
+        /// and the file grows, as it would have before the disk filled: the hold gives the oldest
+        /// history for the newest, not the newest for nothing.
+        /// </summary>
+        [Test]
+        public async Task RunRound_GrowsTheFileWhenThereIsNoHistoryToMakeRoomWith()
+        {
+            const int hosts = 200;
+            await SeedHistoryAsync(hosts, rounds: 0);
+            var sizeBefore = await SizeAsync();
+
+            var service = CreateService(AnsweringAll(hosts), freeBytes: () => 0);
+            var recorded = await Task.Run(() => service.RunRoundAsync()).WaitAsync(TimeSpan.FromSeconds(60));
+
+            await using var verify = new HostPingerDbContext(_options);
+            Assert.Multiple(async () =>
+            {
+                Assert.That(recorded, Is.EqualTo(hosts));
+                Assert.That(await verify.PingAttempts.CountAsync(), Is.EqualTo(hosts));
+                Assert.That(await SizeAsync(), Is.GreaterThan(sizeBefore), "the rows needed pages no history could free");
+            });
+        }
+
+        /// <summary>
+        /// What ages out of the resolver errors gives its space back to the disk as a rule, and keeps
+        /// it inside the file while the disk is nearly full, for the rounds to store into: given back
+        /// then, the history would go to make the same room again. A database in memory never
+        /// vacuums, so this one is a file.
+        /// </summary>
+        [TestCase(false)]
+        [TestCase(true)]
+        public async Task RunRound_KeepsTheSpaceOfWhatAgesOutInsideTheFileOnlyWhileTheDiskIsNearlyFull(bool nearlyFull)
+        {
+            var path = Path.Combine(Path.GetTempPath(), $"hostpinger-test-{Guid.NewGuid():N}.db");
+            var options = new DbContextOptionsBuilder<HostPingerDbContext>().UseSqlite($"Data Source={path}").Options;
+            try
+            {
+                long sizeBefore;
+                await using (var db = new HostPingerDbContext(options))
+                {
+                    await HostPingerDatabase.EnableIncrementalVacuumAsync(db);
+                    await db.Database.EnsureCreatedAsync();
+                    var aged = DateTime.UtcNow - ResolverError.Retention - TimeSpan.FromDays(1);
+                    db.ResolverErrors.AddRange(Enumerable.Range(0, 5_000).Select(i => new ResolverError
+                    {
+                        Address = $"gone-{i % 10}.example",
+                        TimestampUtc = aged.AddSeconds(-i),
+                        Reason = ResolverFailure.TimedOut,
+                    }));
+                    await db.SaveChangesAsync();
+                    sizeBefore = await DatabasePruner.GetDatabaseSizeBytesAsync(db);
+                }
+
+                await CreateService(new FakePingSender(), dbFactory: new TestDb.Factory(options), freeBytes: () => nearlyFull ? 0 : PlentyFree)
+                    .RunRoundAsync();
+
+                await using var verify = new HostPingerDbContext(options);
+                var size = await DatabasePruner.GetDatabaseSizeBytesAsync(verify);
+                Assert.Multiple(async () =>
+                {
+                    Assert.That(await verify.ResolverErrors.CountAsync(), Is.Zero, "aged out either way");
+                    Assert.That(size, nearlyFull ? Is.EqualTo(sizeBefore) : Is.LessThan(sizeBefore));
+                });
+            }
+            finally
+            {
+                SqliteConnection.ClearAllPools();
+                File.Delete(path);
+            }
+        }
+
+        /// <summary>
+        /// The log says when the disk becomes nearly full, with what it has free, and when it has room
+        /// again: once each, rather than on every round in between.
+        /// </summary>
+        [Test]
+        public async Task RunRound_SaysWhenTheDiskBecomesNearlyFullAndWhenItHasRoomAgain()
+        {
+            var free = 10L * 1024 * 1024;
+            var log = new TestLogger<PingMonitorService>();
+            var service = CreateService(new FakePingSender(), logger: log, freeBytes: () => free);
+
+            await service.RunRoundAsync();
+            await service.RunRoundAsync();
+            free = DatabaseBackup.FreeSpaceMarginBytes;
+            await service.RunRoundAsync();
+            await service.RunRoundAsync();
+
+            Assert.That(log.Entries.Select(e => e.Level), Is.EqualTo(new[] { LogLevel.Warning, LogLevel.Information }));
+            Assert.Multiple(() =>
+            {
+                Assert.That(log.Entries[0].Message,
+                    Does.StartWith("The disk beside the database has 10 MB free, less than the 64 MB kept in hand, so the database is held at its size"));
+                Assert.That(log.Entries[1].Message,
+                    Does.StartWith("The disk beside the database has 64 MB free again, so the database may grow to its size limit"));
+            });
+        }
+
+        /// <summary>
+        /// A free space that will not measure leaves the rounds storing as they did before there was
+        /// a hold, with a warning the first time only: how a round makes room is no reason to stop the
+        /// monitoring.
+        /// </summary>
+        [Test]
+        public async Task RunRound_StoresAsBeforeWhenTheFreeSpaceWillNotMeasure()
+        {
+            // Rows enough to need new pages, which a round holding the database at its size would
+            // delete history to make.
+            const int hosts = 500;
+            var seeded = await SeedHistoryAsync(hosts, rounds: 40);
+            var log = new TestLogger<PingMonitorService>();
+            var service = CreateService(
+                AnsweringAll(hosts), logger: log, freeBytes: () => throw new IOException("The mount has gone."));
+
+            var recorded = await service.RunRoundAsync() + await service.RunRoundAsync();
+
+            await using var verify = new HostPingerDbContext(_options);
+            Assert.Multiple(async () =>
+            {
+                Assert.That(recorded, Is.EqualTo(2 * hosts));
+                Assert.That(await verify.PingAttempts.CountAsync(), Is.EqualTo(seeded + recorded), "nothing deleted to make room");
+                Assert.That(log.Entries.Select(e => e.Level), Is.EqualTo(new[] { LogLevel.Warning }));
+                Assert.That(log.Entries.Single().Message, Does.StartWith("The free space beside the database will not measure"));
+            });
         }
 
         /// <summary>
@@ -678,23 +932,96 @@ namespace HostPinger.Test
             TestOptionsMonitor<PingerOptions>? pinger = null,
             ILogger<PingMonitorService>? logger = null,
             IDbContextFactory<HostPingerDbContext>? dbFactory = null,
-            TimeSpan? pruneBudget = null)
+            TimeSpan? pruneBudget = null,
+            Func<long>? freeBytes = null,
+            DatabasePruner? pruner = null)
         {
             // The settings arrive as configured defaults under a store with no rows, which is the
             // state of a fresh install.
+            var settings = new UserSettingsStore(
+                new TestDb.Factory(_options),
+                pinger ?? new TestOptionsMonitor<PingerOptions>(options ?? new PingerOptions()),
+                new TestOptionsMonitor<SecurityOptions>(new SecurityOptions()));
+
+            // The database is in memory, with no disk to measure, so what the disk has free is stood
+            // in for: plenty, unless a test says otherwise.
+            var sizeLimit = new DatabaseSizeLimit(new PingerPaths(NoFile), settings, NullLogger<DatabaseSizeLimit>.Instance)
+            {
+                MeasureFreeBytes = freeBytes ?? (() => PlentyFree),
+            };
             return new PingMonitorService(
                 dbFactory ?? new TestDb.Factory(_options),
                 sender,
-                new UserSettingsStore(
-                    new TestDb.Factory(_options),
-                    pinger ?? new TestOptionsMonitor<PingerOptions>(options ?? new PingerOptions()),
-                    new TestOptionsMonitor<SecurityOptions>(new SecurityOptions())),
-                new DatabasePruner(),
+                settings,
+                pruner ?? new DatabasePruner(),
+                sizeLimit,
                 maintenanceGate ?? new MaintenanceGate(),
                 logger ?? NullLogger<PingMonitorService>.Instance)
             {
                 PruneBudgetFor = pruneBudget is { } budget ? _ => budget : PingMonitorService.PruneBudget,
             };
+        }
+
+        /// <summary>
+        /// Puts <paramref name="hosts"/> enabled hosts in, with <paramref name="rounds"/> rounds of
+        /// history behind them a minute apart from <see cref="SeedStart"/>, every host answering on
+        /// every one, and returns how many attempts that is.
+        /// </summary>
+        private async Task<int> SeedHistoryAsync(int hosts, int rounds)
+        {
+            await using var db = new HostPingerDbContext(_options);
+            var seeded = Enumerable.Range(0, hosts)
+                .Select(i => new MonitoredHost { Name = $"host-{i}", Address = $"host-{i}.example" })
+                .ToList();
+            db.Hosts.AddRange(seeded);
+            await db.SaveChangesAsync();
+            db.PingAttempts.AddRange(Enumerable.Range(0, rounds).SelectMany(round => seeded.Select(host => new PingAttempt
+            {
+                HostId = host.Id,
+                TimestampUtc = SeedStart.AddMinutes(round),
+                RoundtripMs = 10 + (round % 50),
+            })));
+            await db.SaveChangesAsync();
+            return hosts * rounds;
+        }
+
+        /// <summary>A sender every host <see cref="SeedHistoryAsync"/> put in answers, as all of them did there.</summary>
+        private static FakePingSender AnsweringAll(int hosts)
+        {
+            var sender = new FakePingSender();
+            for (var i = 0; i < hosts; i++)
+            {
+                sender.Results[$"host-{i}.example"] = PingResult.Answered(20);
+            }
+
+            return sender;
+        }
+
+        /// <summary>
+        /// Takes the file a page or more past what it was and leaves those pages free, as a delete
+        /// splitting an index's interior page does: a row larger than every page the file has free
+        /// goes in, and out again.
+        /// </summary>
+        private static async Task TakeAPageAsync(HostPingerDbContext db)
+        {
+            var size = (int)((await PragmaAsync(db, "freelist_count") + 1) * await PragmaAsync(db, "page_size"));
+            await db.Database.ExecuteSqlRawAsync(
+                "INSERT INTO \"ResolverErrors\" (\"Address\", \"TimestampUtc\", \"Reason\") VALUES ({0}, '2000-01-01 00:00:00', 0);",
+                new string('x', size));
+            await db.Database.ExecuteSqlRawAsync("DELETE FROM \"ResolverErrors\" WHERE \"TimestampUtc\" = '2000-01-01 00:00:00';");
+        }
+
+        private static async Task<long> PragmaAsync(HostPingerDbContext db, string pragma)
+        {
+            await using var command = db.Database.GetDbConnection().CreateCommand();
+            command.CommandText = $"PRAGMA {pragma};";
+            return Convert.ToInt64(await command.ExecuteScalarAsync());
+        }
+
+        private async Task<long> SizeAsync()
+        {
+            await using var db = new HostPingerDbContext(_options);
+            return await DatabasePruner.GetDatabaseSizeBytesAsync(db);
         }
 
         /// <summary>
