@@ -202,8 +202,8 @@ namespace HostPinger.UITest
         /// A restore asks for the current password before anything else, because what it installs
         /// is the backup's: a wrong one is turned away before a file is even chosen, and the right
         /// one leads on to choosing it. The chosen file survives into the confirmation, and
-        /// confirming restores it, with a progress bar through each step, and says so in the
-        /// overlay, which stays until it is closed.
+        /// confirming it with the backup's password restores it, with a progress bar through each
+        /// step, and says so in the overlay, which stays until it is closed.
         /// </summary>
         [Test]
         public async Task Restore_AsksForTheCurrentPasswordFirstAndRestoresTheFileChosenAfter()
@@ -234,6 +234,7 @@ namespace HostPinger.UITest
                 await Assertions.Expect(Button(Dialog, "Choose file…")).ToHaveCountAsync(0);
 
                 await GiveTheRestorePasswordAndChooseAsync(uploadPath);
+                await BackupPassword.FillAsync(WebApp.Password);
 
                 // This process holds the file open too: whatever the fixtures seeded through sits in
                 // its connection pool, still attached to the file the restore is about to retire,
@@ -308,6 +309,7 @@ namespace HostPinger.UITest
                 // Chosen and confirmed the same way, and for the same reasons, as the restore above.
                 await ClickUntilAsync(Button("Restore backup…"), Overlay);
                 await GiveTheRestorePasswordAndChooseAsync(uploadPath);
+                await BackupPassword.FillAsync(WebApp.Password);
                 SqliteConnection.ClearAllPools();
                 await WatchProgressAsync();
                 await Button("Confirm restore").ClickAsync();
@@ -390,6 +392,59 @@ namespace HostPinger.UITest
                 await Button(Dialog, "Cancel").ClickAsync();
                 await Assertions.Expect(Overlay).ToBeHiddenAsync();
                 await Assertions.Expect(Page.GetByText("Restored —")).ToHaveCountAsync(0);
+            }
+            finally
+            {
+                File.Delete(uploadPath);
+            }
+        }
+
+        /// <summary>
+        /// The confirmation asks for the backup's password as well, which the restore checks once
+        /// the upload has been: a wrong one brings the confirmation back, saying so above an empty
+        /// box, with the same file still chosen. Confirming again with the right one reads the file
+        /// from the browser a second time, which only works while the input still holds it, and
+        /// restores it.
+        /// </summary>
+        [Test]
+        public async Task Restore_AsksAgainForAWrongBackupPasswordWithTheFileStillChosen()
+        {
+            // A faithful copy, as above, since it is restored in the end; its password is the run's.
+            var uploadPath = Path.Combine(Path.GetTempPath(), $"hostpinger-ui-upload-{Guid.NewGuid():N}.db");
+            try
+            {
+                await using (var connection = new SqliteConnection(
+                    $"Data Source={UiTestRun.DatabasePath};Mode=ReadOnly;Pooling=False"))
+                {
+                    await connection.OpenAsync();
+                    await using var command = connection.CreateCommand();
+                    command.CommandText = "VACUUM INTO $path;";
+                    command.Parameters.AddWithValue("$path", uploadPath);
+                    await command.ExecuteNonQueryAsync();
+                }
+
+                await UnlockedConfigurationPageAsync();
+                await ClickUntilAsync(Button("Restore backup…"), Overlay);
+                await GiveTheRestorePasswordAndChooseAsync(uploadPath);
+                await Assertions.Expect(BackupPassword).ToBeFocusedAsync();
+
+                SqliteConnection.ClearAllPools();
+                await BackupPassword.FillAsync("not the backup's password");
+                await Button("Confirm restore").ClickAsync();
+
+                await Assertions.Expect(Dialog.GetByText("That is not the backup's password.")).ToBeVisibleAsync();
+                await Assertions.Expect(Dialog.Locator("code").First).ToHaveTextAsync(Path.GetFileName(uploadPath));
+                await Assertions.Expect(BackupPassword).ToHaveValueAsync(string.Empty);
+                await Assertions.Expect(BackupPassword).ToBeFocusedAsync();
+
+                await BackupPassword.FillAsync(WebApp.Password);
+                await Button("Confirm restore").ClickAsync();
+                await Assertions.Expect(Dialog.GetByText(
+                        "Restored — the backup's hosts, history, settings and password now apply."))
+                    .ToBeVisibleAsync();
+
+                await Button(Dialog.Locator(".modal-footer"), "Close").ClickAsync();
+                await Assertions.Expect(Overlay).ToBeHiddenAsync();
             }
             finally
             {
@@ -510,6 +565,9 @@ namespace HostPinger.UITest
 
         /// <summary>The password box in the overlay that confirms a download or a restore.</summary>
         private ILocator CurrentPassword => Page.Locator("#backup-current-password");
+
+        /// <summary>The box for the backup's own password, in the restore's confirmation.</summary>
+        private ILocator BackupPassword => Page.Locator("#backup-password");
 
         /// <summary>
         /// Gives the right password to the restore overlay, open on its first step, then chooses

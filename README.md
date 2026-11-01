@@ -170,25 +170,29 @@ and saved only when it is.
   first, in an overlay like the one that unlocks. The overlay shows how far the snapshot has got,
   and the download starts once it is written; Cancel or Escape stops it partway.
 - **Restore** — uploads a backup and, after a confirmation, replaces the current database with it.
-  Everything comes from the backup, including its password or the lack of one, so a restore can
-  lock the browser out — `--remove-password` is the recovery, as ever — or unlock the service. The
-  file is checked before anything is replaced: it must be an intact SQLite database with
-  HostPinger's schema and no triggers or views, which HostPinger never creates, and one from a
-  newer version is refused. A backup from an older version is migrated up where it lies, the way an
-  old database is at startup, while monitoring carries on; that needs room beside the database of
-  about half the backup's size, and a backup there is no room for is refused up front. One that
-  cannot be migrated, or lacks a table, is refused with nothing replaced, and one that fails to
-  open once it is in place is taken out again and the database it replaced put straight back.
-  Monitoring, and whatever the pages read or write, pauses only for the moment the swap takes. The
-  restored database is put in SQLite's WAL mode, where reading the history never holds up a ping
-  round's write. The database being replaced is kept beside the new one as
+  Everything comes from the backup, including its password or the lack of one, so the confirmation
+  asks for the backup's password, and a backup that has one is only restored with it: whoever
+  restores it can unlock afterwards, though the browser it was restored from may need unlocking
+  again. A backup that never stored a password leaves the one configured in `appsettings.json` or
+  the environment in force, if there is one, and asks for that instead; a backup without a password
+  unlocks the service. The file is checked before anything is replaced: it must be an intact SQLite
+  database with HostPinger's schema and no triggers or views, which HostPinger never creates, and
+  one from a newer version is refused. Then the password is checked, and a wrong one brings the
+  confirmation back with the file still chosen. A backup from an older version is migrated up where
+  it lies, the way an old database is at startup, while monitoring carries on; that needs room
+  beside the database of about half the backup's size, and a backup there is no room for is refused
+  up front. One that cannot be migrated, or lacks a table, is refused with nothing replaced, and one
+  that fails to open once it is in place is taken out again and the database it replaced put
+  straight back. Monitoring, and whatever the pages read or write, pauses only for the moment the
+  swap takes. The restored database is put in SQLite's WAL mode, where reading the history never
+  holds up a ping round's write. The database being replaced is kept beside the new one as
   `hostpinger.db.pre-restore`, one restore's worth of undo, complete in that one file. It is as
-  large as the database it was and stays until the next restore replaces it, outside the size
-  limit, so delete it by hand once it is no longer wanted. Unlock to use it; with a password set,
-  it asks for the current one first, in an overlay like the one that unlocks, before the file is
-  chosen. Once the restore is confirmed, the overlay shows how far the upload has got, then the
-  check and the swap as they happen, and then what came of it. One backup or restore runs at a
-  time: another asked for meanwhile, from any browser, is turned away with what is under way.
+  large as the database it was and stays until the next restore replaces it, outside the size limit,
+  so delete it by hand once it is no longer wanted. Unlock to use it; with a password set, it asks
+  for the current one first, in an overlay like the one that unlocks, before the file is chosen.
+  Once the restore is confirmed, the overlay shows how far the upload has got, then the check and
+  the swap as they happen, and then what came of it. One backup or restore runs at a time: another
+  asked for meanwhile, from any browser, is turned away with what is under way.
 - **Security** — whether a password is set, and the way to `/password` to set, change or remove
   one.
 
@@ -229,8 +233,10 @@ service, locked or not.
   password is turned away along with the wrong ones while a wait stands; getting it right once the
   wait is over clears the tally, as does leaving the password alone for an hour afterwards. The
   current password given to change or remove it, or for a backup or a restore, counts against the
-  same tally, so none of them is a way round it, and an empty box is never counted as a guess. Nothing is written to disk, so restarting the service forgets
-  every tally.
+  same tally, so none of them is a way round it, and an empty box is never counted as a guess. A
+  backup's own password, which a restore asks for as well, is not counted: it is checked against
+  the hash inside the uploaded file, which whoever has the file can try passwords against anyway.
+  Nothing is written to disk, so restarting the service forgets every tally.
 - **The overlay counts the wait down**, second by second, and holds its **Unlock** button back until
   it has run out — so a wait is something to watch rather than something to keep trying at. Closing
   the overlay and opening it again during one picks the countdown up where it is. The `/unlock` page
@@ -240,14 +246,15 @@ service, locked or not.
   monitoring. Behind a reverse proxy every visitor arrives from the same address, and there it is in
   practice one wait for the whole service. A whole IPv6 /64 counts as one address, since a single
   machine there usually has billions to guess from.
-- **Every attempt is logged.** A wrong password — on the unlock page, or as the current password
-  anywhere it is asked for — is a warning naming the address it came from, and unlocking, setting,
-  changing and removing it, downloading a backup and restoring one are recorded beside them, so a
-  run of failures can be read against whether any of them worked. A run long enough to earn a wait says so on its own line,
-  once per wait rather than once per attempt, so nobody can fill the journal by guessing. The
-  address is the one the connection was opened from, which behind a reverse proxy is the proxy: no
-  forwarded headers are trusted, because a tally kept against a header anyone can set is no tally
-  at all. Passwords themselves are never written to the log.
+- **Every attempt is logged.** A wrong password — on the unlock page, as the current password
+  anywhere it is asked for, or as a backup's on a restore — is a warning naming the address it came
+  from, and unlocking, setting, changing and removing it, downloading a backup and restoring one are
+  recorded beside them, so a run of failures can be read against whether any of them worked. A run
+  long enough to earn a wait says so on its own line, once per wait rather than once per attempt, so
+  nobody can fill the journal by guessing. The address is the one the connection was opened from,
+  which behind a reverse proxy is the proxy: no forwarded headers are trusted, because a tally kept
+  against a header anyone can set is no tally at all. Passwords themselves are never written to the
+  log.
 - **The password is stored hashed** — PBKDF2 over a random salt — in the database, and only ever
   compared against. There is nothing to read back out of it, which also means a forgotten one
   cannot be recovered — it can only be removed. Run the service's own executable with

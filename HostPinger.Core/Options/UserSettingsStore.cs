@@ -50,8 +50,7 @@ namespace HostPinger.Core.Options
         public async Task LoadAsync(CancellationToken cancellationToken = default)
         {
             await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
-            _rows = await db.UserSettings.AsNoTracking()
-                .ToDictionaryAsync(s => s.Key, s => s.Value, cancellationToken);
+            _rows = await ReadRowsAsync(db, cancellationToken);
         }
 
         /// <summary>The pinger settings in force: the configured values, under the stored rows.</summary>
@@ -78,10 +77,30 @@ namespace HostPinger.Core.Options
         /// meaning a removal, which has to keep overriding a hash configured in appsettings.json
         /// or the environment — and otherwise whatever configuration says.
         /// </summary>
-        public string? PasswordHash =>
-            _rows.TryGetValue(PasswordHashKey, out var stored)
-                ? stored
-                : securityDefaults.CurrentValue.PasswordHash;
+        public string? PasswordHash => PasswordHashUnder(_rows);
+
+        /// <summary>
+        /// The hash of the password that the settings stored in <paramref name="db"/> would put in
+        /// force, were that the database loaded: what <see cref="PasswordHash"/> would answer then.
+        /// For a restore, which asks it of a backup before putting the backup in place. A backup
+        /// made before the settings table existed stores nothing, and puts this install's
+        /// configured password in force.
+        /// </summary>
+        internal async Task<string?> PasswordHashInAsync(HostPingerDbContext db, CancellationToken cancellationToken = default)
+        {
+            await db.Database.OpenConnectionAsync(cancellationToken);
+            try
+            {
+                await using var command = db.Database.GetDbConnection().CreateCommand();
+                command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'UserSettings';";
+                var hasTable = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken)) > 0;
+                return PasswordHashUnder(hasTable ? await ReadRowsAsync(db, cancellationToken) : []);
+            }
+            finally
+            {
+                await db.Database.CloseConnectionAsync();
+            }
+        }
 
         public Task SaveAsync(PingerSettingsUpdate update, CancellationToken cancellationToken = default) =>
             UpdateAsync(changes =>
@@ -228,6 +247,19 @@ namespace HostPinger.Core.Options
                 _gate.Release();
             }
         }
+
+        /// <summary>The table's rows, as the snapshot holds them.</summary>
+        private static Task<Dictionary<string, string>> ReadRowsAsync(HostPingerDbContext db, CancellationToken cancellationToken) =>
+            db.UserSettings.AsNoTracking().ToDictionaryAsync(s => s.Key, s => s.Value, cancellationToken);
+
+        /// <summary>
+        /// The stored password row of <paramref name="rows"/> when there is one, and otherwise
+        /// whatever configuration says; see <see cref="PasswordHash"/>.
+        /// </summary>
+        private string? PasswordHashUnder(Dictionary<string, string> rows) =>
+            rows.TryGetValue(PasswordHashKey, out var stored)
+                ? stored
+                : securityDefaults.CurrentValue.PasswordHash;
 
         /// <summary>
         /// The stored value when there is a row and it parses. A row that does not parse falls

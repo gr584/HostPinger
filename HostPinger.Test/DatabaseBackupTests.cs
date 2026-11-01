@@ -20,6 +20,12 @@ namespace HostPinger.Test
 
         private static readonly TimeSpan Patience = TimeSpan.FromSeconds(30);
 
+        /// <summary>The password of the backups the uploads restore.</summary>
+        private const string BackupPassword = "the backup's password";
+
+        /// <summary>Its hash, made once for the run: each one is a tenth of a second of hashing.</summary>
+        private static readonly string BackupHash = PasswordHash.Hash(BackupPassword);
+
         private string _directory = null!;
         private string _dbPath = null!;
         private DatabaseFileGate _fileGate = null!;
@@ -1168,17 +1174,17 @@ namespace HostPinger.Test
         public async Task RestoreUpload_ReceivesChecksAndRestoresTheFileSayingWhichStepItIsOn()
         {
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
-            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", "backup-hash")));
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)));
             var reports = new List<RestoreProgress>();
 
-            var refusal = await _backup.RestoreUploadAsync(upload, upload.Size, new Recorder<RestoreProgress>(reports.Add));
+            var refusal = await _backup.RestoreUploadAsync(upload, upload.Size, BackupPassword, new Recorder<RestoreProgress>(reports.Add));
 
             var received = reports.Where(r => r.Step == RestoreStep.Receiving).Select(r => r.Fraction).ToList();
             Assert.Multiple(async () =>
             {
                 Assert.That(refusal, Is.Null);
                 Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example" }));
-                Assert.That(_store.PasswordHash, Is.EqualTo("backup-hash"));
+                Assert.That(_store.PasswordHash, Is.EqualTo(BackupHash));
                 Assert.That(reports.Select(r => r.Step).Distinct(), Is.EqualTo(new[]
                 {
                     RestoreStep.Receiving, RestoreStep.Checking, RestoreStep.Replacing,
@@ -1198,11 +1204,11 @@ namespace HostPinger.Test
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
             var upload = new UploadStream(Enumerable.Repeat((byte)0x2A, 100_000).ToArray());
 
-            var refusal = await _backup.RestoreUploadAsync(upload, upload.Size);
+            var refusal = await _backup.RestoreUploadAsync(upload, upload.Size, BackupPassword);
 
             Assert.Multiple(async () =>
             {
-                Assert.That(refusal, Is.EqualTo("This file is not an SQLite database."));
+                Assert.That(refusal, Is.EqualTo(new RestoreRefusal("This file is not an SQLite database.")));
                 Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }));
                 Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-restore-*"), Is.Empty);
             });
@@ -1217,17 +1223,17 @@ namespace HostPinger.Test
         public async Task RestoreUpload_RefusesWithoutRoomForTheFileBeforeReadingAnyOfIt()
         {
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
-            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", "backup-hash")));
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)));
             var cramped = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries)
             {
                 MeasureFreeBytes = () => 3L << 20,
             };
 
-            var refusal = await cramped.RestoreUploadAsync(upload, upload.Size);
+            var refusal = await cramped.RestoreUploadAsync(upload, upload.Size, BackupPassword);
 
             Assert.Multiple(async () =>
             {
-                Assert.That(refusal, Is.EqualTo(
+                Assert.That(refusal?.Message, Is.EqualTo(
                     "Receiving the backup needs about 64 MB free beside the database. The disk has 3 MB."));
                 Assert.That(upload.Position, Is.Zero, "nothing of the upload was read");
                 Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }));
@@ -1244,9 +1250,9 @@ namespace HostPinger.Test
         public async Task RestoreUpload_DeletesWhatItReceivedWhenTheUploadFails()
         {
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
-            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", "backup-hash")), fail: true);
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)), fail: true);
 
-            var failure = await Assert.ThrowsAsync<IOException>(() => _backup.RestoreUploadAsync(upload, upload.Size));
+            var failure = await Assert.ThrowsAsync<IOException>(() => _backup.RestoreUploadAsync(upload, upload.Size, BackupPassword));
 
             Assert.Multiple(async () =>
             {
@@ -1266,15 +1272,127 @@ namespace HostPinger.Test
         public async Task RestoreUpload_RefusesMoreThanTheLengthItWasGiven()
         {
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
-            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", "backup-hash")));
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)));
 
-            var failure = await Assert.ThrowsAsync<IOException>(() => _backup.RestoreUploadAsync(upload, 50_000));
+            var failure = await Assert.ThrowsAsync<IOException>(() => _backup.RestoreUploadAsync(upload, 50_000, BackupPassword));
 
             Assert.Multiple(async () =>
             {
                 Assert.That(failure!.Message, Is.EqualTo("More arrived than the 50,000 bytes the file was said to hold."));
                 Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }));
                 Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-restore-*"), Is.Empty);
+            });
+        }
+
+        /// <summary>
+        /// A backup that puts a password in force is only restored with that password, so that
+        /// whoever restores it can unlock HostPinger afterwards. None given, or the wrong one, is
+        /// refused as a password, the refusal the page asks again after, with nothing replaced and
+        /// nothing of the upload kept.
+        /// </summary>
+        [TestCase(null, "The backup has a password. Enter it to restore the backup.")]
+        [TestCase("", "The backup has a password. Enter it to restore the backup.")]
+        [TestCase("not the backup's password", "That is not the backup's password.")]
+        public async Task RestoreUpload_RefusesAPasswordMissingOrWrongAndReplacesNothing(string? password, string expected)
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            await StagePasswordAsync(_options, "current-hash");
+            await _store.LoadAsync();
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)));
+
+            var refusal = await _backup.RestoreUploadAsync(upload, upload.Size, password);
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(refusal, Is.EqualTo(new RestoreRefusal(expected, IsPassword: true)));
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }));
+                Assert.That(_store.PasswordHash, Is.EqualTo("current-hash"), "the settings in force are the current database's");
+                Assert.That(File.Exists(_backup.PreRestorePath), Is.False, "nothing was retired");
+                Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-restore-*"), Is.Empty);
+            });
+        }
+
+        /// <summary>
+        /// A backup whose password was removed puts none in force, even on an install that
+        /// configures one, since the removal is a stored row and a stored row wins. So it is
+        /// restored without a password, whatever is typed, and leaves nothing locked.
+        /// </summary>
+        [TestCase(null)]
+        [TestCase("whatever is typed")]
+        public async Task RestoreUpload_NeedsNoPasswordForABackupWhosePasswordWasRemoved(string? password)
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var (store, backup) = ConfiguredWith(PasswordHash.Hash("configured"));
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", string.Empty)));
+
+            var refusal = await backup.RestoreUploadAsync(upload, upload.Size, password);
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(refusal, Is.Null);
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example" }));
+                Assert.That(store.PasswordHash, Is.Empty, "no password in force");
+            });
+        }
+
+        /// <summary>
+        /// A backup with no password row puts this install's configured password in force once its
+        /// settings load, so that is the password it takes — not the one the backup never had.
+        /// </summary>
+        [Test]
+        public async Task RestoreUpload_TakesTheConfiguredPasswordForABackupStoringNone()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var configured = PasswordHash.Hash("configured");
+            var (store, backup) = ConfiguredWith(configured);
+            var bytes = await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", hash: null));
+
+            var wrong = await backup.RestoreUploadAsync(new UploadStream(bytes), bytes.Length, BackupPassword);
+            var right = await backup.RestoreUploadAsync(new UploadStream(bytes), bytes.Length, "configured");
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(wrong, Is.EqualTo(new RestoreRefusal("That is not the backup's password.", IsPassword: true)));
+                Assert.That(right, Is.Null);
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example" }));
+                Assert.That(store.PasswordHash, Is.EqualTo(configured));
+            });
+        }
+
+        /// <summary>
+        /// A backup older than the settings table has none to read a password from, which is not a
+        /// failure: like any backup storing no password, it puts this install's configured one in
+        /// force, and takes that. The table only comes with the migrations, after the password is
+        /// checked.
+        /// </summary>
+        [Test]
+        public async Task RestoreUpload_TakesTheConfiguredPasswordForABackupOlderThanTheSettingsTable()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var backupPath = Path.Combine(_directory, "uploaded.db");
+            await using (var db = new HostPingerDbContext(OptionsFor(backupPath)))
+            {
+                await db.GetService<IMigrator>().MigrateAsync("20260811051236_AddResolverErrors");
+            }
+
+            await SeedHostWithAttemptsAsync(OptionsFor(backupPath), "older.example", attempts: 1);
+            SqliteConnection.ClearAllPools();
+            Assert.That(await ScalarAsync(backupPath, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'UserSettings';"), Is.Zero,
+                "the backup is older than the settings table");
+
+            var configured = PasswordHash.Hash("configured");
+            var (store, backup) = ConfiguredWith(configured);
+            var bytes = await File.ReadAllBytesAsync(backupPath);
+
+            var none = await backup.RestoreUploadAsync(new UploadStream(bytes), bytes.Length, password: null);
+            var right = await backup.RestoreUploadAsync(new UploadStream(bytes), bytes.Length, "configured");
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(none, Is.EqualTo(new RestoreRefusal("The backup has a password. Enter it to restore the backup.", IsPassword: true)));
+                Assert.That(right, Is.Null);
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "older.example" }));
+                Assert.That(store.PasswordHash, Is.EqualTo(configured));
             });
         }
 
@@ -1289,14 +1407,14 @@ namespace HostPinger.Test
         public async Task WhileARestoreIsUnderWay_AnotherIsTurnedAway(string asked)
         {
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
-            var first = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("first.example", "first-hash")), hold: true);
+            var first = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("first.example", BackupHash)), hold: true);
             var second = new UploadStream(
-                await File.ReadAllBytesAsync(await BackupWithAsync("second.example", "second-hash", "second.db")));
-            var restoring = _backup.RestoreUploadAsync(first, first.Size);
+                await File.ReadAllBytesAsync(await BackupWithAsync("second.example", BackupHash, "second.db")));
+            var restoring = _backup.RestoreUploadAsync(first, first.Size, BackupPassword);
             await first.Held.Task.WaitAsync(Patience);
 
             var refusal = asked == "restore"
-                ? await _backup.RestoreUploadAsync(second, second.Size)
+                ? (await _backup.RestoreUploadAsync(second, second.Size, BackupPassword))?.Message
                 : (await Assert.ThrowsAsync<IOException>(() => _backup.CreateSnapshotAsync()))!.Message;
             first.Release();
 
@@ -1323,7 +1441,7 @@ namespace HostPinger.Test
         public async Task WhileABackupIsBeingWritten_AnotherIsTurnedAway(string asked)
         {
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
-            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", "backup-hash")));
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)));
             using var held = new ManualResetEventSlim();
             var reporting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var writing = _backup.CreateSnapshotAsync(new Recorder<double>(fraction =>
@@ -1337,7 +1455,7 @@ namespace HostPinger.Test
             await reporting.Task.WaitAsync(Patience);
 
             var refusal = asked == "restore"
-                ? await _backup.RestoreUploadAsync(upload, upload.Size)
+                ? (await _backup.RestoreUploadAsync(upload, upload.Size, BackupPassword))?.Message
                 : (await Assert.ThrowsAsync<IOException>(() => _backup.CreateSnapshotAsync()))!.Message;
             held.Set();
             var snapshot = await writing.WaitAsync(Patience);
@@ -1405,6 +1523,19 @@ namespace HostPinger.Test
                 SnapshotProgressInterval = interval,
             };
 
+        /// <summary>
+        /// A restore onto an install that configures <paramref name="configured"/> as its password,
+        /// in appsettings.json or the environment, with the store that holds the settings it loads.
+        /// </summary>
+        private (UserSettingsStore Store, DatabaseBackup Backup) ConfiguredWith(string? configured)
+        {
+            var store = new UserSettingsStore(
+                new TestDb.Factory(_options),
+                new TestOptionsMonitor<PingerOptions>(new PingerOptions()),
+                new TestOptionsMonitor<SecurityOptions>(new SecurityOptions { PasswordHash = configured }));
+            return (store, new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), store, new MaintenanceGate(), _fileGate, _summaries));
+        }
+
         /// <summary>A restore whose backup goes into place and then fails to open, for the put-back.</summary>
         private DatabaseBackup FailingToOpen() =>
             new(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries)
@@ -1412,8 +1543,11 @@ namespace HostPinger.Test
                 AfterSwap = () => throw new InvalidDataException("Opening it failed in the test."),
             };
 
-        /// <summary>A current backup holding one host and a password, as an upload would be.</summary>
-        private async Task<string> BackupWithAsync(string address, string hash, string fileName = "uploaded.db")
+        /// <summary>
+        /// A current backup holding one host and a password, as an upload would be; with a
+        /// <paramref name="hash"/> of null, no password row at all.
+        /// </summary>
+        private async Task<string> BackupWithAsync(string address, string? hash, string fileName = "uploaded.db")
         {
             var backupPath = Path.Combine(_directory, fileName);
             var backupOptions = OptionsFor(backupPath);
@@ -1423,7 +1557,11 @@ namespace HostPinger.Test
             }
 
             await SeedHostWithAttemptsAsync(backupOptions, address, attempts: 3);
-            await StagePasswordAsync(backupOptions, hash);
+            if (hash is not null)
+            {
+                await StagePasswordAsync(backupOptions, hash);
+            }
+
             SqliteConnection.ClearAllPools();
             return backupPath;
         }

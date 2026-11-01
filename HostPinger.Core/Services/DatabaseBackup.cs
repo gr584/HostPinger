@@ -51,6 +51,10 @@ namespace HostPinger.Core.Services
 
         private const string RestoreUnderWay = "A restore is under way";
 
+        private const string PasswordNeeded = "The backup has a password. Enter it to restore the backup.";
+
+        private const string PasswordWrong = "That is not the backup's password.";
+
         private readonly object _turnLock = new();
 
         // Which of the two holds the turn they share, to tell whichever asks next; null while
@@ -454,6 +458,10 @@ namespace HostPinger.Core.Services
         /// Runs on the thread pool, for the reason <see cref="ValidateBackupAsync"/> gives: an old
         /// backup's migration would otherwise hold the page asking for minutes.
         /// </para>
+        /// <para>
+        /// Checks no password. <see cref="RestoreUploadAsync"/>, which is how a page restores, checks
+        /// the backup's before it goes on to what this does.
+        /// </para>
         /// </summary>
         internal Task RestoreAsync(string candidatePath, CancellationToken cancellationToken = default) =>
             Task.Run(
@@ -478,15 +486,21 @@ namespace HostPinger.Core.Services
         /// <summary>
         /// Restores the backup <paramref name="source"/> delivers, <paramref name="length"/> bytes of
         /// it: receives it beside the database, checks it as <see cref="ValidateBackupAsync"/> does,
-        /// and puts it in place as <see cref="RestoreAsync"/> does, all in the one turn, so that
-        /// nothing else of this class writes beside the database from the room check to the swap.
-        /// <paramref name="progress"/> hears which of the three is under way, and how much of the
-        /// upload has arrived while it arrives.
+        /// checks <paramref name="password"/> against the password it puts in force, and puts it in
+        /// place as <see cref="RestoreAsync"/> does, all in the one turn, so that nothing else of
+        /// this class writes beside the database from the room check to the swap.
+        /// <paramref name="progress"/> hears which part is under way, and how much of the upload has
+        /// arrived while it arrives.
         /// </summary>
+        /// <param name="password">
+        /// The backup's password, as whoever restores it gives it. A backup that puts a password in
+        /// force is only restored with that password, so whoever restores it can unlock HostPinger
+        /// afterwards. Not looked at for a backup that puts none in force.
+        /// </param>
         /// <returns>
-        /// Null once the backup is in force. Otherwise the sentence to show whoever sent it, which
-        /// means nothing was replaced: a snapshot or another restore under way, too little room
-        /// beside the database for the file, or a refusal of the file itself.
+        /// Null once the backup is in force. Otherwise why nothing was replaced: a snapshot or
+        /// another restore under way, too little room beside the database for the file, a refusal
+        /// of the file itself, or a password missing or wrong.
         /// </returns>
         /// <remarks>
         /// Every failure is an <see cref="IOException"/>, as <see cref="RestoreAsync"/>'s are,
@@ -494,22 +508,23 @@ namespace HostPinger.Core.Services
         /// page, the browser failing to read the file it chose. However it ends, the file received
         /// does not outlive this call.
         /// </remarks>
-        public async Task<string?> RestoreUploadAsync(
+        public async Task<RestoreRefusal?> RestoreUploadAsync(
             Stream source,
             long length,
+            string? password,
             IProgress<RestoreProgress>? progress = null,
             CancellationToken cancellationToken = default)
         {
             if (!TryTakeTurn(RestoreUnderWay, out var refusal))
             {
-                return refusal;
+                return new RestoreRefusal(refusal);
             }
 
             try
             {
                 if (RoomRefusal(length, "Receiving the backup") is { } noRoom)
                 {
-                    return noRoom;
+                    return new RestoreRefusal(noRoom);
                 }
 
                 var candidatePath = CreateRestoreTempPath();
@@ -521,7 +536,14 @@ namespace HostPinger.Core.Services
                     progress?.Report(new RestoreProgress(RestoreStep.Checking, null));
                     if (await ValidateBackupAsync(candidatePath, cancellationToken) is { } invalid)
                     {
-                        return invalid;
+                        return new RestoreRefusal(invalid);
+                    }
+
+                    // After the file's own checks, so that a password is only asked again for a
+                    // file that can be restored once it is given.
+                    if (await PasswordRefusalAsync(candidatePath, password, cancellationToken) is { } wrongPassword)
+                    {
+                        return wrongPassword;
                     }
 
                     progress?.Report(new RestoreProgress(RestoreStep.Replacing, null));
@@ -531,8 +553,10 @@ namespace HostPinger.Core.Services
                 finally
                 {
                     // The swap consumes the file; this catches every earlier exit — an upload that
-                    // failed, a file refused, a restore that replaced nothing.
-                    File.Delete(candidatePath);
+                    // failed, a file refused, a restore that replaced nothing — and what SQLite
+                    // left beside it. A backup copied off a live database is in WAL mode, and the
+                    // read-only connections that check one leave a -wal and -shm behind them.
+                    DeleteTempFile(candidatePath);
                 }
             }
             finally
@@ -540,6 +564,76 @@ namespace HostPinger.Core.Services
                 ReleaseTurn();
             }
         }
+
+        /// <summary>
+        /// Null when the backup at <paramref name="candidatePath"/> puts no password in force, or
+        /// when <paramref name="password"/> is the one it does; otherwise the refusal that says the
+        /// password was missing or wrong.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// What the backup puts in force is read the way its settings will be loaded once it is in
+        /// place: its own password row, an empty one meaning none, and without one this install's
+        /// configured password. Read before the backup is migrated, so that a mistyped password
+        /// does not cost an old backup's migration first, which takes minutes on a
+        /// production-sized file. The migrations create the settings table in a backup older than
+        /// it and otherwise leave its rows as they are, so the password read here is the one the
+        /// restore puts in force.
+        /// </para>
+        /// <para>
+        /// A wrong password is not counted against the address it came from, as a guess at the
+        /// current password is: the hash it is checked against is the uploaded file's own, which
+        /// whoever holds the file can try passwords against without asking HostPinger. A backup
+        /// without a password row is checked against this install's configured password instead,
+        /// which is either the one in force, which the page asks for before a restore, or one a
+        /// stored row has overridden.
+        /// </para>
+        /// <para>
+        /// On the thread pool, for the reason <see cref="ValidateBackupAsync"/> gives, and because
+        /// checking a password is a tenth of a second of hashing, or up to a second for a hash
+        /// that a backup brings with a higher cost.
+        /// </para>
+        /// </remarks>
+        private Task<RestoreRefusal?> PasswordRefusalAsync(string candidatePath, string? password, CancellationToken cancellationToken) =>
+            Task.Run<RestoreRefusal?>(
+                async () =>
+                {
+                    string? hash;
+                    try
+                    {
+                        // Read-only and out of the pool, as validation's connection is, so that
+                        // nothing holds the candidate open across the swap.
+                        var options = new DbContextOptionsBuilder<HostPingerDbContext>()
+                            .UseSqlite(new SqliteConnectionStringBuilder
+                            {
+                                DataSource = candidatePath,
+                                Mode = SqliteOpenMode.ReadOnly,
+                                Pooling = false,
+                            }.ToString())
+                            .Options;
+                        await using var db = new HostPingerDbContext(options);
+                        hash = await settings.PasswordHashInAsync(db, cancellationToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        // A settings table that cannot be read the way the restore would load it,
+                        // which the restore would only have failed on later.
+                        throw new IOException($"{ex.Message} Nothing was replaced.", ex);
+                    }
+
+                    if (string.IsNullOrEmpty(hash))
+                    {
+                        return null;
+                    }
+
+                    if (string.IsNullOrEmpty(password))
+                    {
+                        return new RestoreRefusal(PasswordNeeded, IsPassword: true);
+                    }
+
+                    return PasswordHash.Verify(hash, password) ? null : new RestoreRefusal(PasswordWrong, IsPassword: true);
+                },
+                cancellationToken);
 
         /// <summary>
         /// Writes what <paramref name="source"/> delivers to <paramref name="path"/>, telling
@@ -990,6 +1084,15 @@ namespace HostPinger.Core.Services
             return await command.ExecuteScalarAsync(cancellationToken);
         }
 
+        /// <summary>Deletes a temp file and whatever SQLite keeps beside it.</summary>
+        private static void DeleteTempFile(string path)
+        {
+            foreach (var suffix in TempFileSuffixes)
+            {
+                File.Delete(path + suffix);
+            }
+        }
+
         private string TempPath(string prefix) => Path.Combine(
             Path.GetDirectoryName(paths.DatabasePath)!,
             $"{prefix}{Guid.NewGuid():N}{TempExtension}");
@@ -1001,7 +1104,10 @@ namespace HostPinger.Core.Services
         /// <summary>The upload arriving, and being written beside the database.</summary>
         Receiving,
 
-        /// <summary>The file received being checked, as <see cref="DatabaseBackup.ValidateBackupAsync"/> checks it.</summary>
+        /// <summary>
+        /// The file received being checked, as <see cref="DatabaseBackup.ValidateBackupAsync"/> checks
+        /// it, and the password given checked against the one it puts in force.
+        /// </summary>
         Checking,
 
         /// <summary>The file being migrated if it needs it, and swapped in.</summary>
@@ -1015,4 +1121,13 @@ namespace HostPinger.Core.Services
     /// measure of.
     /// </param>
     public readonly record struct RestoreProgress(RestoreStep Step, double? Fraction);
+
+    /// <summary>Why a restore from an upload replaced nothing.</summary>
+    /// <param name="Message">The sentence to show whoever sent the upload.</param>
+    /// <param name="IsPassword">
+    /// Whether it was the backup's password that was missing or wrong: the one refusal that the same
+    /// file gets past, given the right password, where every other takes another file or another
+    /// moment.
+    /// </param>
+    public sealed record RestoreRefusal(string Message, bool IsPassword = false);
 }

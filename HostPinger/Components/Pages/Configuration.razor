@@ -312,13 +312,21 @@
                                 </div>
                                 break;
                             default:
-                                <p class="text-danger mb-0">
+                                <p class="text-danger">
                                     Restore <code>@_restoreFile?.Name</code>? It replaces everything —
-                                    hosts, history and settings, and the backup's password (or lack of
-                                    one) will apply, which can lock this browser out or unlock the
-                                    application. The current database is kept as
-                                    <code>@Path.GetFileName(Backup.PreRestorePath)</code>.
+                                    hosts, history, settings and the password. The current database is
+                                    kept as <code>@Path.GetFileName(Backup.PreRestorePath)</code>.
                                 </p>
+                                <p class="mb-2">
+                                    The backup's password is the one to unlock with once it is
+                                    restored, and this browser may need unlocking with it again. Enter
+                                    it here: nothing is replaced unless it is right. Leave it empty if
+                                    the backup has none, which leaves nothing locked.
+                                </p>
+                                <label class="form-label" for="backup-password">The backup's password</label>
+                                <input id="backup-password" type="password" class="form-control form-control-sm"
+                                       autocomplete="current-password"
+                                       @bind="_backupPassword" @bind:event="oninput" @ref="_backupPasswordInput" />
                                 break;
                         }
                         @if (AsksPassword)
@@ -442,6 +450,11 @@
     // a password is held here no longer than it takes to check it.
     private string _password = string.Empty;
 
+    // What is typed as the backup's password in the restore's confirmation, emptied the same way
+    // once the restore has it.
+    private string _backupPassword = string.Empty;
+    private ElementReference _backupPasswordInput;
+
     // When the wait a run of wrong passwords has earned runs out, and null while none stands. Kept
     // across closing and reopening the overlay, as the unlock overlay keeps its own.
     private DateTimeOffset? _waitUntil;
@@ -480,7 +493,7 @@
         if (_focusDialog && _confirming != Confirming.Nothing)
         {
             _focusDialog = false;
-            await (AsksPassword ? _passwordInput : _dialog).FocusAsync();
+            await (AsksPassword ? _passwordInput : AsksBackupPassword ? _backupPasswordInput : _dialog).FocusAsync();
         }
 
         // Started from a render that has happened in a browser, as the unlock overlay starts its
@@ -883,6 +896,7 @@
     {
         _confirming = what;
         _password = string.Empty;
+        _backupPassword = string.Empty;
         _dialogError = null;
         _pressedInsideDialog = false;
         _focusDialog = true;
@@ -898,6 +912,7 @@
     {
         _confirming = Confirming.Nothing;
         _password = string.Empty;
+        _backupPassword = string.Empty;
         _dialogError = null;
     }
 
@@ -928,6 +943,9 @@
 
     /// <summary>Whether the step on screen asks for the current password.</summary>
     private bool AsksPassword => _confirming is Confirming.Download or Confirming.RestorePassword;
+
+    /// <summary>Whether the step on screen asks for the backup's password: the confirmation, until it is confirmed.</summary>
+    private bool AsksBackupPassword => _confirming == Confirming.Restore && !_isRestoring;
 
     private bool IsDownloading => _confirming is Confirming.Download or Confirming.Preparing;
 
@@ -1080,16 +1098,22 @@
             return;
         }
 
+        // Emptied as it is read, as the current password is.
+        var backupPassword = _backupPassword;
+        _backupPassword = string.Empty;
+
         _isRestoring = true;
         ShowStep("Uploading the backup…", 0);
-        string? refusal;
+        RestoreRefusal? refusal = null;
         try
         {
-            // The backup receives the file beside the database, checks it and puts it in place,
-            // saying which it is on; a backup or restore already under way, or a disk without
-            // room for the file, comes back as a refusal before any of it is read.
+            // The backup receives the file beside the database, checks it and the password given
+            // for it, and puts it in place, saying which it is on; a backup or restore already
+            // under way, or a disk without room for the file, comes back as a refusal before any
+            // of it is read.
             await using var source = file.OpenReadStream(MaxRestoreUploadBytes, _cts.Token);
-            refusal = await Backup.RestoreUploadAsync(source, file.Size, new Progress<RestoreProgress>(ShowRestoreStep), _cts.Token);
+            refusal = await Backup.RestoreUploadAsync(
+                source, file.Size, backupPassword, new Progress<RestoreProgress>(ShowRestoreStep), _cts.Token);
         }
         catch (Exception ex) when (ex is IOException or Microsoft.JSInterop.JSException)
         {
@@ -1102,14 +1126,34 @@
         finally
         {
             // The overlay stays up, saying it is restoring, until here, and then says what came
-            // of it.
+            // of it. The file stays chosen only for a password missing or wrong, the one refusal
+            // the same file gets past.
             _isRestoring = false;
-            CancelRestore();
+            if (refusal?.IsPassword != true)
+            {
+                CancelRestore();
+            }
+        }
+
+        if (refusal is { IsPassword: true })
+        {
+            // Back to the confirmation, saying what was wrong above the box for the password.
+            // Nothing of the upload was kept, so confirming again sends the file again.
+            if (backupPassword.Length > 0)
+            {
+                Logger.LogWarning(
+                    "Failed restore from {Address}: the backup's password was wrong.",
+                    RequestOrigin.Describe(Origin));
+            }
+
+            OpenDialog(Confirming.Restore);
+            _dialogError = refusal.Message;
+            return;
         }
 
         if (refusal is not null)
         {
-            ShowRestoreResult(refusal, isRefused: true);
+            ShowRestoreResult(refusal.Message, isRefused: true);
             return;
         }
 
