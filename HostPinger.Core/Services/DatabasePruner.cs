@@ -91,6 +91,9 @@ namespace HostPinger.Core.Services
             TimeSpan budget,
             CancellationToken cancellationToken = default)
         {
+            // No limit in force is zero or less once the service has started (see
+            // DatabaseSizeLimit.SettleAsync). One that somehow were would delete nothing, rather
+            // than everything.
             if (maxSizeBytes <= 0)
             {
                 return 0;

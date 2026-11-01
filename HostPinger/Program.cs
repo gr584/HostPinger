@@ -114,6 +114,10 @@ namespace HostPinger
             builder.Services.AddSingleton<DatabaseBackup>();
             builder.Services.AddSingleton<BackupDownloadTokens>();
 
+            // What the size limit may be on the disk the database is on, which a backup's copy
+            // needs half of.
+            builder.Services.AddSingleton<DatabaseSizeLimit>();
+
             // Migrations, then the settings, then the host summary, then the temp-file sweep, before
             // the web server or any ping round starts; see DatabaseStartup for why it is a hosted
             // service rather than a step ahead of the host.

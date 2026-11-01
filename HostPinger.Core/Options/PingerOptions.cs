@@ -35,7 +35,9 @@ namespace HostPinger.Core.Options
 
         /// <summary>
         /// Maximum database file size. The oldest ping attempts are pruned when the file grows
-        /// beyond this; zero or negative disables pruning.
+        /// beyond this. <see cref="Services.DatabaseSizeLimit"/> holds what is saved to half of the
+        /// room the database has on its disk, and replaces zero or less, which used to turn pruning
+        /// off, as the service starts.
         /// </summary>
         public int MaxDatabaseSizeMb { get; set; } = 1024;
 

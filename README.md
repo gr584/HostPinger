@@ -129,9 +129,8 @@ the log.
   listed, with a dash in each of them.
 - **Kept for 30 days** — failures older than that are deleted on the next ping round, so the
   widest column is the whole of what is stored and an address stops being listed once its last
-  failure has aged out. This happens whatever the maximum database size is set to, including the
-  0 that turns size pruning off: it is about there being nothing left to read rather than about
-  disk space.
+  failure has aged out. This happens whatever the maximum database size is set to: it is about
+  there being nothing left to read rather than about disk space.
 - **The address rather than the host** — the rows belong to the address that was looked up, so
   they survive a host being re-pointed or deleted. The host's name is shown beside it for as long
   as one still carries that address.
@@ -158,10 +157,17 @@ and saved only when it is.
   changes what is reported rather than what is recorded — every attempt is stored either way, and
   changing it re-reads the whole history rather than only applying from here on.
 - **Maximum database size** — the oldest recorded history is pruned once the file grows past this.
-  Default 1024 MB; 0 disables pruning and lets the file grow without bound, apart from the resolver
-  errors, which are dropped at 30 days either way. A limit lowered below the file is worked down a
-  slice a round, each round pruning for at most a quarter of the interval, so monitoring carries on
-  meanwhile; on the benchmarks' database that comes to about 2.5 MB a second of pruning.
+  Default 1024 MB. It can be at most half of what the database's files and the free space on their
+  disk come to, less 64 MB, so that a backup's copy, which is written beside the database, always
+  fits: the page shows that figure under the box and refuses a larger one. Half of the database's
+  own room rather than of the disk, since the disk is usually shared with the operating system and
+  everything else. If something else fills the disk later, the page says the limit in force is more
+  than is safe, and that is all: pruning to make room would hand the history's space to whatever is
+  filling the disk. 0, which used to turn pruning off, is refused, and a 0 already set is replaced
+  at the next start by the safe limit, or by the database's own size where that is more, so the
+  upgrade itself deletes nothing. A limit lowered below the file is worked down a slice a round,
+  each round pruning for at most a quarter of the interval, so monitoring carries on meanwhile; on
+  the benchmarks' database that comes to about 2.5 MB a second of pruning.
 - **Capacity estimate** — the current file size, how fast it is growing at the present host count
   and interval, and roughly how much history fits inside the limit at that rate.
 - **Backup** — downloads a snapshot of the whole database: hosts, history, settings and the hashed

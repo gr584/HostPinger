@@ -14,6 +14,7 @@
 @inject IHttpContextAccessor HttpContextAccessor
 @inject LockPrompt Prompt
 @inject DatabaseBackup Backup
+@inject DatabaseSizeLimit SizeLimit
 @inject BackupDownloadTokens Tokens
 @inject IJSRuntime JS
 @inject ILogger<Configuration> Logger
@@ -58,8 +59,22 @@
                     <ValidationMessage For="() => _databaseForm.MaxDatabaseSizeMb" />
                     <div class="form-text">
                         The oldest ping attempts and resolver errors are pruned once the file grows
-                        past this. 0 disables pruning, though resolver errors are still dropped
-                        once they are 30 days old.
+                        past this.
+                        @if (_safeLimitMb is { } safe)
+                        {
+                            <span class="safe-limit">
+                                At most @safe.ToString("N0") MB is safe on this disk: half of what the
+                                database's files and the free space beside them come to, so that a
+                                backup's copy always fits.
+                            </span>
+                            @if (_effectiveMaxDatabaseSizeMb > safe)
+                            {
+                                <span class="config-refused">
+                                    The limit in force is more than that. Lower it, or free space on
+                                    the disk.
+                                </span>
+                            }
+                        }
                         @if (_databaseStatus is not null)
                         {
                             <span class="@StatusClass(_isDatabaseSaveRefused)">@_databaseStatus</span>
@@ -403,6 +418,9 @@
     private readonly CancellationTokenSource _cts = new();
 
     private DatabaseStats? _stats;
+
+    // The most the size limit may be on this disk, read with the stats; null until it has been.
+    private int? _safeLimitMb;
     private string? _databaseStatus;
     private string? _pingerStatus;
 
@@ -588,17 +606,21 @@
             MaxDatabaseSizeMb = _effectiveMaxDatabaseSizeMb,
         };
 
-        var stats = await _reads.ReadAsync(
-            cancellationToken => Reads.ReadStatsAsync(options, cancellationToken),
+        // The safe limit with the stats, so the two on screen are of the same moment. It asks
+        // the file system how much is free, which on a network mount can take a while, so it is
+        // off the circuit too.
+        var read = await _reads.ReadAsync(
+            async cancellationToken => new DatabaseRead(
+                await Reads.ReadStatsAsync(options, cancellationToken), SizeLimit.SafeLimitMb()),
             _cts.Token);
 
         // Overtaken by a read sent after it, which has already put something newer on screen.
-        if (stats is null)
+        if (read is null)
         {
             return;
         }
 
-        _stats = stats;
+        (_stats, _safeLimitMb) = (read.Stats, read.SafeLimitMb);
     }
 
     private async Task SaveDatabaseAsync()
@@ -611,9 +633,14 @@
             return;
         }
 
-        await SettingsStore.SaveAsync(
-            new PingerSettingsUpdate { MaxDatabaseSizeMb = _databaseForm.MaxDatabaseSizeMb },
-            _cts.Token);
+        // Through the size limit rather than the store, which holds it to what the disk can
+        // safely take, measured now rather than at the last refresh.
+        if (await SizeLimit.SaveAsync(_databaseForm.MaxDatabaseSizeMb, _cts.Token) is { } refusal)
+        {
+            _databaseStatus = refusal;
+            _isDatabaseSaveRefused = true;
+            return;
+        }
 
         // The save is in force the moment it returns, so re-reading the store is all it takes
         // for the projections below to use it.
@@ -1200,14 +1227,12 @@
                 return "—";
             }
 
-            if (stats.MaxSizeBytes <= 0)
-            {
-                return "Unlimited — pruning is disabled.";
-            }
-
+            // Naming the limit says which one the projection is against: the one in force, which
+            // a projection against the defaults instead would not show.
+            var limit = FormatBytes(stats.MaxSizeBytes);
             return stats.CapacityDays is double days
-                ? $"~{FormatDays(days)} of history at the current rate of growth"
-                : "Not enough data to estimate yet.";
+                ? $"~{FormatDays(days)} of history in {limit} at the current rate of growth"
+                : $"Not enough data yet to say how long {limit} will last.";
         }
     }
 
@@ -1263,9 +1288,12 @@
 
     private sealed class DatabaseForm
     {
-        [Range(0, SizeUpperBoundMb, ErrorMessage = "Enter a size between 0 and 1,000,000 MB.")]
+        [Range(1, SizeUpperBoundMb, ErrorMessage = "Enter a size between 1 and 1,000,000 MB.")]
         public int MaxDatabaseSizeMb { get; set; }
     }
+
+    /// <summary>What the database section draws from: the stats, and the most the limit may be.</summary>
+    private sealed record DatabaseRead(DatabaseStats Stats, int SafeLimitMb);
 
     private sealed class PingerForm
     {

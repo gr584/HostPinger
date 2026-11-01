@@ -55,6 +55,7 @@ namespace HostPinger.Test
                     .AddSingleton<IOptionsMonitor<SecurityOptions>>(new TestOptionsMonitor<SecurityOptions>(new SecurityOptions()))
                     .AddSingleton<UserSettingsStore>()
                     .AddSingleton<HostSummaryCache>()
+                    .AddSingleton<DatabaseSizeLimit>()
                     .AddSingleton(probe)
                     .AddHostedService(services => services.GetRequiredService<StartProbe>())
                     .AddHostedService<DatabaseStartup>())
@@ -69,6 +70,56 @@ namespace HostPinger.Test
                 Assert.That(probe.PendingMigrations, Is.Empty, "migrated before the first service started");
                 Assert.That(probe.LeftoverStillThere, Is.False, "swept before the first service started");
             });
+        }
+
+        /// <summary>
+        /// A size limit of zero, which used to turn pruning off, is given a real one before any
+        /// service starts, so the first ping round already prunes against it, and it is stored, so
+        /// it stays that way after the next start too.
+        /// </summary>
+        [Test]
+        public async Task Host_GivesALimitOfZeroARealOneBeforeItStartsAnyService()
+        {
+            var paths = PingerPaths.Resolve(_databasePath, _directory);
+            int? limitAtFirstStart = null;
+
+            using var host = new HostBuilder()
+                .ConfigureServices(services => services
+                    .AddSingleton(paths)
+                    .AddHostPingerDatabase(paths)
+                    .AddSingleton<IOptionsMonitor<PingerOptions>>(
+                        new TestOptionsMonitor<PingerOptions>(new PingerOptions { MaxDatabaseSizeMb = 0 }))
+                    .AddSingleton<IOptionsMonitor<SecurityOptions>>(new TestOptionsMonitor<SecurityOptions>(new SecurityOptions()))
+                    .AddSingleton<UserSettingsStore>()
+                    .AddSingleton<HostSummaryCache>()
+                    .AddSingleton<DatabaseSizeLimit>()
+                    .AddHostedService(services => new LimitProbe(
+                        services.GetRequiredService<UserSettingsStore>(), limit => limitAtFirstStart = limit))
+                    .AddHostedService<DatabaseStartup>())
+                .Build();
+
+            await host.StartAsync();
+            await host.StopAsync();
+
+            await using var db = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath));
+            var stored = await db.UserSettings.SingleAsync(s => s.Key == "Pinger:MaxDatabaseSizeMb");
+            Assert.Multiple(() =>
+            {
+                Assert.That(limitAtFirstStart, Is.Positive);
+                Assert.That(stored.Value, Is.EqualTo(limitAtFirstStart.ToString()));
+            });
+        }
+
+        /// <summary>Hands on the size limit in force when it starts, registered ahead of DatabaseStartup.</summary>
+        private sealed class LimitProbe(UserSettingsStore settings, Action<int> found) : IHostedService
+        {
+            public Task StartAsync(CancellationToken cancellationToken)
+            {
+                found(settings.CurrentPinger.MaxDatabaseSizeMb);
+                return Task.CompletedTask;
+            }
+
+            public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         }
 
         /// <summary>

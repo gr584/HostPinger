@@ -26,7 +26,10 @@ namespace HostPinger.Core.Services
 
         public required long SizeBytes { get; init; }
 
-        /// <summary>The configured limit; zero or less means pruning is disabled.</summary>
+        /// <summary>
+        /// The limit in force. Never zero or less once the service has started (see
+        /// <see cref="DatabaseSizeLimit.SettleAsync"/>); where it is, nothing is projected.
+        /// </summary>
         public required long MaxSizeBytes { get; init; }
 
         public required long AttemptCount { get; init; }
@@ -50,7 +53,7 @@ namespace HostPinger.Core.Services
 
         /// <summary>
         /// How many days of history fit inside <see cref="MaxSizeBytes"/> at the projected growth.
-        /// Null when growth is unknown, or when pruning is disabled and capacity is unbounded.
+        /// Null when growth is unknown, or when there is no limit to project against.
         /// </summary>
         public double? CapacityDays => MaxSizeBytes <= 0 || GrowthBytesPerDay is not > 0
             ? null

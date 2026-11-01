@@ -47,36 +47,79 @@ namespace HostPinger.UITest
         }
 
         /// <summary>
-        /// The capacity is projected against the settings in force rather than the defaults, so with
-        /// the size limit saved as 0 the page says pruning is off. A page projecting against the
-        /// default settings instead — the one change a mutation pass found no test could see, since
-        /// this database holds too few attempts for any projection — says there is not enough data
-        /// yet, the answer for the default 1024 MB.
+        /// The capacity is projected against the settings in force rather than the defaults, and
+        /// says which limit it projects against, so with the size limit saved as 5 MB the page names
+        /// 5 MB. A page projecting against the default settings instead — the one change a mutation
+        /// pass found no test could see, since this database holds too few attempts for any
+        /// projection — names the default's 1 GB.
         /// </summary>
         [Test]
         public async Task Capacity_FollowsTheSizeLimitInForce()
         {
             await UnlockedConfigurationPageAsync();
-            var size = Page.Locator("#max-db-size");
-            var save = Page.Locator(".input-group", new PageLocatorOptions { Has = size })
-                .GetByRole(AriaRole.Button, new LocatorGetByRoleOptions { Name = "Save" });
-            var unlimited = Page.GetByText("Unlimited — pruning is disabled.");
+            var (size, save) = (MaximumSize, SaveMaximumSize);
+            var fiveMb = Page.GetByText("Not enough data yet to say how long 5 MB will last.");
             await Assertions.Expect(size).ToBeEnabledAsync();
             var original = await size.InputValueAsync();
             try
             {
-                await size.FillAsync("0");
+                await size.FillAsync("5");
                 await save.ClickAsync();
 
-                await Assertions.Expect(unlimited).ToBeVisibleAsync();
+                await Assertions.Expect(fiveMb).ToBeVisibleAsync();
             }
             finally
             {
                 await size.FillAsync(original);
                 await save.ClickAsync();
-                await Assertions.Expect(unlimited).ToHaveCountAsync(0);
+                await Assertions.Expect(fiveMb).ToHaveCountAsync(0);
             }
         }
+
+        /// <summary>
+        /// The page says how large a limit this disk can safely take, and a save beyond it is
+        /// refused, saying the same, with the limit in force left as it was. A limit of 0, which
+        /// used to turn pruning off, is refused before it is sent.
+        /// </summary>
+        [Test]
+        public async Task MaximumSize_ShowsTheSafeLimitAndRefusesMore()
+        {
+            await UnlockedConfigurationPageAsync();
+            var (size, save) = (MaximumSize, SaveMaximumSize);
+            await Assertions.Expect(size).ToBeEnabledAsync();
+            var original = await size.InputValueAsync();
+            var hint = Page.Locator(".safe-limit");
+            await Assertions.Expect(hint).ToContainTextAsync("is safe on this disk");
+            var safe = (await hint.InnerTextAsync()).Split(" MB")[0].Replace("At most", string.Empty).Trim();
+            try
+            {
+                await size.FillAsync("0");
+                await save.ClickAsync();
+                await Assertions.Expect(Page.GetByText("Enter a size between 1 and 1,000,000 MB.")).ToBeVisibleAsync();
+
+                await size.FillAsync("1000000");
+                await save.ClickAsync();
+                await Assertions.Expect(Page.GetByText($"This disk can safely hold {safe} MB at most")).ToBeVisibleAsync();
+
+                // Read back the way a page opened afresh reads it: from the settings in force.
+                await GoAsync("/configuration");
+                await Assertions.Expect(MaximumSize).ToHaveValueAsync(original);
+            }
+            finally
+            {
+                // Still unlocked: the unlock is the browser's, and outlasts the page.
+                await GoAsync("/configuration");
+                await MaximumSize.FillAsync(original);
+                await SaveMaximumSize.ClickAsync();
+                await Assertions.Expect(Page.GetByText("Saved — applied after the next ping round.")).ToBeVisibleAsync();
+            }
+        }
+
+        /// <summary>The database section's size limit box, and the Save beside it.</summary>
+        private ILocator MaximumSize => Page.Locator("#max-db-size");
+
+        private ILocator SaveMaximumSize => Page.Locator(".input-group", new PageLocatorOptions { Has = MaximumSize })
+            .GetByRole(AriaRole.Button, new LocatorGetByRoleOptions { Name = "Save" });
 
         /// <summary>The page's way of writing a size, which the assertion above has to match exactly.</summary>
         private static string FormatBytes(double bytes)
