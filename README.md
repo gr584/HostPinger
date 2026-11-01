@@ -167,16 +167,18 @@ and saved only when it is.
   Each round makes room for what it records by deleting the oldest history, and writes into the
   space that leaves inside the file, where nothing else can take it, so monitoring carries on with
   the history there is. That history settles a little shorter at first, by about a fifth in the
-  tests, as the indexes fill to how they stay under turnover, and holds steady from there. The log
-  says when the hold starts and when it ends, and the database grows again, up to its limit, once
-  the disk has room. A disk with nothing free at all can still fail a round, since SQLite needs a
-  little room for its write-ahead log. 0, which used to turn pruning off, is refused, and a 0
-  already set is replaced at the next start by the safe limit, or by the database's own size where
-  that is more, so the upgrade itself deletes nothing. A limit lowered below the file is worked down
-  a slice a round, each round pruning for at most a quarter of the interval, so monitoring carries
-  on meanwhile; on the benchmarks' database that comes to about 2.5 MB a second of pruning.
+  tests, as the indexes fill to how they stay under turnover, and holds steady from there. The
+  Configuration page says so while it lasts, with what the disk has free, and the log says when it
+  starts and when it ends. The database grows again, up to its limit, once the disk has room. A disk
+  with nothing free at all can still fail a round, since SQLite needs a little room for its
+  write-ahead log. 0, which used to turn pruning off, is refused, and a 0 already set is replaced at
+  the next start by the safe limit, or by the database's own size where that is more, so the upgrade
+  itself deletes nothing. A limit lowered below the file is worked down a slice a round, each round
+  pruning for at most a quarter of the interval, so monitoring carries on meanwhile; on the
+  benchmarks' database that comes to about 2.5 MB a second of pruning.
 - **Capacity estimate** — the current file size, how fast it is growing at the present host count
-  and interval, and roughly how much history fits inside the limit at that rate.
+  and interval, and roughly how much history fits inside the limit at that rate. While the disk is
+  nearly full it says the file is held at its size instead, and how much history that size holds.
 - **Backup** — downloads a snapshot of the whole database: hosts, history, settings and the hashed
   password, if one is set, all travel with it. The copy is consistent, of the moment it began,
   while monitoring carries on, and compacted, so it weighs what the data weighs rather than what

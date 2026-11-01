@@ -90,6 +90,9 @@ namespace HostPinger.UITest
             var original = await size.InputValueAsync();
             var hint = Page.Locator(".safe-limit");
             await Assertions.Expect(hint).ToContainTextAsync("is safe on this disk");
+
+            // Rendered with the hint, from the same read, so its absence is not a read still to come.
+            await Assertions.Expect(Page.Locator(".nearly-full")).ToHaveCountAsync(0);
             var safe = (await hint.InnerTextAsync()).Split(" MB")[0].Replace("At most", string.Empty).Trim();
             try
             {

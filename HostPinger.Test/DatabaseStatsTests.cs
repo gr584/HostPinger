@@ -45,6 +45,30 @@ namespace HostPinger.Test
             });
         }
 
+        /// <summary>
+        /// The capacity of a size other than the limit, which the page shows of a file held at its
+        /// size while the disk is nearly full: the history the file holds now.
+        /// </summary>
+        [Test]
+        public void CapacityDaysIn_ProjectsAgainstTheSizeGiven()
+        {
+            var stats = new DatabaseStats
+            {
+                SizeBytes = DatabaseStats.BaselineBytes + 20_000,
+                MaxSizeBytes = 100 * 1024 * 1024,
+                AttemptCount = 200,
+                EnabledHostCount = 2,
+                IntervalSeconds = 30,
+            };
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(stats.CapacityDaysIn(stats.SizeBytes), Is.EqualTo((DatabaseStats.BaselineBytes + 20_000) / 576_000.0).Within(0.0001));
+                Assert.That(stats.CapacityDaysIn(0), Is.Null);
+                Assert.That(stats.CapacityDays, Is.EqualTo(stats.CapacityDaysIn(stats.MaxSizeBytes)));
+            });
+        }
+
         [Test]
         public void Projections_AreUnknownBelowTheMinimumSample()
         {

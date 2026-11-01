@@ -46,6 +46,18 @@
                 <dd>
                     <span class="config-value">@SizeText</span>
                     <span class="text-muted ms-2">@GrowthText</span>
+                    @if (_room is { IsDiskNearlyFull: true } nearlyFull)
+                    {
+                        <div class="form-text">
+                            <span class="config-refused nearly-full">
+                                This disk has only @FormatBytes(nearlyFull.FreeBytes) free, less than the
+                                @FormatBytes(DatabaseBackup.FreeSpaceMarginBytes) HostPinger keeps in hand,
+                                so the database is held at this size: each round deletes the oldest
+                                history it needs to make room for what it records. Free space on the disk
+                                to let it grow again, or lower the limit to give some back.
+                            </span>
+                        </div>
+                    }
                 </dd>
 
                 <dt><label for="max-db-size">Maximum size</label></dt>
@@ -60,7 +72,7 @@
                     <div class="form-text">
                         The oldest ping attempts and resolver errors are pruned once the file grows
                         past this.
-                        @if (_safeLimitMb is { } safe)
+                        @if (_room?.SafeLimitMb is { } safe)
                         {
                             <span class="safe-limit">
                                 At most @safe.ToString("N0") MB is safe on this disk: half of what the
@@ -419,8 +431,9 @@
 
     private DatabaseStats? _stats;
 
-    // The most the size limit may be on this disk, read with the stats; null until it has been.
-    private int? _safeLimitMb;
+    // What the disk has free and the most the size limit may be there, read with the stats; null
+    // until they have been.
+    private DatabaseRoom? _room;
     private string? _databaseStatus;
     private string? _pingerStatus;
 
@@ -606,12 +619,12 @@
             MaxDatabaseSizeMb = _effectiveMaxDatabaseSizeMb,
         };
 
-        // The safe limit with the stats, so the two on screen are of the same moment. It asks
-        // the file system how much is free, which on a network mount can take a while, so it is
-        // off the circuit too.
+        // The room with the stats, so the two on screen are of the same moment. It asks the file
+        // system how much is free, which on a network mount can take a while, so it is off the
+        // circuit too.
         var read = await _reads.ReadAsync(
             async cancellationToken => new DatabaseRead(
-                await Reads.ReadStatsAsync(options, cancellationToken), SizeLimit.SafeLimitMb()),
+                await Reads.ReadStatsAsync(options, cancellationToken), SizeLimit.MeasureRoom()),
             _cts.Token);
 
         // Overtaken by a read sent after it, which has already put something newer on screen.
@@ -620,7 +633,7 @@
             return;
         }
 
-        (_stats, _safeLimitMb) = (read.Stats, read.SafeLimitMb);
+        (_stats, _room) = (read.Stats, read.Room);
     }
 
     private async Task SaveDatabaseAsync()
@@ -1235,9 +1248,11 @@
 
     private string SizeText => _stats is { } stats ? FormatBytes(stats.SizeBytes) : "—";
 
-    private string GrowthText => _stats?.GrowthBytesPerDay is double growth
-        ? $"growing by ~{FormatBytes(growth)} per day"
-        : "not enough data to estimate growth yet";
+    private string GrowthText => _room is { IsDiskNearlyFull: true }
+        ? "held at this size while the disk is nearly full"
+        : _stats?.GrowthBytesPerDay is double growth
+            ? $"growing by ~{FormatBytes(growth)} per day"
+            : "not enough data to estimate growth yet";
 
     private string CapacityText
     {
@@ -1246,6 +1261,16 @@
             if (_stats is not { } stats)
             {
                 return "—";
+            }
+
+            // Held at its size, the file goes on holding what it holds now, however far above it
+            // the limit is.
+            if (_room is { IsDiskNearlyFull: true })
+            {
+                var size = FormatBytes(stats.SizeBytes);
+                return stats.CapacityDaysIn(stats.SizeBytes) is double held
+                    ? $"~{FormatDays(held)} of history in {size}, the size it is held at"
+                    : $"Not enough data yet to say how much history {size} holds.";
             }
 
             // Naming the limit says which one the projection is against: the one in force, which
@@ -1313,8 +1338,8 @@
         public int MaxDatabaseSizeMb { get; set; }
     }
 
-    /// <summary>What the database section draws from: the stats, and the most the limit may be.</summary>
-    private sealed record DatabaseRead(DatabaseStats Stats, int SafeLimitMb);
+    /// <summary>What the database section draws from: the stats, and the room the disk has.</summary>
+    private sealed record DatabaseRead(DatabaseStats Stats, DatabaseRoom Room);
 
     private sealed class PingerForm
     {

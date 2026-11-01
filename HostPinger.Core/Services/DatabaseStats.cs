@@ -55,9 +55,17 @@ namespace HostPinger.Core.Services
         /// How many days of history fit inside <see cref="MaxSizeBytes"/> at the projected growth.
         /// Null when growth is unknown, or when there is no limit to project against.
         /// </summary>
-        public double? CapacityDays => MaxSizeBytes <= 0 || GrowthBytesPerDay is not > 0
+        public double? CapacityDays => CapacityDaysIn(MaxSizeBytes);
+
+        /// <summary>
+        /// How many days of history fit inside <paramref name="sizeBytes"/> at the projected growth:
+        /// the limit's, or while the disk is nearly full and the database is held at its size, the
+        /// file's own (see <see cref="DatabaseRoom.IsDiskNearlyFull"/>). Null when growth is
+        /// unknown, or when there is no size to project against.
+        /// </summary>
+        public double? CapacityDaysIn(long sizeBytes) => sizeBytes <= 0 || GrowthBytesPerDay is not > 0
             ? null
-            : MaxSizeBytes / GrowthBytesPerDay;
+            : sizeBytes / GrowthBytesPerDay;
 
         /// <summary>
         /// How many attempts there are, read off the span of their ids: the last id less the first,
