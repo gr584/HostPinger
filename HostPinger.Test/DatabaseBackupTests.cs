@@ -398,8 +398,65 @@ namespace HostPinger.Test
                 new MaintenanceGate(),
                 _summaries);
 
-            Assert.That(async () => await backup.CreateSnapshotAsync(), Throws.InstanceOf<SqliteException>());
+            Assert.That(async () => await backup.CreateSnapshotAsync(),
+                Throws.InstanceOf<IOException>().With.InnerException.InstanceOf<SqliteException>());
             Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-backup-*"), Is.Empty);
+        }
+
+        /// <summary>
+        /// A snapshot says how far it has got while it runs, not only once it is done: fractions
+        /// that only grow, short of 1 until the 1 at the end. The database is filled until copying
+        /// it takes many of the shortened intervals.
+        /// </summary>
+        [Test]
+        public async Task CreateSnapshot_SaysHowFarItHasGot()
+        {
+            await FillAsync(_dbPath, megabytes: 40);
+            var reports = new List<double>();
+
+            await SnapshotsWatchedEvery(TimeSpan.FromMilliseconds(1)).CreateSnapshotAsync(new Recorder(reports.Add));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(reports, Is.Ordered);
+                Assert.That(reports[^1], Is.EqualTo(1));
+                Assert.That(reports[..^1], Has.All.InRange(0, 0.99));
+                Assert.That(reports, Has.Some.InRange(0.1, 0.9), "partway through, not only before and after");
+            });
+        }
+
+        /// <summary>
+        /// Cancelling stops the copy where it is, where the token alone would let Microsoft.Data.Sqlite
+        /// run it to the end; deletes what had been written; and lets go of the maintenance gate, so
+        /// the next snapshot goes ahead.
+        /// </summary>
+        [Test]
+        public async Task CreateSnapshot_CancelledStopsTheCopyAndLeavesNothing()
+        {
+            await FillAsync(_dbPath, megabytes: 40);
+            using var cancel = new CancellationTokenSource();
+            var reports = new List<double>();
+            var backup = SnapshotsWatchedEvery(TimeSpan.FromMilliseconds(1));
+
+            // Once the copy has begun writing, so there is a part-written file to delete.
+            var cancelled = backup.CreateSnapshotAsync(
+                new Recorder(fraction =>
+                {
+                    reports.Add(fraction);
+                    if (fraction > 0)
+                    {
+                        cancel.Cancel();
+                    }
+                }),
+                cancel.Token);
+
+            Assert.That(async () => await cancelled, Throws.InstanceOf<OperationCanceledException>());
+            Assert.Multiple(() =>
+            {
+                Assert.That(reports.Max(), Is.LessThan(0.5), "stopped soon after the cancel, not at the end");
+                Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-backup-*"), Is.Empty);
+            });
+            Assert.That(File.Exists(await backup.CreateSnapshotAsync().WaitAsync(Patience)), "the gate was let go of");
         }
 
         /// <summary>
@@ -778,6 +835,13 @@ namespace HostPinger.Test
             });
         }
 
+        /// <summary>Snapshots that say how far they have got every <paramref name="interval"/>.</summary>
+        private DatabaseBackup SnapshotsWatchedEvery(TimeSpan interval) =>
+            new(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _summaries)
+            {
+                SnapshotProgressInterval = interval,
+            };
+
         /// <summary>A restore whose backup goes into place and then fails to open, for the put-back.</summary>
         private DatabaseBackup FailingToOpen() =>
             new(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _summaries)
@@ -864,6 +928,19 @@ namespace HostPinger.Test
             await db.SaveChangesAsync();
         }
 
+        /// <summary>Adds about <paramref name="megabytes"/> of rows, in a table of their own.</summary>
+        private static async Task FillAsync(string path, int megabytes)
+        {
+            await using var connection = new SqliteConnection($"Data Source={path};Pooling=False");
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "CREATE TABLE Filler (Data BLOB);"
+                + "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < $rows) "
+                + "INSERT INTO Filler SELECT randomblob(4000) FROM n;";
+            command.Parameters.AddWithValue("$rows", megabytes * 256);
+            await command.ExecuteNonQueryAsync();
+        }
+
         private static async Task StagePasswordAsync(DbContextOptions<HostPingerDbContext> options, string hash)
         {
             await using var db = new HostPingerDbContext(options);
@@ -892,6 +969,15 @@ namespace HostPinger.Test
             await using var command = connection.CreateCommand();
             command.CommandText = "PRAGMA integrity_check;";
             return (string?)await command.ExecuteScalarAsync();
+        }
+
+        /// <summary>
+        /// Hears each report as it is made, on the thread that makes it, where Progress&lt;T&gt;
+        /// would post them to the thread pool to arrive in any order.
+        /// </summary>
+        private sealed class Recorder(Action<double> report) : IProgress<double>
+        {
+            public void Report(double value) => report(value);
         }
     }
 }

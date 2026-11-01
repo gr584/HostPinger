@@ -35,12 +35,21 @@ namespace HostPinger.Core.Services
 
         private const string DefinesCodeQuery = "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('trigger', 'view');";
 
+        private const string DataBytesQuery =
+            "SELECT (page_count - freelist_count) * page_size FROM pragma_page_count(), pragma_freelist_count(), pragma_page_size();";
+
         /// <summary>
         /// How long a restore waits for the file it is retiring to be let go of before it gives up:
         /// the provider's own default. Settable for the tests, which would otherwise spend half a
         /// minute holding a file open to see the restore refuse.
         /// </summary>
         internal int BusyTimeoutSeconds { get; init; } = 30;
+
+        /// <summary>
+        /// How often a snapshot under way says how far it has got. Settable for the tests, whose
+        /// databases are copied in less time than this.
+        /// </summary>
+        internal TimeSpan SnapshotProgressInterval { get; init; } = TimeSpan.FromMilliseconds(250);
 
         /// <summary>
         /// What the disk beside the database has free. Settable for the tests, which cannot fill a
@@ -67,15 +76,39 @@ namespace HostPinger.Core.Services
 
         /// <summary>
         /// Writes a consistent, compacted copy of the database beside it and returns the path.
-        /// The caller owns the file — streaming it out and deleting it are its business.
+        /// The caller owns the file — streaming it out and deleting it are its business. If
+        /// <paramref name="progress"/> is given, it hears how far the copy has got as a fraction, a
+        /// few times a second, and 1 once the copy is done. Cancelling stops the copy where it is,
+        /// and what had been written is deleted.
         /// </summary>
         /// <remarks>
+        /// <para>
         /// <c>VACUUM INTO</c> rather than the online backup API because it leaves the free pages
         /// behind: a database pruned against its size limit is largely empty space, and the copy
         /// should weigh what the data weighs. The gate keeps the monitor from writing meanwhile,
         /// so the copy is of a settled file.
+        /// </para>
+        /// <para>
+        /// SQLite says nothing about how far a <c>VACUUM INTO</c> has got, so the fraction is the
+        /// copy's size on disk against the database's pages that hold anything, which the copy
+        /// writes out in turn. On a copy of the production database it grew steadily to within a
+        /// percent of that. A file with rows deleted here and there packs tighter in the copy,
+        /// which then ends smaller, so the fraction stops short until the 1 at the end.
+        /// </para>
+        /// <para>
+        /// Runs on the thread pool, for the reason <see cref="ValidateBackupAsync"/> gives: a page
+        /// waits on it, and a gigabyte takes seconds. Microsoft.Data.Sqlite looks at the token only
+        /// before a statement starts, so a cancel interrupts the connection instead.
+        /// </para>
+        /// <para>
+        /// Every failure is an <see cref="IOException"/>, as a restore's are, and a cancel is an
+        /// <see cref="OperationCanceledException"/>.
+        /// </para>
         /// </remarks>
-        public async Task<string> CreateSnapshotAsync(CancellationToken cancellationToken = default)
+        public Task<string> CreateSnapshotAsync(IProgress<double>? progress = null, CancellationToken cancellationToken = default) =>
+            Task.Run(() => CreateSnapshotOnThisThreadAsync(progress, cancellationToken), cancellationToken);
+
+        private async Task<string> CreateSnapshotOnThisThreadAsync(IProgress<double>? progress, CancellationToken cancellationToken)
         {
             var snapshotPath = TempPath(SnapshotPrefix);
             using var maintenanceHold = await maintenanceGate.AcquireAsync(cancellationToken);
@@ -85,29 +118,102 @@ namespace HostPinger.Core.Services
                 await db.Database.OpenConnectionAsync(cancellationToken);
                 try
                 {
-                    var connection = db.Database.GetDbConnection();
+                    var connection = (SqliteConnection)db.Database.GetDbConnection();
+                    var dataBytes = Convert.ToInt64(await ScalarAsync(connection, DataBytesQuery, cancellationToken));
+
                     await using var command = connection.CreateCommand();
                     command.CommandText = "VACUUM INTO $path;";
-                    var target = command.CreateParameter();
-                    target.ParameterName = "$path";
-                    target.Value = snapshotPath;
-                    command.Parameters.Add(target);
-                    await command.ExecuteNonQueryAsync(cancellationToken);
+                    command.Parameters.AddWithValue("$path", snapshotPath);
+
+                    using var stopWatching = new CancellationTokenSource();
+                    var watching = progress is null
+                        ? Task.CompletedTask
+                        : WatchSnapshotAsync(snapshotPath, dataBytes, progress, stopWatching.Token);
+                    try
+                    {
+                        // Let go of before the connection goes back to the pool, so a cancel that
+                        // comes late cannot interrupt whatever uses the connection next.
+                        using (cancellationToken.Register(() => SQLitePCL.raw.sqlite3_interrupt(connection.Handle)))
+                        {
+                            await command.ExecuteNonQueryAsync(cancellationToken);
+                        }
+                    }
+                    finally
+                    {
+                        await stopWatching.CancelAsync();
+                        await watching;
+                    }
                 }
                 finally
                 {
                     await db.Database.CloseConnectionAsync();
                 }
+
+                // A cancel that came once the copy was done, too late to interrupt it.
+                cancellationToken.ThrowIfCancellationRequested();
             }
-            catch
+            catch (Exception ex)
             {
-                // A failed VACUUM INTO can leave a partial target behind; a half-written backup
-                // must not sit there waiting to be downloaded by the retry.
+                // A failed or interrupted VACUUM INTO can leave a partial target behind; a
+                // half-written backup must not sit there waiting to be downloaded by the retry.
                 File.Delete(snapshotPath);
-                throw;
+                if (ex is not SqliteException)
+                {
+                    throw;
+                }
+
+                // An interrupted copy is the cancel it was interrupted for. Anything else SQLite
+                // stopped on, such as a disk that filled, goes to the page as an IOException, which
+                // it can catch without knowing SQLite's exception.
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException("The snapshot was cancelled.", ex, cancellationToken);
+                }
+
+                throw new IOException(ex.Message, ex);
             }
 
+            progress?.Report(1);
             return snapshotPath;
+        }
+
+        /// <summary>
+        /// Tells <paramref name="progress"/> how much of <paramref name="dataBytes"/> the snapshot
+        /// has reached, every <see cref="SnapshotProgressInterval"/> until stopped. Never 1, even
+        /// when the copy outgrows the estimate: 1 is said once, when the copy is done.
+        /// </summary>
+        private async Task WatchSnapshotAsync(string snapshotPath, long dataBytes, IProgress<double> progress, CancellationToken stop)
+        {
+            try
+            {
+                using var timer = new PeriodicTimer(SnapshotProgressInterval);
+                while (await timer.WaitForNextTickAsync(stop))
+                {
+                    progress.Report(Math.Min((double)WrittenBytes(snapshotPath) / Math.Max(dataBytes, 1), 0.99));
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
+        /// <summary>
+        /// How much of the file has been written so far, asked through a handle of its own rather
+        /// than FileInfo: Windows can keep an older length in the directory entry while another
+        /// handle is still writing the file. Nothing yet when SQLite has not created it.
+        /// </summary>
+        private static long WrittenBytes(string path)
+        {
+            try
+            {
+                using var file = new FileStream(
+                    path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, bufferSize: 1);
+                return file.Length;
+            }
+            catch (FileNotFoundException)
+            {
+                return 0;
+            }
         }
 
         /// <summary>

@@ -256,7 +256,7 @@
                  @onmousedown="() => _pressedInsideDialog = true" @onmousedown:stopPropagation>
                 <form @onsubmit="SubmitDialogAsync">
                     <div class="modal-header">
-                        <h5 class="modal-title">@(_confirming == Confirming.Download ? "Download backup" : "Restore backup")</h5>
+                        <h5 class="modal-title">@(IsDownloading ? "Download backup" : "Restore backup")</h5>
                         <button type="button" class="btn-close" aria-label="Close" disabled="@_isRestoring"
                                 @onclick="CancelDialog"></button>
                     </div>
@@ -290,6 +290,26 @@
                             case Confirming.Restored:
                                 <div class="alert @(_isRestoreRefused ? "alert-danger" : "alert-success") mb-0"
                                      role="status">@_restoreResult</div>
+                                break;
+                            case Confirming.Preparing:
+                            case Confirming.Restore when _isRestoring:
+                                @*
+                                    A fraction for the steps that have one, and otherwise a bar that
+                                    moves without saying how far, for the ones SQLite gives no measure
+                                    of: checking a backup, and migrating and swapping it in.
+                                *@
+                                <div class="d-flex justify-content-between mb-2">
+                                    <span>@_progressLabel</span>
+                                    @if (ProgressPercent is { } percent)
+                                    {
+                                        <span>@percent%</span>
+                                    }
+                                </div>
+                                <div class="progress" role="progressbar" aria-label="@_progressLabel"
+                                     aria-valuemin="0" aria-valuemax="100" aria-valuenow="@ProgressPercent">
+                                    <div class="progress-bar@(ProgressPercent is null ? " progress-bar-striped progress-bar-animated" : null)"
+                                         style="width: @(ProgressPercent ?? 100)%"></div>
+                                </div>
                                 break;
                             default:
                                 <p class="text-danger mb-0">
@@ -333,6 +353,8 @@
                                 break;
                             case Confirming.Restored:
                                 <button type="button" class="btn btn-primary btn-sm" @onclick="CloseDialog">Close</button>
+                                break;
+                            case Confirming.Preparing:
                                 break;
                             default:
                                 <button type="submit" class="btn btn-danger btn-sm"
@@ -391,6 +413,14 @@
     // Replaced to recreate the restore input. The file lives on the browser's input element, so
     // the element has to survive until the upload has been read, and be rebuilt to be cleared.
     private object _restoreInputKey = new();
+
+    // What a long step in the overlay is doing, and how far it has got as a fraction: null for a
+    // step that gives no measure of that.
+    private string? _progressLabel;
+    private double? _progress;
+
+    // The snapshot being written for a download, cancelled when its overlay is, or when the page goes.
+    private CancellationTokenSource? _preparation;
 
     // The overlay that confirms a download or a restore, and what it is confirming.
     private Confirming _confirming;
@@ -677,8 +707,8 @@
     }
 
     /// <summary>
-    /// Asks for the current password before a download, and downloads straight away when there is
-    /// none to ask for.
+    /// Asks for the current password before a download, and goes straight on to writing the
+    /// snapshot when there is none to ask for.
     /// </summary>
     private async Task RequestDownloadAsync()
     {
@@ -703,14 +733,12 @@
             return;
         }
 
-        // Before the token is issued, so the endpoint that serves the file needs nothing more than
-        // the token and the unlock.
+        // Before anything is written, and so before the token is issued: the endpoint that serves
+        // the file needs nothing more than the token and the unlock.
         if (!HasCurrentPassword("backup download"))
         {
             return;
         }
-
-        CloseDialog();
 
         // The snapshot lands beside the database before the browser starts pulling it, so the
         // disk has to hold a second copy of the file for the duration of the download.
@@ -718,7 +746,64 @@
         if (_stats is { } stats
             && Backup.AvailableFreeBytes() < stats.SizeBytes + DatabaseBackup.FreeSpaceMarginBytes)
         {
+            CloseDialog();
             _backupStatus = "Not enough free disk space beside the database to write the snapshot.";
+            return;
+        }
+
+        _backupStatus = null;
+        using var preparation = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+        _preparation = preparation;
+        OpenDialog(Confirming.Preparing);
+        ShowStep("Preparing the backup…", 0);
+
+        string? snapshotPath = null;
+        string? failure = null;
+        try
+        {
+            // Progress<T> hands each report to the circuit, as the page's own events are.
+            snapshotPath = await Backup.CreateSnapshotAsync(
+                new Progress<double>(fraction =>
+                {
+                    if (!preparation.IsCancellationRequested)
+                    {
+                        ShowProgress(fraction);
+                    }
+                }),
+                preparation.Token);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (IOException ex)
+        {
+            failure = ex.Message;
+        }
+        finally
+        {
+            if (_preparation == preparation)
+            {
+                _preparation = null;
+            }
+        }
+
+        // Cancelled from the overlay, which closed then and may have been opened again since, or
+        // the page is gone. A copy that finished regardless is deleted here; one that was stopped
+        // partway, CreateSnapshotAsync has deleted already.
+        if (preparation.IsCancellationRequested)
+        {
+            if (snapshotPath is not null)
+            {
+                File.Delete(snapshotPath);
+            }
+
+            return;
+        }
+
+        CloseDialog();
+        if (snapshotPath is null)
+        {
+            _backupStatus = $"The backup could not be written: {failure}";
             return;
         }
 
@@ -726,8 +811,7 @@
 
         // A full page navigation rather than anything on the circuit: the response says
         // attachment, so the browser starts the download and this page stays where it is.
-        _backupStatus = null;
-        Navigation.NavigateTo($"database-backup?token={Tokens.Issue()}", forceLoad: true);
+        Navigation.NavigateTo($"database-backup?token={Tokens.Issue(snapshotPath)}", forceLoad: true);
     }
 
     /// <summary>
@@ -814,7 +898,11 @@
     /// <summary>Closes the overlay without doing what it was opened for.</summary>
     private void CancelDialog()
     {
-        if (_confirming != Confirming.Download)
+        if (_confirming == Confirming.Preparing)
+        {
+            _preparation?.Cancel();
+        }
+        else if (_confirming != Confirming.Download)
         {
             CancelRestore();
         }
@@ -835,6 +923,29 @@
     /// <summary>Whether the step on screen asks for the current password.</summary>
     private bool AsksPassword => _confirming is Confirming.Download or Confirming.RestorePassword;
 
+    private bool IsDownloading => _confirming is Confirming.Download or Confirming.Preparing;
+
+    /// <summary>Starts a long step's bar: at <paramref name="progress"/>, or moving without a measure when null.</summary>
+    private void ShowStep(string label, double? progress)
+    {
+        _progressLabel = label;
+        _progress = progress;
+        StateHasChanged();
+    }
+
+    /// <summary>Moves the bar on, drawing it again only when the percentage it shows has changed.</summary>
+    private void ShowProgress(double fraction)
+    {
+        var shown = ProgressPercent;
+        _progress = fraction;
+        if (ProgressPercent != shown)
+        {
+            StateHasChanged();
+        }
+    }
+
+    private int? ProgressPercent => _progress is { } fraction ? (int)(fraction * 100) : null;
+
     private void OnDialogKeyDown(KeyboardEventArgs e)
     {
         if (e.Key == "Escape" && !_isRestoring)
@@ -845,11 +956,13 @@
 
     /// <summary>
     /// Cancels on a click away. Dragging a text selection out of the field also raises a click on
-    /// the overlay, so a press that started inside it is not one.
+    /// the overlay, so a press that started inside it is not one. A snapshot being written is
+    /// cancelled only on purpose, with Cancel or Escape: a stray click would throw away a copy
+    /// that may have taken a while.
     /// </summary>
     private void OnOverlayClick()
     {
-        if (!_pressedInsideDialog && !_isRestoring)
+        if (!_pressedInsideDialog && !_isRestoring && _confirming != Confirming.Preparing)
         {
             CancelDialog();
         }
@@ -940,6 +1053,7 @@
         }
 
         _isRestoring = true;
+        ShowStep("Uploading the backup…", 0);
         try
         {
             var tempPath = Backup.CreateRestoreTempPath();
@@ -949,16 +1063,27 @@
                     tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81_920,
                     FileOptions.Asynchronous))
                 {
+                    // By hand rather than CopyToAsync, so the bar can follow the upload.
                     await using var source = file.OpenReadStream(MaxRestoreUploadBytes, _cts.Token);
-                    await source.CopyToAsync(target, _cts.Token);
+                    var buffer = new byte[81_920];
+                    long uploaded = 0;
+                    int read;
+                    while ((read = await source.ReadAsync(buffer, _cts.Token)) > 0)
+                    {
+                        await target.WriteAsync(buffer.AsMemory(0, read), _cts.Token);
+                        uploaded += read;
+                        ShowProgress(file.Size > 0 ? (double)uploaded / file.Size : 1);
+                    }
                 }
 
+                ShowStep("Checking the backup…", null);
                 if (await Backup.ValidateBackupAsync(tempPath, _cts.Token) is { } refusal)
                 {
                     ShowRestoreResult(refusal, isRefused: true);
                     return;
                 }
 
+                ShowStep("Putting the backup in place…", null);
                 await Backup.RestoreAsync(tempPath, _cts.Token);
             }
             finally
@@ -1082,6 +1207,9 @@
 
         /// <summary>The restore confirmed, and what came of it: done, refused or failed.</summary>
         Restored,
+
+        /// <summary>The snapshot for a download being written, after the password if one is set.</summary>
+        Preparing,
     }
 
     private sealed class DatabaseForm

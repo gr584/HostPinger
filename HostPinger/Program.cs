@@ -158,26 +158,26 @@ namespace HostPinger
             app.MapGet("/health", () => Results.Ok("Healthy"));
 
             // The backup download. A plain GET rather than anything on the circuit, because a
-            // gigabyte belongs on the HTTP pipe, not the SignalR one; the single-use token proves
-            // the request came from an unlocked page moments ago, given the current password if one
-            // is set, and the cookie check keeps the endpoint exactly as locked as the button that
-            // leads here. NotFound either way, so a probe cannot tell a bad token from there being
-            // anything to find.
-            app.MapGet("/database-backup", async (
+            // gigabyte belongs on the HTTP pipe, not the SignalR one. The page writes the snapshot
+            // first, where it can show how far the copy has got, and the single-use token hands it
+            // over: it proves the request came from an unlocked page moments ago, given the current
+            // password if one is set, and the cookie check keeps the endpoint exactly as locked as
+            // the button that leads here. NotFound either way, so a probe cannot tell a bad token
+            // from there being anything to find.
+            app.MapGet("/database-backup", (
                 string token,
                 HttpContext context,
                 BackupDownloadTokens tokens,
-                PasswordGate gate,
-                DatabaseBackup backup) =>
+                PasswordGate gate) =>
             {
-                if (!tokens.TryConsume(token) || !gate.IsUnlocked(context.User))
+                if (!tokens.TryConsume(token, out var snapshotPath))
                 {
                     return Results.NotFound();
                 }
 
-                // DeleteOnClose ties the snapshot's life to the response: however the download
-                // ends — completed, cancelled, the browser gone — closing the stream removes it.
-                var snapshotPath = await backup.CreateSnapshotAsync(context.RequestAborted);
+                // Opened before the cookie is looked at, because DeleteOnClose ties the snapshot's
+                // life to the stream: however the request ends — the download completed or
+                // cancelled, the browser gone, or a refusal just below — closing it removes the file.
                 var snapshot = new FileStream(
                     snapshotPath,
                     FileMode.Open,
@@ -185,6 +185,12 @@ namespace HostPinger
                     FileShare.Read | FileShare.Delete,
                     bufferSize: 81_920,
                     FileOptions.Asynchronous | FileOptions.DeleteOnClose);
+                if (!gate.IsUnlocked(context.User))
+                {
+                    snapshot.Dispose();
+                    return Results.NotFound();
+                }
+
                 return Results.File(
                     snapshot,
                     "application/octet-stream",

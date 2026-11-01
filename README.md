@@ -166,7 +166,8 @@ and saved only when it is.
   hashed password, if one is set, all travel with it. The copy is consistent — monitoring pauses
   for the moment it takes — and compacted, so it weighs what the data weighs rather than what the
   file on disk does. Unlock to use it; with a password set, it asks for the current one first, in
-  an overlay like the one that unlocks.
+  an overlay like the one that unlocks. The overlay shows how far the snapshot has got, and the
+  download starts once it is written; Cancel or Escape stops it partway.
 - **Restore** — uploads a backup and, after a confirmation, replaces the current database with
   it. Everything comes from the backup, including its password or the lack of one, so a restore
   can lock the browser out — `--remove-password` is the recovery, as ever — or unlock the
@@ -181,7 +182,9 @@ and saved only when it is.
   SQLite's WAL mode, where reading the history never holds up a ping round's write. The database
   being replaced is kept beside the new one as `hostpinger.db.pre-restore`, one restore's worth of
   undo, complete in that one file. Unlock to use it; with a password set, it asks for the current
-  one first, in an overlay like the one that unlocks, before the file is chosen.
+  one first, in an overlay like the one that unlocks, before the file is chosen. Once the restore is
+  confirmed, the overlay shows how far the upload has got, then the check and the swap as they
+  happen, and then what came of it.
 - **Security** — whether a password is set, and the way to `/password` to set, change or remove
   one.
 
