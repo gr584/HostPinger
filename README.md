@@ -185,14 +185,15 @@ and saved only when it is.
   that fails to open once it is in place is taken out again and the database it replaced put
   straight back. Monitoring, and whatever the pages read or write, pauses only for the moment the
   swap takes. The restored database is put in SQLite's WAL mode, where reading the history never
-  holds up a ping round's write. The database being replaced is kept beside the new one as
-  `hostpinger.db.pre-restore`, one restore's worth of undo, complete in that one file. It is as
-  large as the database it was and stays until the next restore replaces it, outside the size limit,
-  so delete it by hand once it is no longer wanted. Unlock to use it; with a password set, it asks
-  for the current one first, in an overlay like the one that unlocks, before the file is chosen.
-  Once the restore is confirmed, the overlay shows how far the upload has got, then the check and
-  the swap as they happen, and then what came of it. One backup or restore runs at a time: another
-  asked for meanwhile, from any browser, is turned away with what is under way.
+  holds up a ping round's write. The database being replaced waits beside the new one as
+  `hostpinger.db.pre-restore` until the backup has opened, to go back if it does not, and is deleted
+  then, so the disk is left holding the restored database alone. A restore cannot be undone
+  afterwards: download a backup first if the current database may be wanted again. Unlock to use it;
+  with a password set, it asks for the current one first, in an overlay like the one that unlocks,
+  before the file is chosen. Once the restore is confirmed, the overlay shows how far the upload has
+  got, then the check and the swap as they happen, and then what came of it. One backup or restore
+  runs at a time: another asked for meanwhile, from any browser, is turned away with what is under
+  way.
 - **Security** — whether a password is set, and the way to `/password` to set, change or remove
   one.
 

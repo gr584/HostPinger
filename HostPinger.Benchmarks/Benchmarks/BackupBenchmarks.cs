@@ -119,14 +119,15 @@ namespace HostPinger.Benchmarks.Benchmarks
     /// <summary>
     /// Putting a checked backup in place, <see cref="DatabaseBackup.RestoreAsync"/>: the current backup
     /// made ready beside the database, then the swap with the rounds held off and the pages kept from
-    /// the file, then the restored file opened and its settings loaded. A backup of the current schema
-    /// needs no migrating, so this is all of a restore that holds anything up. Each iteration restores
-    /// a fresh copy of one snapshot, which the swap consumes.
+    /// the file, then the restored file opened and its settings loaded, and the database it replaced
+    /// deleted once the rounds and the pages are back. A backup of the current schema needs no
+    /// migrating, so this is all of a restore that holds anything up. Each iteration restores a fresh
+    /// copy of one snapshot, which the swap consumes.
     /// </summary>
     [BenchmarkCategory("Restore")]
     [PageBenchmark(
         "Restoring a backup",
-        "`DatabaseBackup.RestoreAsync` of a current backup: made ready, swapped in, opened, its settings loaded.")]
+        "`DatabaseBackup.RestoreAsync` of a current backup: made ready, swapped in, opened, its settings loaded, the database it replaced deleted.")]
     [WarmupCount(1)]
     [IterationCount(3)]
     public class RestoreBenchmarks : DatabaseBenchmark

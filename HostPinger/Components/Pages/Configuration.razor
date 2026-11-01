@@ -314,8 +314,9 @@
                             default:
                                 <p class="text-danger">
                                     Restore <code>@_restoreFile?.Name</code>? It replaces everything —
-                                    hosts, history, settings and the password. The current database is
-                                    kept as <code>@Path.GetFileName(Backup.PreRestorePath)</code>.
+                                    hosts, history, settings and the password — and the current
+                                    database is deleted once the backup is in place, so download a
+                                    backup first if you may want it back.
                                 </p>
                                 <p class="mb-2">
                                     The backup's password is the one to unlock with once it is

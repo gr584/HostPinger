@@ -251,8 +251,8 @@ namespace HostPinger.UITest
                     .ToBeVisibleAsync();
                 await Assertions.Expect(Button(Dialog, "Cancel")).ToHaveCountAsync(0);
                 await AssertRestoreProgressAsync();
-                Assert.That(File.Exists(UiTestRun.DatabasePath + ".pre-restore"),
-                    "the database that was replaced must be kept as the undo copy");
+                Assert.That(File.Exists(UiTestRun.DatabasePath + ".pre-restore"), Is.False,
+                    "the database that was replaced is deleted once the backup is in force");
 
                 // The footer's, since the header's cross is called Close too.
                 await Button(Dialog.Locator(".modal-footer"), "Close").ClickAsync();

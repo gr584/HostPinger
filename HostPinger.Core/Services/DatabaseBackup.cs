@@ -4,6 +4,7 @@ using HostPinger.Core.Options;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.Extensions.Logging;
 
 namespace HostPinger.Core.Services
 {
@@ -21,7 +22,8 @@ namespace HostPinger.Core.Services
         UserSettingsStore settings,
         MaintenanceGate maintenanceGate,
         DatabaseFileGate fileGate,
-        HostSummaryCache hostSummaries)
+        HostSummaryCache hostSummaries,
+        ILogger<DatabaseBackup> logger)
     {
         /// <summary>
         /// Room the disk must have beyond the file being written, so a snapshot or an upload
@@ -89,9 +91,18 @@ namespace HostPinger.Core.Services
         internal Func<Task>? AfterSwap { get; init; }
 
         /// <summary>
-        /// Where the previous database goes when a restore replaces it: the undo, kept until the
-        /// next restore overwrites it. Deliberately not the live file name plus a numbered scheme —
-        /// one undo that is always current beats a directory that fills with stale ones.
+        /// Called once a restore is done, with the database it replaced still at
+        /// <see cref="PreRestorePath"/>, just before that is deleted. For the tests, which read it
+        /// there to see what became of a write that raced the restore, or keep it from going.
+        /// </summary>
+        internal Func<Task>? BeforeDeletingRetired { get; init; }
+
+        /// <summary>
+        /// Where a restore keeps the database it replaces while it makes sure of the backup in its
+        /// place: what goes back if the restored file will not open, and deleted once it has.
+        /// Kept no longer than that, because a second copy as large as the database, outside the
+        /// size limit, is room the disk may need; a backup downloaded first is the undo that costs
+        /// none.
         /// </summary>
         public string PreRestorePath => paths.DatabasePath + ".pre-restore";
 
@@ -102,9 +113,9 @@ namespace HostPinger.Core.Services
         /// Takes the one turn a snapshot and a restore share, or says which of them holds it. One at
         /// a time, for two reasons. Each writes a file the size of the database beside it, having
         /// checked the disk has room for one, and two at once would each count on the same room.
-        /// And a restore retires the database it replaces as the undo copy, so a second restore
-        /// finishing after the first would retire the first one's file in place of the database
-        /// the person meant to keep.
+        /// And a restore keeps the database it replaces at <see cref="PreRestorePath"/>, to put back
+        /// if its file will not open, which a second restore at once would overwrite with the
+        /// first one's file.
         /// </summary>
         private bool TryTakeTurn(string what, [NotNullWhen(false)] out string? refusal)
         {
@@ -434,12 +445,13 @@ namespace HostPinger.Core.Services
         }
 
         /// <summary>
-        /// Replaces the database with the validated file at <paramref name="candidatePath"/>,
-        /// keeping what it replaced at <see cref="PreRestorePath"/>, and reloads the settings
-        /// snapshot — so when this returns, the backup's settings and password are the ones in
-        /// force. The candidate file is consumed by the swap. The restored database is in WAL
-        /// mode, and the one kept at <see cref="PreRestorePath"/> is in rollback-journal mode,
-        /// whole without a -wal beside it.
+        /// Replaces the database with the validated file at <paramref name="candidatePath"/> and
+        /// reloads the settings snapshot — so when this returns, the backup's settings and password
+        /// are the ones in force — and then deletes the database it replaced. That waits at
+        /// <see cref="PreRestorePath"/> until the restored file has opened and given up its
+        /// settings, in rollback-journal mode and whole without a -wal beside it, to be put back
+        /// if it does not. The candidate file is consumed by the swap. The restored database is in
+        /// WAL mode.
         /// <para>
         /// The candidate is migrated and checked where it lies, before anything is replaced and
         /// before the maintenance gate is taken: migrating an old backup of a production-sized
@@ -674,30 +686,67 @@ namespace HostPinger.Core.Services
         {
             await PrepareCandidateAsync(candidatePath, cancellationToken);
 
-            using var maintenanceHold = await maintenanceGate.AcquireAsync(cancellationToken);
+            var retired = false;
+            using (await maintenanceGate.AcquireAsync(cancellationToken))
+            {
+                // The host summary keeps a connection of its own open, outside the pool that
+                // ClearAllPools empties, so it lets go of the file first and is resumed on whatever
+                // sits at the path afterwards — the restored file, or the old one if the swap never
+                // happened.
+                await hostSummaries.SuspendAsync(cancellationToken);
+                try
+                {
+                    // The pages' reads and writes take no turns at the gate above. The file gate
+                    // waits for the connections they have open, and keeps new ones back through
+                    // everything that follows: emptying the pool, the swap, opening the restored
+                    // file and loading its settings, or putting the old file back.
+                    await fileGate.WhileShutAsync(
+                        TimeSpan.FromSeconds(BusyTimeoutSeconds),
+                        async () => retired = await ReplaceAsync(candidatePath, cancellationToken),
+                        cancellationToken);
+                }
+                catch (TimeoutException ex)
+                {
+                    throw new IOException(StayedInUse, ex);
+                }
+                finally
+                {
+                    hostSummaries.Resume();
+                }
+            }
 
-            // The host summary keeps a connection of its own open, outside the pool that
-            // ClearAllPools empties, so it lets go of the file first and is resumed on whatever sits
-            // at the path afterwards — the restored file, or the old one if the swap never happened.
-            await hostSummaries.SuspendAsync(cancellationToken);
+            // With the rounds and the pages back at work on the restored file: nothing waits on
+            // the old one going.
+            if (retired)
+            {
+                await DeleteRetiredAsync();
+            }
+        }
+
+        /// <summary>
+        /// Deletes the database a restore replaced, once the backup in its place has opened. One
+        /// that will not go is left, with a warning in the log naming it, rather than failing a
+        /// restore that has happened: the page would say it had not, with the backup's settings
+        /// and password already in force.
+        /// </summary>
+        private async Task DeleteRetiredAsync()
+        {
+            if (BeforeDeletingRetired is { } beforeDeleting)
+            {
+                await beforeDeleting();
+            }
+
             try
             {
-                // The pages' reads and writes take no turns at the gate above. The file gate waits
-                // for the connections they have open, and keeps new ones back through everything
-                // that follows: emptying the pool, the swap, opening the restored file and loading
-                // its settings, or putting the old file back.
-                await fileGate.WhileShutAsync(
-                    TimeSpan.FromSeconds(BusyTimeoutSeconds),
-                    () => ReplaceAsync(candidatePath, cancellationToken),
-                    cancellationToken);
+                File.Delete(PreRestorePath);
             }
-            catch (TimeoutException ex)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                throw new IOException(StayedInUse, ex);
-            }
-            finally
-            {
-                hostSummaries.Resume();
+                logger.LogWarning(
+                    ex,
+                    "The backup is restored, but the database it replaced could not be deleted. It is "
+                    + "left at {Path}, as large as that database was; delete it by hand.",
+                    PreRestorePath);
             }
         }
 
@@ -753,7 +802,12 @@ namespace HostPinger.Core.Services
             }
         }
 
-        private async Task ReplaceAsync(string candidatePath, CancellationToken cancellationToken)
+        /// <summary>
+        /// Swaps the candidate in and opens it, or puts back what it replaced; returns whether a
+        /// database was retired to <see cref="PreRestorePath"/>, as <see cref="SwapIntoPlaceAsync"/>
+        /// does.
+        /// </summary>
+        private async Task<bool> ReplaceAsync(string candidatePath, CancellationToken cancellationToken)
         {
             bool retired;
             try
@@ -814,6 +868,8 @@ namespace HostPinger.Core.Services
                         : " An empty database is in its place, as there was none before."),
                     ex);
             }
+
+            return retired;
         }
 
         /// <summary>
@@ -948,15 +1004,15 @@ namespace HostPinger.Core.Services
 
         /// <summary>
         /// Takes the file about to be retired out of WAL mode. Leaving it, SQLite folds whatever the
-        /// -wal still holds into the file, so the undo copy is whole on its own; and it only leaves
-        /// once no other connection has the file open, so this is also what waits out a read still
-        /// in progress on it, for as long as the provider retries a busy command. The application's
-        /// own connections have been waited for at the <see cref="DatabaseFileGate"/> by now, so
-        /// what is left to wait for here is a connection from outside it, another process's. That
-        /// wait is what keeps the restored file safe: the last connection to close on a WAL
-        /// database deletes the -wal and -shm beside it by name, and after the swap those names are
-        /// the restored file's. A file already in rollback-journal mode has neither, and is left as
-        /// it is.
+        /// -wal still holds into the file, so the file kept to put back is whole on its own; and it
+        /// only leaves once no other connection has the file open, so this is also what waits out a
+        /// read still in progress on it, for as long as the provider retries a busy command. The
+        /// application's own connections have been waited for at the <see cref="DatabaseFileGate"/>
+        /// by now, so what is left to wait for here is a connection from outside it, another
+        /// process's. That wait is what keeps the restored file safe: the last connection to close
+        /// on a WAL database deletes the -wal and -shm beside it by name, and after the swap those
+        /// names are the restored file's. A file already in rollback-journal mode has neither, and
+        /// is left as it is.
         /// </summary>
         private static async Task LeaveWalAsync(string databasePath, int busyTimeoutSeconds, CancellationToken cancellationToken)
         {
@@ -1040,7 +1096,8 @@ namespace HostPinger.Core.Services
         /// One atomic replace, so a crash at any moment leaves a complete database on disk under
         /// one name or another — never none. Retried briefly because a page's periodic read can
         /// hold the file at just the wrong instant on Windows. Returns whether a database was
-        /// retired to <see cref="PreRestorePath"/>, which is what an undo would put back.
+        /// retired to <see cref="PreRestorePath"/>, which is what a restored file that will not
+        /// open is replaced by again.
         /// </summary>
         private async Task<bool> SwapIntoPlaceAsync(string candidatePath, CancellationToken cancellationToken)
         {
@@ -1055,7 +1112,8 @@ namespace HostPinger.Core.Services
                     }
 
                     // No database to retire — restoring into a fresh install. Whatever sits at
-                    // PreRestorePath is an earlier restore's undo, not this one's.
+                    // PreRestorePath was left by an earlier version's restore, not this one, and is
+                    // left alone.
                     File.Move(candidatePath, paths.DatabasePath);
                     return false;
                 }
