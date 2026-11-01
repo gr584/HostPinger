@@ -9,6 +9,9 @@ namespace HostPinger.Test
     {
         private static readonly DateTime BaseTime = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
+        /// <summary>A budget no call here runs out of: these tests are about where pruning stops, not when.</summary>
+        private static readonly TimeSpan Unbounded = TimeSpan.MaxValue;
+
         private string _dbPath = string.Empty;
         private DbContextOptions<HostPingerDbContext> _options = null!;
 
@@ -47,7 +50,7 @@ namespace HostPinger.Test
             var sizeBefore = await DatabasePruner.GetDatabaseSizeBytesAsync(db);
             Assert.That(sizeBefore, Is.GreaterThan(limitBytes), "seed data should exceed the limit");
 
-            var deleted = await new DatabasePruner().EnforceSizeLimitAsync(db, limitBytes);
+            var deleted = await new DatabasePruner().EnforceSizeLimitAsync(db, limitBytes, Unbounded);
 
             Assert.That(deleted, Is.GreaterThan(0));
             Assert.That(await DatabasePruner.GetDatabaseSizeBytesAsync(db), Is.LessThanOrEqualTo(limitBytes));
@@ -80,7 +83,7 @@ namespace HostPinger.Test
             var sizeBefore = await DatabasePruner.GetDatabaseSizeBytesAsync(db);
             Assert.That(sizeBefore, Is.GreaterThan(limitBytes), "seed data should exceed the limit");
 
-            var deleted = await new DatabasePruner().EnforceSizeLimitAsync(db, limitBytes);
+            var deleted = await new DatabasePruner().EnforceSizeLimitAsync(db, limitBytes, Unbounded);
 
             Assert.That(deleted, Is.GreaterThan(0));
             Assert.That(await DatabasePruner.GetDatabaseSizeBytesAsync(db), Is.LessThanOrEqualTo(limitBytes));
@@ -105,7 +108,7 @@ namespace HostPinger.Test
             await SeedAttemptsAsync(db, 10_000);
             await SeedResolverErrorsAsync(db, 10_000);
 
-            await new DatabasePruner().EnforceSizeLimitAsync(db, limitBytes);
+            await new DatabasePruner().EnforceSizeLimitAsync(db, limitBytes, Unbounded);
 
             Assert.Multiple(async () =>
             {
@@ -169,6 +172,35 @@ namespace HostPinger.Test
             });
         }
 
+        /// <summary>
+        /// A call stops once its budget is spent, after the batch it is on, and the next call goes
+        /// on from where it stopped: with a budget of nothing, each call gets one batch in.
+        /// </summary>
+        [Test]
+        public async Task EnforceSizeLimit_StopsOnceItsBudgetIsSpentAndTheNextCallGoesOn()
+        {
+            // The limit, and the seed it is over, of the shrinking test above.
+            const long limitBytes = 200 * 1024;
+            await using var db = new HostPingerDbContext(_options);
+            await SeedAttemptsAsync(db, 20_000);
+            var pruner = new DatabasePruner();
+
+            var first = await pruner.EnforceSizeLimitAsync(db, limitBytes, TimeSpan.Zero);
+            var sizeAfterFirst = await DatabasePruner.GetDatabaseSizeBytesAsync(db);
+            var second = await pruner.EnforceSizeLimitAsync(db, limitBytes, TimeSpan.Zero);
+            var rest = await pruner.EnforceSizeLimitAsync(db, limitBytes, Unbounded);
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(first, Is.EqualTo(1000), "one batch");
+                Assert.That(sizeAfterFirst, Is.GreaterThan(limitBytes), "and the file still over the limit");
+                Assert.That(second, Is.EqualTo(1000), "the next call takes the next batch");
+                Assert.That(rest, Is.Positive);
+                Assert.That(await DatabasePruner.GetDatabaseSizeBytesAsync(db), Is.LessThanOrEqualTo(limitBytes));
+                Assert.That(await db.PingAttempts.CountAsync(), Is.EqualTo(20_000 - first - second - rest));
+            });
+        }
+
         [Test]
         public async Task EnforceSizeLimit_NonPositiveLimitDisablesPruning()
         {
@@ -176,7 +208,7 @@ namespace HostPinger.Test
             await SeedAttemptsAsync(db, 1_000);
             await SeedResolverErrorsAsync(db, 1_000);
 
-            var deleted = await new DatabasePruner().EnforceSizeLimitAsync(db, 0);
+            var deleted = await new DatabasePruner().EnforceSizeLimitAsync(db, 0, Unbounded);
 
             Assert.That(deleted, Is.Zero);
             Assert.Multiple(async () =>
@@ -236,7 +268,7 @@ namespace HostPinger.Test
 
             // Sent off, because SQLite does its work on the calling thread: a pruner going round for
             // ever would otherwise never hand back a task for the bound to apply to.
-            var deleted = await Task.Run(() => new DatabasePruner().EnforceSizeLimitAsync(db, maxSizeBytes: 1))
+            var deleted = await Task.Run(() => new DatabasePruner().EnforceSizeLimitAsync(db, maxSizeBytes: 1, Unbounded))
                 .WaitAsync(TimeSpan.FromSeconds(30));
 
             Assert.That(deleted, Is.Zero);

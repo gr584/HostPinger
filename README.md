@@ -159,7 +159,9 @@ and saved only when it is.
   changing it re-reads the whole history rather than only applying from here on.
 - **Maximum database size** — the oldest recorded history is pruned once the file grows past this.
   Default 1024 MB; 0 disables pruning and lets the file grow without bound, apart from the resolver
-  errors, which are dropped at 30 days either way.
+  errors, which are dropped at 30 days either way. A limit lowered below the file is worked down a
+  slice a round, each round pruning for at most a quarter of the interval, so monitoring carries on
+  meanwhile; on the benchmarks' database that comes to about 2.5 MB a second of pruning.
 - **Capacity estimate** — the current file size, how fast it is growing at the present host count
   and interval, and roughly how much history fits inside the limit at that rate.
 - **Backup** — downloads a snapshot of the whole database: hosts, history, settings and the hashed
@@ -851,7 +853,8 @@ A lightweight tag (`git tag v1.15.0`) has no message, and its release carries th
 `HostPinger.Benchmarks` times the calls the pages make into `HostPinger.Core` with BenchmarkDotNet:
 the Hosts summary, opening and refreshing the graph, the Configuration and Resolver errors reads,
 the changes `HostStore` and `UserSettingsStore` make, writing a backup's snapshot with a ping round
-landing alongside it, checking a backup and restoring one, opening the database at startup, and
+landing alongside it, checking a backup and restoring one, the round after the size limit is
+lowered, opening the database at startup, and
 upgrading it from the schema the last release left, which is what the first start of a new release
 does; while no migration has been added since that release, that last one has nothing to do. Each
 benchmark starts from a fresh copy of a seeded database shaped like the production one the page
@@ -878,8 +881,9 @@ clicks; startup and the delete with its history start from an unchanged copy ins
 run with the file dropped from the page cache, which is how they behave on a service whose database
 the rest of the machine has pushed out of memory. Those cold cases need Linux and are left out
 elsewhere. The delete with its history runs one warmup and five iterations, since each needs a fresh
-copy of the database, and the backup and restore benchmarks one warmup and three, since each writes
-or restores a gigabyte; `--iterationCount` does not apply to them. The results land in
+copy of the database, the backup and restore benchmarks one warmup and three, since each writes or
+restores a gigabyte, and so does the round after the limit is lowered, which prunes the copy it
+runs on; `--iterationCount` does not apply to them. The results land in
 `BenchmarkDotNet.Artifacts/results`, with every table together in `summary.md`.
 
 CI runs them on every push to main and every pull request and puts `summary.md` on the run's summary

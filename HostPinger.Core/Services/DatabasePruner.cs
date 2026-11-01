@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using HostPinger.Core.Data;
 using Microsoft.EntityFrameworkCore;
 
@@ -70,14 +71,32 @@ namespace HostPinger.Core.Services
             return deleted;
         }
 
-        /// <summary>Returns the number of rows deleted, across every history table.</summary>
-        internal async Task<int> EnforceSizeLimitAsync(HostPingerDbContext db, long maxSizeBytes, CancellationToken cancellationToken = default)
+        /// <summary>
+        /// Deletes the oldest history a batch at a time until the file is back under
+        /// <paramref name="maxSizeBytes"/>, or until <paramref name="budget"/> has been spent, and
+        /// returns the number of rows deleted across every history table. Whatever the budget leaves
+        /// over is the next call's to delete.
+        /// </summary>
+        /// <remarks>
+        /// The budget is what keeps a lowered limit from stopping the monitoring. A round holds the
+        /// maintenance gate while it prunes, and on the benchmarks' production-shaped database the
+        /// pruning goes at about 2.5 MB a second, so a limit lowered by a gigabyte took the next
+        /// round about seven minutes, with no round anywhere in them. At the limit, one round's
+        /// growth takes a batch or two, and the budget never comes into it. The clock is looked at
+        /// once a batch is done, so a call always gets at least one in, whatever its budget.
+        /// </remarks>
+        internal async Task<int> EnforceSizeLimitAsync(
+            HostPingerDbContext db,
+            long maxSizeBytes,
+            TimeSpan budget,
+            CancellationToken cancellationToken = default)
         {
             if (maxSizeBytes <= 0)
             {
                 return 0;
             }
 
+            var started = Stopwatch.GetTimestamp();
             var totalDeleted = 0;
             while (await GetDatabaseSizeBytesAsync(db, cancellationToken) > maxSizeBytes)
             {
@@ -102,6 +121,10 @@ namespace HostPinger.Core.Services
 
                 totalDeleted += deleted;
                 await db.Database.ExecuteSqlRawAsync("PRAGMA incremental_vacuum;", cancellationToken);
+                if (Stopwatch.GetElapsedTime(started) >= budget)
+                {
+                    break;
+                }
             }
 
             return totalDeleted;

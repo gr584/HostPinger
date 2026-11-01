@@ -26,6 +26,12 @@ namespace HostPinger.Core.Services
         private readonly ILogger<PingMonitorService> _logger;
         private readonly TimeProvider _timeProvider;
 
+        /// <summary>
+        /// How long a round may spend pruning, from the settings it runs with. Settable for the
+        /// tests, which take it to nothing to see a round leave what is over the limit to the next.
+        /// </summary>
+        internal Func<PingerOptions, TimeSpan> PruneBudgetFor { get; init; } = PruneBudget;
+
         public PingMonitorService(
             IDbContextFactory<HostPingerDbContext> dbFactory,
             IPingSender pingSender,
@@ -85,8 +91,19 @@ namespace HostPinger.Core.Services
             }
         }
 
-        private TimeSpan GetInterval() =>
-            TimeSpan.FromSeconds(Math.Clamp(_settings.CurrentPinger.IntervalSeconds, 1, MaxIntervalSeconds));
+        private TimeSpan GetInterval() => IntervalOf(_settings.CurrentPinger);
+
+        private static TimeSpan IntervalOf(PingerOptions options) =>
+            TimeSpan.FromSeconds(Math.Clamp(options.IntervalSeconds, 1, MaxIntervalSeconds));
+
+        /// <summary>
+        /// How long a round may spend pruning: a quarter of the interval. Enough to keep up with
+        /// many times what a round adds, and short enough that the rounds stay on time while a
+        /// lowered limit is worked down to, a slice a round, rather than none running until it is
+        /// reached; see <see cref="DatabasePruner.EnforceSizeLimitAsync"/>. A quarter rather than a
+        /// fixed time, so a cut takes about as long to work through at any interval.
+        /// </summary>
+        internal static TimeSpan PruneBudget(PingerOptions options) => IntervalOf(options) / 4;
 
         /// <summary>
         /// Pings all enabled hosts once, stores the attempts, and prunes the database. Hosts whose
@@ -113,7 +130,7 @@ namespace HostPinger.Core.Services
             // something would leave the last failures of a host that is gone sitting there for
             // good.
             await _pruner.EnforceResolverErrorRetentionAsync(db, timestampUtc, cancellationToken);
-            await _pruner.EnforceSizeLimitAsync(db, options.MaxDatabaseSizeBytes, cancellationToken);
+            await _pruner.EnforceSizeLimitAsync(db, options.MaxDatabaseSizeBytes, PruneBudgetFor(options), cancellationToken);
             return recorded;
         }
 

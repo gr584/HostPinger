@@ -273,6 +273,57 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// A round prunes for no longer than its budget allows and leaves what is still over the
+        /// limit to the rounds after it: one that pruned a lowered limit all the way down at once
+        /// held the rounds off for minutes. With the budget taken to nothing, a round gets one batch
+        /// in. The in-memory database here never shrinks, so a round that ignored its budget would
+        /// go on until the history was gone.
+        /// </summary>
+        [Test]
+        public async Task RunRound_PrunesNoLongerThanItsBudgetAllows()
+        {
+            const int seeded = 30_000;
+            await using (var db = new HostPingerDbContext(_options))
+            {
+                var host = new MonitoredHost { Name = "busy", Address = "busy.example" };
+                db.Hosts.Add(host);
+                await db.SaveChangesAsync();
+                var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+                db.PingAttempts.AddRange(Enumerable.Range(0, seeded).Select(i => new PingAttempt
+                {
+                    HostId = host.Id,
+                    TimestampUtc = start.AddSeconds(i),
+                    RoundtripMs = i % 100,
+                }));
+                await db.SaveChangesAsync();
+                Assert.That(await DatabasePruner.GetDatabaseSizeBytesAsync(db), Is.GreaterThan(1024 * 1024),
+                    "the seed is over the 1 MB limit");
+            }
+
+            var recorded = await CreateService(
+                    new FakePingSender(), new PingerOptions { MaxDatabaseSizeMb = 1 }, pruneBudget: TimeSpan.Zero)
+                .RunRoundAsync();
+
+            await using var verify = new HostPingerDbContext(_options);
+            Assert.That(await verify.PingAttempts.CountAsync(), Is.EqualTo(seeded + recorded - 1000));
+        }
+
+        /// <summary>
+        /// The budget is a quarter of the interval the round runs at, with the interval held to
+        /// the bounds the loop holds it to.
+        /// </summary>
+        [TestCase(40, 10_000)]
+        [TestCase(1, 250)]
+        [TestCase(0, 250)]
+        [TestCase(200_000, 21_600_000)]
+        public void PruneBudget_IsAQuarterOfTheInterval(int intervalSeconds, int expectedMilliseconds)
+        {
+            Assert.That(
+                PingMonitorService.PruneBudget(new PingerOptions { IntervalSeconds = intervalSeconds }),
+                Is.EqualTo(TimeSpan.FromMilliseconds(expectedMilliseconds)));
+        }
+
+        /// <summary>
         /// A round that takes time has to be absorbed by the interval, not added to it. Assigning
         /// <c>PeriodicTimer.Period</c> restarts its countdown from that moment, so assigning it
         /// after every round put each round's duration into the gap and left the real cadence at
@@ -626,7 +677,8 @@ namespace HostPinger.Test
             MaintenanceGate? maintenanceGate = null,
             TestOptionsMonitor<PingerOptions>? pinger = null,
             ILogger<PingMonitorService>? logger = null,
-            IDbContextFactory<HostPingerDbContext>? dbFactory = null)
+            IDbContextFactory<HostPingerDbContext>? dbFactory = null,
+            TimeSpan? pruneBudget = null)
         {
             // The settings arrive as configured defaults under a store with no rows, which is the
             // state of a fresh install.
@@ -639,7 +691,10 @@ namespace HostPinger.Test
                     new TestOptionsMonitor<SecurityOptions>(new SecurityOptions())),
                 new DatabasePruner(),
                 maintenanceGate ?? new MaintenanceGate(),
-                logger ?? NullLogger<PingMonitorService>.Instance);
+                logger ?? NullLogger<PingMonitorService>.Instance)
+            {
+                PruneBudgetFor = pruneBudget is { } budget ? _ => budget : PingMonitorService.PruneBudget,
+            };
         }
 
         /// <summary>
