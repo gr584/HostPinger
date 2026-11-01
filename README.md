@@ -162,29 +162,33 @@ and saved only when it is.
   errors, which are dropped at 30 days either way.
 - **Capacity estimate** — the current file size, how fast it is growing at the present host count
   and interval, and roughly how much history fits inside the limit at that rate.
-- **Backup** — downloads a snapshot of the whole database: hosts, history, settings and the
-  hashed password, if one is set, all travel with it. The copy is consistent — monitoring pauses
-  for the moment it takes — and compacted, so it weighs what the data weighs rather than what the
-  file on disk does. Unlock to use it; with a password set, it asks for the current one first, in
-  an overlay like the one that unlocks. The overlay shows how far the snapshot has got, and the
-  download starts once it is written; Cancel or Escape stops it partway.
-- **Restore** — uploads a backup and, after a confirmation, replaces the current database with
-  it. Everything comes from the backup, including its password or the lack of one, so a restore
-  can lock the browser out — `--remove-password` is the recovery, as ever — or unlock the
-  service. The file is checked before anything is replaced: it must be an intact SQLite database
-  with HostPinger's schema and no triggers or views, which HostPinger never creates, and one from
-  a newer version is refused. A backup from an older version is migrated up where it lies, the
-  way an old database is at startup, while monitoring carries on; that needs room beside the
-  database of about half the backup's size, and a backup there is no room for is refused up front.
-  One that cannot be migrated, or lacks a table, is refused with nothing replaced, and one that
-  fails to open once it is in place is taken out again and the database it replaced put straight
-  back. Monitoring pauses only for the moment the swap takes. The restored database is put in
-  SQLite's WAL mode, where reading the history never holds up a ping round's write. The database
-  being replaced is kept beside the new one as `hostpinger.db.pre-restore`, one restore's worth of
-  undo, complete in that one file. Unlock to use it; with a password set, it asks for the current
-  one first, in an overlay like the one that unlocks, before the file is chosen. Once the restore is
-  confirmed, the overlay shows how far the upload has got, then the check and the swap as they
-  happen, and then what came of it.
+- **Backup** — downloads a snapshot of the whole database: hosts, history, settings and the hashed
+  password, if one is set, all travel with it. The copy is consistent, of the moment it began,
+  while monitoring carries on, and compacted, so it weighs what the data weighs rather than what
+  the file on disk does. It is written beside the database before the download starts, so the disk
+  needs room for it there. Unlock to use it; with a password set, it asks for the current one
+  first, in an overlay like the one that unlocks. The overlay shows how far the snapshot has got,
+  and the download starts once it is written; Cancel or Escape stops it partway.
+- **Restore** — uploads a backup and, after a confirmation, replaces the current database with it.
+  Everything comes from the backup, including its password or the lack of one, so a restore can
+  lock the browser out — `--remove-password` is the recovery, as ever — or unlock the service. The
+  file is checked before anything is replaced: it must be an intact SQLite database with
+  HostPinger's schema and no triggers or views, which HostPinger never creates, and one from a
+  newer version is refused. A backup from an older version is migrated up where it lies, the way an
+  old database is at startup, while monitoring carries on; that needs room beside the database of
+  about half the backup's size, and a backup there is no room for is refused up front. One that
+  cannot be migrated, or lacks a table, is refused with nothing replaced, and one that fails to
+  open once it is in place is taken out again and the database it replaced put straight back.
+  Monitoring, and whatever the pages read or write, pauses only for the moment the swap takes. The
+  restored database is put in SQLite's WAL mode, where reading the history never holds up a ping
+  round's write. The database being replaced is kept beside the new one as
+  `hostpinger.db.pre-restore`, one restore's worth of undo, complete in that one file. It is as
+  large as the database it was and stays until the next restore replaces it, outside the size
+  limit, so delete it by hand once it is no longer wanted. Unlock to use it; with a password set,
+  it asks for the current one first, in an overlay like the one that unlocks, before the file is
+  chosen. Once the restore is confirmed, the overlay shows how far the upload has got, then the
+  check and the swap as they happen, and then what came of it. One backup or restore runs at a
+  time: another asked for meanwhile, from any browser, is turned away with what is under way.
 - **Security** — whether a password is set, and the way to `/password` to set, change or remove
   one.
 
