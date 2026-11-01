@@ -15,7 +15,7 @@
 @inject LockPrompt Prompt
 @inject DatabaseBackup Backup
 @inject BackupDownloadTokens Tokens
-@inject NavigationManager Navigation
+@inject IJSRuntime JS
 @inject ILogger<Configuration> Logger
 @implements IDisposable
 
@@ -422,6 +422,9 @@
     // The snapshot being written for a download, cancelled when its overlay is, or when the page goes.
     private CancellationTokenSource? _preparation;
 
+    // The page's script, imported the first time a download starts.
+    private IJSObjectReference? _module;
+
     // The overlay that confirms a download or a restore, and what it is confirming.
     private Confirming _confirming;
     private ElementReference _dialog;
@@ -809,9 +812,18 @@
 
         Logger.LogInformation("Backup downloaded from {Address}.", RequestOrigin.Describe(Origin));
 
-        // A full page navigation rather than anything on the circuit: the response says
-        // attachment, so the browser starts the download and this page stays where it is.
-        Navigation.NavigateTo($"database-backup?token={Tokens.Issue(snapshotPath)}", forceLoad: true);
+        // Fetched by the browser rather than over the circuit, through a download link rather
+        // than a navigation; the module says why. If the browser never asks, because the circuit
+        // went before it could be told, the token expires and deletes the snapshot.
+        var address = $"database-backup?token={Tokens.Issue(snapshotPath)}";
+        try
+        {
+            _module ??= await JS.InvokeAsync<IJSObjectReference>("import", "./Components/Pages/Configuration.razor.js");
+            await _module.InvokeVoidAsync("download", address);
+        }
+        catch (Exception ex) when (ex is JSException or JSDisconnectedException or OperationCanceledException or ObjectDisposedException)
+        {
+        }
     }
 
     /// <summary>

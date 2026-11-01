@@ -97,7 +97,7 @@ namespace HostPinger.UITest
         /// because the file carries its hash. The overlay opens on its password box, an empty box
         /// and a wrong password are each turned away inside it with their own sentence and the box
         /// emptied, Escape closes it, and the right password shows the snapshot being written in a
-        /// progress bar, then hands over a database.
+        /// progress bar, then hands over a database without navigating the page.
         /// </summary>
         [Test]
         public async Task Backup_DownloadsAnSqliteDatabaseOnlyForTheCurrentPassword()
@@ -121,8 +121,15 @@ namespace HostPinger.UITest
             await Button("Download backup").ClickAsync();
             await CurrentPassword.FillAsync(WebApp.Password);
             await WatchProgressAsync();
+
+            // Firefox closes the circuit's connection as soon as the page starts to navigate, even
+            // to an attachment, and the circuit ends a minute later. Chromium, which drives these
+            // tests, keeps the connection, but tells the page it is being left just the same.
+            await Page.EvaluateAsync("() => addEventListener('beforeunload', () => window.leftThePage = true)");
             var download = await Page.RunAndWaitForDownloadAsync(() => Button(Dialog, "Download").ClickAsync());
             await Assertions.Expect(Overlay).ToBeHiddenAsync();
+            Assert.That(await Page.EvaluateAsync<bool>("() => window.leftThePage === true"), Is.False,
+                "the download navigated the page instead of starting from a download link");
 
             // The test's database is copied in a moment, so the bar is seen at the start and the
             // end, and rarely in between.
@@ -159,17 +166,21 @@ namespace HostPinger.UITest
         public async Task Backup_AddressIsRefusedWithoutTheUnlockAndTheSnapshotDeleted()
         {
             await UnlockedConfigurationPageAsync();
-            var requested = new TaskCompletionSource<string>();
-            await Page.RouteAsync("**/database-backup?*", async route =>
-            {
-                requested.TrySetResult(route.Request.Url);
-                await route.AbortAsync();
-            });
+
+            // The page starts the download by clicking a link of its own, which a route does not
+            // see. Held back here instead, so the address is still unspent.
+            await Page.EvaluateAsync(@"() => document.addEventListener('click', e => {
+                const link = e.target.closest('a[download]');
+                if (link) {
+                    e.preventDefault();
+                    window.downloadAddress = link.href;
+                }
+            }, { capture: true })");
 
             await ClickUntilAsync(Button("Download backup"), Overlay);
             await CurrentPassword.FillAsync(WebApp.Password);
             await Button(Dialog, "Download").ClickAsync();
-            var address = await requested.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            var address = await (await Page.WaitForFunctionAsync("() => window.downloadAddress")).JsonValueAsync<string>();
 
             var snapshots = () => Directory.EnumerateFiles(
                 Path.GetDirectoryName(UiTestRun.DatabasePath)!, "hostpinger-backup-*");
