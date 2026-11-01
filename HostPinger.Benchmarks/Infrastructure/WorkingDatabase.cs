@@ -49,6 +49,7 @@ namespace HostPinger.Benchmarks.Infrastructure
             Summaries = services.GetRequiredService<HostSummaryCache>();
             Hosts = services.GetRequiredService<HostStore>();
             Reads = services.GetRequiredService<DatabaseReads>();
+            Backup = services.GetRequiredService<DatabaseBackup>();
         }
 
         public string Path { get; }
@@ -62,6 +63,8 @@ namespace HostPinger.Benchmarks.Infrastructure
         public HostStore Hosts { get; }
 
         public DatabaseReads Reads { get; }
+
+        public DatabaseBackup Backup { get; }
 
         /// <summary>The time of the last round landed, which is what every read takes as now.</summary>
         public DateTime NowUtc => _clock.GetUtcNow().UtcDateTime;
@@ -99,6 +102,7 @@ namespace HostPinger.Benchmarks.Infrastructure
                 .AddSingleton<HostSummaryCache>()
                 .AddSingleton<HostStore>()
                 .AddSingleton<DatabaseReads>()
+                .AddSingleton<DatabaseBackup>()
                 .BuildServiceProvider();
 
             var database = new WorkingDatabase(path, services, clock);
@@ -164,12 +168,19 @@ namespace HostPinger.Benchmarks.Infrastructure
             DeleteDatabaseFiles(Path);
         }
 
+        /// <summary>
+        /// The working file and everything kept beside it: SQLite's own files, a restore's undo
+        /// copy, and the snapshots and uploads a backup or restore benchmark writes, each a
+        /// gigabyte, which one that failed partway would otherwise leave for every run after it.
+        /// </summary>
         private static void DeleteDatabaseFiles(string path)
         {
-            foreach (var suffix in new[] { string.Empty, "-journal", "-wal", "-shm" })
+            foreach (var suffix in new[] { string.Empty, "-journal", "-wal", "-shm", ".pre-restore" })
             {
                 File.Delete(path + suffix);
             }
+
+            DatabaseBackup.DeleteLeftoverTempFiles(new PingerPaths(path));
         }
     }
 }

@@ -842,10 +842,10 @@ A lightweight tag (`git tag v1.15.0`) has no message, and its release carries th
 
 `HostPinger.Benchmarks` times the calls the pages make into `HostPinger.Core` with BenchmarkDotNet:
 the Hosts summary, opening and refreshing the graph, the Configuration and Resolver errors reads,
-the changes `HostStore` and `UserSettingsStore` make, opening the database at startup, and
-upgrading it from the schema the last release left, which is what the first start of a new
-release does; while no migration has been added since that release, that last one has nothing to
-do. Each
+the changes `HostStore` and `UserSettingsStore` make, writing a backup's snapshot with a ping round
+landing alongside it, checking a backup and restoring one, opening the database at startup, and
+upgrading it from the schema the last release left, which is what the first start of a new release
+does; while no migration has been added since that release, that last one has nothing to do. Each
 benchmark starts from a fresh copy of a seeded database shaped like the production one the page
 freezes were found on: 21 hosts pinged every ten seconds for 48 days, 8.3 million attempts, with two
 hosts in outages still running after 41 and 20 days, outages of hours that ended, network-wide
@@ -870,7 +870,8 @@ clicks; startup and the delete with its history start from an unchanged copy ins
 run with the file dropped from the page cache, which is how they behave on a service whose database
 the rest of the machine has pushed out of memory. Those cold cases need Linux and are left out
 elsewhere. The delete with its history runs one warmup and five iterations, since each needs a fresh
-copy of the database, so `--iterationCount` does not apply to it. The results land in
+copy of the database, and the backup and restore benchmarks one warmup and three, since each writes
+or restores a gigabyte; `--iterationCount` does not apply to them. The results land in
 `BenchmarkDotNet.Artifacts/results`, with every table together in `summary.md`.
 
 CI runs them on every push to main and every pull request and puts `summary.md` on the run's summary
