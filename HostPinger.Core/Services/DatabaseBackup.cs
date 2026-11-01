@@ -10,13 +10,15 @@ namespace HostPinger.Core.Services
     /// Copies the database out as a backup and swaps a validated backup in as a restore. Both
     /// operations hold the <see cref="MaintenanceGate"/>, so they never overlap a ping round or
     /// each other, and both work beside the live file: the hardened service deployments leave the
-    /// data directory as the only place this process can write.
+    /// data directory as the only place this process can write. The swap also shuts the
+    /// <see cref="DatabaseFileGate"/>, which keeps every other connection off the file meanwhile.
     /// </summary>
     public sealed class DatabaseBackup(
         PingerPaths paths,
         IDbContextFactory<HostPingerDbContext> dbFactory,
         UserSettingsStore settings,
         MaintenanceGate maintenanceGate,
+        DatabaseFileGate fileGate,
         HostSummaryCache hostSummaries)
     {
         /// <summary>
@@ -38,10 +40,13 @@ namespace HostPinger.Core.Services
         private const string DataBytesQuery =
             "SELECT (page_count - freelist_count) * page_size FROM pragma_page_count(), pragma_freelist_count(), pragma_page_size();";
 
+        private const string StayedInUse = "The database stayed in use, so nothing was replaced. Try the restore again.";
+
         /// <summary>
-        /// How long a restore waits for the file it is retiring to be let go of before it gives up:
-        /// the provider's own default. Settable for the tests, which would otherwise spend half a
-        /// minute holding a file open to see the restore refuse.
+        /// How long a restore waits for the file it is retiring to be let go of before it gives up,
+        /// first by the application's own connections and then by SQLite: the provider's own
+        /// default. Settable for the tests, which would otherwise spend half a minute holding a
+        /// file open to see the restore refuse.
         /// </summary>
         internal int BusyTimeoutSeconds { get; init; } = 30;
 
@@ -359,7 +364,18 @@ namespace HostPinger.Core.Services
             await hostSummaries.SuspendAsync(cancellationToken);
             try
             {
-                await ReplaceAsync(candidatePath, cancellationToken);
+                // The pages' reads and writes take no turns at the gate above. The file gate waits
+                // for the connections they have open, and keeps new ones back through everything
+                // that follows: emptying the pool, the swap, opening the restored file and loading
+                // its settings, or putting the old file back.
+                await fileGate.WhileShutAsync(
+                    TimeSpan.FromSeconds(BusyTimeoutSeconds),
+                    () => ReplaceAsync(candidatePath, cancellationToken),
+                    cancellationToken);
+            }
+            catch (TimeoutException ex)
+            {
+                throw new IOException(StayedInUse, ex);
             }
             finally
             {
@@ -616,10 +632,13 @@ namespace HostPinger.Core.Services
         /// Takes the file about to be retired out of WAL mode. Leaving it, SQLite folds whatever the
         /// -wal still holds into the file, so the undo copy is whole on its own; and it only leaves
         /// once no other connection has the file open, so this is also what waits out a read still
-        /// in progress on it, for as long as the provider retries a busy command. That wait is what
-        /// keeps the restored file safe: the last connection to close on a WAL database deletes the
-        /// -wal and -shm beside it by name, and after the swap those names are the restored file's.
-        /// A file already in rollback-journal mode has neither, and is left as it is.
+        /// in progress on it, for as long as the provider retries a busy command. The application's
+        /// own connections have been waited for at the <see cref="DatabaseFileGate"/> by now, so
+        /// what is left to wait for here is a connection from outside it, another process's. That
+        /// wait is what keeps the restored file safe: the last connection to close on a WAL
+        /// database deletes the -wal and -shm beside it by name, and after the swap those names are
+        /// the restored file's. A file already in rollback-journal mode has neither, and is left as
+        /// it is.
         /// </summary>
         private static async Task LeaveWalAsync(string databasePath, int busyTimeoutSeconds, CancellationToken cancellationToken)
         {
@@ -631,8 +650,7 @@ namespace HostPinger.Core.Services
             {
                 // SQLITE_BUSY and SQLITE_LOCKED: something held the file for the whole wait. An
                 // IOException, so the page reports it as a failed restore like any other.
-                throw new IOException(
-                    "The database stayed in use, so nothing was replaced. Try the restore again.", ex);
+                throw new IOException(StayedInUse, ex);
             }
         }
 

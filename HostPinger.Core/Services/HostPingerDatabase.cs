@@ -48,13 +48,17 @@ namespace HostPinger.Core.Services
 
         /// <summary>
         /// Registers the context factory every reader and writer of the database takes its contexts
-        /// from, over the database <paramref name="paths"/> names.
+        /// from, over the database <paramref name="paths"/> names, and the
+        /// <see cref="DatabaseFileGate"/> its connections go through, which a restore shuts while it
+        /// swaps the file.
         /// </summary>
         public static IServiceCollection AddHostPingerDatabase(this IServiceCollection services, PingerPaths paths) =>
-            services.AddDbContextFactory<HostPingerDbContext>(
-                options => options
-                    .UseSqlite(ConnectionString(paths.DatabasePath))
-                    .AddInterceptors(JournalSizeLimit.Instance));
+            services
+                .AddSingleton<DatabaseFileGate>()
+                .AddDbContextFactory<HostPingerDbContext>(
+                    (provider, options) => options
+                        .UseSqlite(ConnectionString(paths.DatabasePath))
+                        .AddInterceptors(JournalSizeLimit.Instance, provider.GetRequiredService<DatabaseFileGate>().Interceptor));
 
         /// <summary>
         /// What has to happen before the first page is served, from the services

@@ -42,6 +42,13 @@ namespace HostPinger.Core.Services
     /// that restore had just retired.
     /// </para>
     /// <para>
+    /// What every change does wait for is the moment a restore swaps the file, at the
+    /// <see cref="DatabaseFileGate"/>. A change already under way keeps the restore waiting until
+    /// it is done, so it reaches one file whole. One that arrives meanwhile goes to the restored
+    /// file afterwards, by the id the page read from the file before it; ids are not carried
+    /// from one file to the other, so that can be another host.
+    /// </para>
+    /// <para>
     /// Each change but a delete runs on the thread that asks for it, for as long as its statement
     /// takes: Microsoft.Data.Sqlite does no asynchronous I/O, and a change to one row takes
     /// milliseconds. Only the wait for the summary afterwards hands the thread back. A delete can
@@ -217,6 +224,11 @@ namespace HostPinger.Core.Services
             var paused = false;
             try
             {
+                // One connection for the whole delete, so a restore swaps the file before it or
+                // after it, never between two batches: the batches after the swap would take a
+                // host of the restored file's by an id read from the one it replaced. Each batch
+                // still commits on its own; an open connection holds no transaction.
+                await db.Database.OpenConnectionAsync();
                 if (await db.Hosts.Where(h => h.Id == id).ExecuteUpdateAsync(s => s.SetProperty(h => h.IsEnabled, false)) == 0)
                 {
                     return;

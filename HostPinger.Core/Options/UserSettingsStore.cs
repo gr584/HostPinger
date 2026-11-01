@@ -38,6 +38,12 @@ namespace HostPinger.Core.Options
         private Dictionary<string, string> _rows = [];
 
         /// <summary>
+        /// Called once a save has read what it changes, before it writes. For the tests, which have
+        /// no other way to act between the two: to start a restore there.
+        /// </summary>
+        internal Func<Task>? AfterStage { get; init; }
+
+        /// <summary>
         /// Reads the table into the snapshot. Called once at startup, after the migrations have
         /// run; until then the store answers with the configured defaults alone.
         /// </summary>
@@ -191,10 +197,20 @@ namespace HostPinger.Core.Options
             await _gate.WaitAsync(cancellationToken);
             try
             {
+                // One connection from the first read to the snapshot's update below, so that a
+                // restore, which reloads the snapshot once its file is in place, swaps the file
+                // before the save or after it. Swapped in between, the snapshot updated here would
+                // describe the file the restore retired, its password included.
                 await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+                await db.Database.OpenConnectionAsync(cancellationToken);
                 foreach (var (key, value) in changes)
                 {
                     await StageAsync(db, key, value, cancellationToken);
+                }
+
+                if (AfterStage is { } afterStage)
+                {
+                    await afterStage();
                 }
 
                 await db.SaveChangesAsync(cancellationToken);

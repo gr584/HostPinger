@@ -22,6 +22,7 @@ namespace HostPinger.Test
 
         private string _directory = null!;
         private string _dbPath = null!;
+        private DatabaseFileGate _fileGate = null!;
         private DbContextOptions<HostPingerDbContext> _options = null!;
         private UserSettingsStore _store = null!;
         private HostSummaryCache _summaries = null!;
@@ -33,7 +34,11 @@ namespace HostPinger.Test
             _directory = Path.Combine(Path.GetTempPath(), $"hostpinger-test-{Guid.NewGuid():N}");
             Directory.CreateDirectory(_directory);
             _dbPath = Path.Combine(_directory, "hostpinger.db");
-            _options = OptionsFor(_dbPath);
+
+            // Through a gate of its own, as the application's factory goes through one, so that a
+            // restore's own connections have to be let through it.
+            _fileGate = new DatabaseFileGate();
+            _options = OptionsFor(_dbPath, _fileGate);
 
             // Migrated rather than EnsureCreated, because validation and restore both read the
             // migration history — the shape a real database has.
@@ -52,6 +57,7 @@ namespace HostPinger.Test
                 new TestDb.Factory(_options),
                 _store,
                 new MaintenanceGate(),
+                _fileGate,
                 _summaries);
         }
 
@@ -396,6 +402,7 @@ namespace HostPinger.Test
                 new TestDb.Factory(OptionsFor(brokenPath)),
                 _store,
                 new MaintenanceGate(),
+                _fileGate,
                 _summaries);
 
             Assert.That(async () => await backup.CreateSnapshotAsync(),
@@ -544,6 +551,7 @@ namespace HostPinger.Test
                 new TestDb.Factory(_options),
                 _store,
                 new MaintenanceGate(),
+                _fileGate,
                 _summaries)
             {
                 BusyTimeoutSeconds = 1,
@@ -564,6 +572,234 @@ namespace HostPinger.Test
             {
                 Assert.That(await db.Hosts.CountAsync(h => h.Address == "since.example"), Is.EqualTo(1), "the database was not replaced");
                 Assert.That(File.Exists(backupPath), Is.True, "the backup was not consumed");
+                Assert.That(File.Exists(backup.PreRestorePath), Is.False);
+            });
+        }
+
+        /// <summary>
+        /// A page writing while a restore waits for the file — another browser saving a host, say —
+        /// used to open a connection that went back into the pool still holding the file, so the
+        /// restore gave up once its wait ran out; and one that came after the file had left WAL mode
+        /// wrote into the file being retired. Now the page's connection waits at the gate until the
+        /// restored file is in place, and the write lands there. The restore's wait is held open
+        /// here by a connection from outside the gate, as another process's would be.
+        /// </summary>
+        [Test]
+        public async Task Restore_HoldsBackAPageWriteUntilTheRestoredFileIsInPlace()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var backupPath = await BackupWithAsync("backup.example", "backup-hash");
+
+            await using var outside = new SqliteConnection($"Data Source={_dbPath};Pooling=False");
+            await outside.OpenAsync();
+            await ScalarAsync(outside, "SELECT COUNT(*) FROM Hosts;");
+
+            var restore = Task.Run(() => _backup.RestoreAsync(backupPath));
+            await WaitUntilAsync(() => _fileGate.IsShut, "the restore shuts the gate before it waits for the file");
+            var write = Task.Run(() => SeedHostWithAttemptsAsync(_options, "written-meanwhile.example", attempts: 1));
+
+            // Long enough for a write that was not held back to have finished.
+            await Task.WhenAny(write, Task.Delay(TimeSpan.FromSeconds(1)));
+            var writtenWhileShut = write.IsCompleted;
+            await outside.CloseAsync();
+            await restore.WaitAsync(Patience);
+            await write.WaitAsync(Patience);
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(writtenWhileShut, Is.False, "the write waits for the restore");
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example", "written-meanwhile.example" }),
+                    "the write lands in the restored file");
+                Assert.That(await AddressesAsync(_backup.PreRestorePath), Is.EqualTo(new[] { "current.example" }),
+                    "and nothing of it in the file retired");
+                Assert.That(await IntegrityCheckAsync(_dbPath), Is.EqualTo("ok"));
+            });
+        }
+
+        /// <summary>
+        /// In rollback-journal mode an open connection holds no lock between its statements, so
+        /// SQLite has nothing to say about it and only the gate keeps a restore from swapping the
+        /// file under a page's write. Swapped then, the write's journal sat beside the restored file
+        /// under the live name, and the restored file was the next to open it: it rolled the
+        /// journal in, with pages of the file it replaced. Here the write is held open on purpose,
+        /// over every one of the current file's attempts, until the restore is waiting for it.
+        /// </summary>
+        [Test]
+        public async Task Restore_WaitsForAWriteUnderWayEvenInRollbackJournalMode()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 2000);
+            var backupPath = await BackupWithAsync("backup.example", "backup-hash");
+            SqliteConnection.ClearAllPools();
+            await using (var connection = new SqliteConnection($"Data Source={_dbPath};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                await ScalarAsync(connection, "PRAGMA journal_mode = DELETE;");
+            }
+
+            Task restore;
+            await using (var page = new HostPingerDbContext(_options))
+            {
+                await page.Database.OpenConnectionAsync();
+                await page.Database.ExecuteSqlRawAsync("BEGIN IMMEDIATE;");
+                await page.Database.ExecuteSqlRawAsync("UPDATE PingAttempts SET RoundtripMs = 1000;");
+
+                restore = Task.Run(() => _backup.RestoreAsync(backupPath));
+                await WaitUntilAsync(() => _fileGate.IsShut, "the restore asks for the gate");
+                await Task.Delay(TimeSpan.FromMilliseconds(300));
+                Assert.That(restore.IsCompleted, Is.False, "the restore waits for the write");
+                await page.Database.ExecuteSqlRawAsync("COMMIT;");
+            }
+
+            await restore.WaitAsync(Patience);
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(await IntegrityCheckAsync(_dbPath), Is.EqualTo("ok"));
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example" }));
+                Assert.That(await ScalarAsync(_dbPath, "SELECT COUNT(*) FROM PingAttempts WHERE RoundtripMs < 1000;"), Is.EqualTo(3L),
+                    "the restored file's history is its own");
+                Assert.That(await ScalarAsync(_backup.PreRestorePath, "SELECT COUNT(*) FROM PingAttempts WHERE RoundtripMs = 1000;"),
+                    Is.EqualTo(2000L), "the write committed, to the file retired");
+            });
+        }
+
+        /// <summary>
+        /// A host's delete takes its history in batches, each committed on its own, and used to let
+        /// go of its connection between them. A restore that swapped the file meanwhile had the
+        /// remaining batches take the restored file's host with that id, a different host; and the
+        /// delete's connection, back in the pool between batches, held the file so that the restore
+        /// could rarely get it anyway. Now the delete keeps its connection to the end, and a restore
+        /// waits for it and then swaps a file the delete has finished with. The delete is held at
+        /// its first statement by a write lock from outside the gate, until the restore is waiting.
+        /// </summary>
+        [Test]
+        public async Task Restore_WaitsForAHostDeleteUnderWayAndLeavesTheRestoredHostsAlone()
+        {
+            // Four batches' worth, so the delete has statements left after its first.
+            await SeedHostWithAttemptsAsync(_options, "doomed.example", attempts: 4 * HostStore.DeleteBatchSize);
+            var backupPath = await BackupWithAsync("backup.example", "backup-hash");
+            await _store.LoadAsync();
+            await _summaries.LoadAsync();
+            await _summaries.StartAsync(CancellationToken.None);
+            var hosts = new HostStore(new TestDb.Factory(_options), _summaries, NullLogger<HostStore>.Instance);
+            var id = _summaries.Current.Rows.Single().Host.Id;
+
+            Task restore;
+            Task delete;
+            await using (var writeLock = new SqliteConnection($"Data Source={_dbPath};Pooling=False"))
+            {
+                await writeLock.OpenAsync();
+                await ScalarAsync(writeLock, "BEGIN IMMEDIATE;");
+                delete = hosts.DeleteAsync(id);
+                await WaitUntilAsync(() => _fileGate.OpenConnections == 1, "the delete has its connection open");
+
+                restore = Task.Run(() => _backup.RestoreAsync(backupPath));
+                await WaitUntilAsync(() => _fileGate.IsShut, "the restore asks for the gate");
+                await Task.Delay(TimeSpan.FromMilliseconds(300));
+                Assert.That(restore.IsCompleted, Is.False, "the restore waits for the delete");
+                await ScalarAsync(writeLock, "ROLLBACK;");
+            }
+
+            await delete.WaitAsync(Patience);
+            await restore.WaitAsync(Patience);
+            await _summaries.StopAsync(CancellationToken.None);
+
+            Assert.That(id, Is.EqualTo(1), "the host deleted has the id the backup's host has");
+            Assert.Multiple(async () =>
+            {
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example" }));
+                Assert.That(await ScalarAsync(_dbPath, "SELECT COUNT(*) FROM PingAttempts;"), Is.EqualTo(3L),
+                    "the restored host keeps its history");
+                Assert.That(await AddressesAsync(_backup.PreRestorePath), Is.Empty, "the delete finished in the file retired");
+                Assert.That(await ScalarAsync(_backup.PreRestorePath, "SELECT COUNT(*) FROM PingAttempts;"), Is.EqualTo(0L));
+            });
+        }
+
+        /// <summary>
+        /// A settings save reads the rows it changes, writes them, and then updates the snapshot of
+        /// settings in force, which a restore reloads from the restored file once it is in place. A
+        /// restore that swapped the file partway through used to leave the save writing to the
+        /// restored file rows it had read from the other, and the snapshot describing either file.
+        /// Now the save keeps one connection throughout, so the restore waits for it: the save goes
+        /// to the file retired, and what is in force afterwards is the restored file's. Here the
+        /// interval is stored in the current file and not in the backup, which is what made the
+        /// save's update fail against the restored file.
+        /// </summary>
+        [Test]
+        public async Task Restore_LoadsTheRestoredSettingsOverASaveThatStartedBeforeIt()
+        {
+            await StagePasswordAsync(_options, "current-hash");
+            var backupPath = await BackupWithAsync("backup.example", "backup-hash");
+            DatabaseBackup? backup = null;
+            Task? restore = null;
+            var store = new UserSettingsStore(
+                new TestDb.Factory(_options),
+                new TestOptionsMonitor<PingerOptions>(new PingerOptions()),
+                new TestOptionsMonitor<SecurityOptions>(new SecurityOptions()))
+            {
+                AfterStage = async () =>
+                {
+                    if (restore is null && backup is not null)
+                    {
+                        restore = Task.Run(() => backup.RestoreAsync(backupPath));
+                        await WaitUntilAsync(() => _fileGate.IsShut, "the restore asks for the gate");
+                    }
+                },
+            };
+            await store.SaveAsync(new PingerSettingsUpdate { IntervalSeconds = 20 });
+            await store.LoadAsync();
+            backup = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), store, new MaintenanceGate(), _fileGate, _summaries);
+
+            await store.SaveAsync(new PingerSettingsUpdate { IntervalSeconds = 77 });
+            await restore!.WaitAsync(Patience);
+
+            var defaults = new PingerOptions();
+            Assert.Multiple(async () =>
+            {
+                Assert.That(store.PasswordHash, Is.EqualTo("backup-hash"));
+                Assert.That(store.CurrentPinger.IntervalSeconds, Is.EqualTo(defaults.IntervalSeconds),
+                    "the backup stores no interval, so the default is in force");
+                Assert.That(await ScalarAsync(_dbPath, "SELECT COUNT(*) FROM UserSettings WHERE Key = 'Pinger:IntervalSeconds';"),
+                    Is.EqualTo(0L), "and the restored file still stores none");
+                Assert.That(await ScalarAsync(_backup.PreRestorePath, "SELECT Value FROM UserSettings WHERE Key = 'Pinger:IntervalSeconds';"),
+                    Is.EqualTo("77"), "the save went to the file retired");
+            });
+        }
+
+        /// <summary>
+        /// A page that keeps a connection open for the whole of the restore's wait stops the restore
+        /// before anything is replaced, as a connection from outside does, and the gate opens again
+        /// afterwards rather than leaving every page waiting at it.
+        /// </summary>
+        [Test]
+        public async Task Restore_RefusesWhileAPageKeepsItsConnectionOpenAndOpensTheGateAgain()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var backupPath = await BackupWithAsync("backup.example", "backup-hash");
+            var backup = new DatabaseBackup(
+                new PingerPaths(_dbPath),
+                new TestDb.Factory(_options),
+                _store,
+                new MaintenanceGate(),
+                _fileGate,
+                _summaries)
+            {
+                BusyTimeoutSeconds = 1,
+            };
+
+            IOException? refusal;
+            await using (var page = new HostPingerDbContext(_options))
+            {
+                await page.Database.OpenConnectionAsync();
+                refusal = await Assert.ThrowsAsync<IOException>(() => backup.RestoreAsync(backupPath));
+            }
+
+            Assert.That(refusal!.Message, Is.EqualTo("The database stayed in use, so nothing was replaced. Try the restore again."));
+            Assert.Multiple(async () =>
+            {
+                Assert.That(_fileGate.IsShut, Is.False);
+                Assert.That(await AddressesAsync(_dbPath).WaitAsync(Patience), Is.EqualTo(new[] { "current.example" }),
+                    "the database was not replaced, and is open to the pages again");
                 Assert.That(File.Exists(backup.PreRestorePath), Is.False);
             });
         }
@@ -720,7 +956,7 @@ namespace HostPinger.Test
             var backupPath = await BackupWithAsync("backup.example", "backup-hash");
 
             using var page = new CancellationTokenSource();
-            var backup = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _summaries)
+            var backup = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries)
             {
                 AfterSwap = () => page.CancelAsync(),
             };
@@ -759,7 +995,7 @@ namespace HostPinger.Test
             }
 
             var gate = new MaintenanceGate();
-            var backup = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, gate, _summaries);
+            var backup = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, gate, _fileGate, _summaries);
             Task restoring;
             using (await gate.AcquireAsync())
             {
@@ -795,7 +1031,7 @@ namespace HostPinger.Test
                 await db.GetService<IMigrator>().MigrateAsync(LastIn1_12);
             }
 
-            var cramped = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _summaries)
+            var cramped = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries)
             {
                 MeasureFreeBytes = () => 3L << 20,
             };
@@ -809,7 +1045,7 @@ namespace HostPinger.Test
         public async Task ValidateBackup_AcceptsACurrentBackupWhateverRoomIsLeft()
         {
             var backupPath = await _backup.CreateSnapshotAsync();
-            var cramped = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _summaries)
+            var cramped = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries)
             {
                 MeasureFreeBytes = () => 0,
             };
@@ -837,14 +1073,14 @@ namespace HostPinger.Test
 
         /// <summary>Snapshots that say how far they have got every <paramref name="interval"/>.</summary>
         private DatabaseBackup SnapshotsWatchedEvery(TimeSpan interval) =>
-            new(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _summaries)
+            new(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries)
             {
                 SnapshotProgressInterval = interval,
             };
 
         /// <summary>A restore whose backup goes into place and then fails to open, for the put-back.</summary>
         private DatabaseBackup FailingToOpen() =>
-            new(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _summaries)
+            new(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries)
             {
                 AfterSwap = () => throw new InvalidDataException("Opening it failed in the test."),
             };
@@ -905,10 +1141,16 @@ namespace HostPinger.Test
             });
         }
 
-        private static DbContextOptions<HostPingerDbContext> OptionsFor(string path) =>
-            new DbContextOptionsBuilder<HostPingerDbContext>()
-                .UseSqlite($"Data Source={path}")
-                .Options;
+        private static DbContextOptions<HostPingerDbContext> OptionsFor(string path, DatabaseFileGate? gate = null)
+        {
+            var options = new DbContextOptionsBuilder<HostPingerDbContext>().UseSqlite($"Data Source={path}");
+            if (gate is not null)
+            {
+                options.AddInterceptors(gate.Interceptor);
+            }
+
+            return options.Options;
+        }
 
         private static async Task SeedHostWithAttemptsAsync(
             DbContextOptions<HostPingerDbContext> options, string address, int attempts)
@@ -953,6 +1195,45 @@ namespace HostPinger.Test
             await using var connection = new SqliteConnection($"Data Source={path};Mode=ReadWrite;Pooling=False");
             await connection.OpenAsync();
             return (string?)await ScalarAsync(connection, "PRAGMA journal_mode;");
+        }
+
+        /// <summary>
+        /// Waits for <paramref name="condition"/>, which another thread brings about, failing the
+        /// test with <paramref name="because"/> if it never does.
+        /// </summary>
+        private static async Task WaitUntilAsync(Func<bool> condition, string because)
+        {
+            var deadline = DateTime.UtcNow + Patience;
+            while (!condition())
+            {
+                Assert.That(DateTime.UtcNow, Is.LessThan(deadline), because);
+                await Task.Delay(10);
+            }
+        }
+
+        /// <summary>The hosts' addresses in the file at <paramref name="path"/>, read from outside the gate.</summary>
+        private static async Task<List<string>> AddressesAsync(string path)
+        {
+            await using var connection = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT Address FROM Hosts ORDER BY Id;";
+            var addresses = new List<string>();
+            await using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                addresses.Add(reader.GetString(0));
+            }
+
+            return addresses;
+        }
+
+        /// <summary>One value read from the file at <paramref name="path"/>, from outside the gate.</summary>
+        private static async Task<object?> ScalarAsync(string path, string sql)
+        {
+            await using var connection = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+            await connection.OpenAsync();
+            return await ScalarAsync(connection, sql);
         }
 
         private static async Task<object?> ScalarAsync(SqliteConnection connection, string sql)
