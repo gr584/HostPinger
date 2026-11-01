@@ -496,6 +496,62 @@ namespace HostPinger.UITest
         }
 
         /// <summary>
+        /// A backup whose size limit is more than this disk can safely hold is restored with the
+        /// limit lowered, and the overlay says what it was and what it is now. The run's own limit
+        /// is put back afterwards, so the fixtures after this one find the world as it was.
+        /// </summary>
+        [Test]
+        public async Task Restore_SaysWhenItLoweredTheBackupsSizeLimit()
+        {
+            // A faithful copy, as above, with a limit no disk this runs on can hold.
+            var uploadPath = Path.Combine(Path.GetTempPath(), $"hostpinger-ui-upload-{Guid.NewGuid():N}.db");
+            try
+            {
+                await using (var connection = new SqliteConnection(
+                    $"Data Source={UiTestRun.DatabasePath};Mode=ReadOnly;Pooling=False"))
+                {
+                    await connection.OpenAsync();
+                    await using var command = connection.CreateCommand();
+                    command.CommandText = "VACUUM INTO $path;";
+                    command.Parameters.AddWithValue("$path", uploadPath);
+                    await command.ExecuteNonQueryAsync();
+                }
+
+                await using (var connection = new SqliteConnection($"Data Source={uploadPath};Pooling=False"))
+                {
+                    await connection.OpenAsync();
+                    await using var command = connection.CreateCommand();
+                    command.CommandText = "INSERT INTO UserSettings (Key, Value) VALUES ('Pinger:MaxDatabaseSizeMb', '1000000') "
+                        + "ON CONFLICT (Key) DO UPDATE SET Value = excluded.Value;";
+                    await command.ExecuteNonQueryAsync();
+                }
+
+                await UnlockedConfigurationPageAsync();
+                await Assertions.Expect(MaximumSize).ToBeEnabledAsync();
+                var original = await MaximumSize.InputValueAsync();
+                await ClickUntilAsync(Button("Restore backup…"), Overlay);
+                await GiveTheRestorePasswordAndChooseAsync(uploadPath);
+                await BackupPassword.FillAsync(WebApp.Password);
+                SqliteConnection.ClearAllPools();
+                await Button("Confirm restore").ClickAsync();
+
+                await Assertions.Expect(Dialog.GetByText(
+                        $"Its size limit, {1_000_000:N0} MB, is more than this disk can safely hold, so it is "))
+                    .ToBeVisibleAsync();
+                await Button(Dialog.Locator(".modal-footer"), "Close").ClickAsync();
+                await Assertions.Expect(Overlay).ToBeHiddenAsync();
+
+                await MaximumSize.FillAsync(original);
+                await SaveMaximumSize.ClickAsync();
+                await Assertions.Expect(Page.GetByText("Saved — applied after the next ping round.")).ToBeVisibleAsync();
+            }
+            finally
+            {
+                File.Delete(uploadPath);
+            }
+        }
+
+        /// <summary>
         /// A wrong current password typed in this page's overlay is a guess like any other. Once
         /// the schedule's free ones are spent, the next earns a wait there, and the overlay holds
         /// its button back. It is also counted on the same tally as the unlock overlay's, so the

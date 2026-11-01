@@ -1132,7 +1132,7 @@
 
         _isRestoring = true;
         ShowStep("Uploading the backup…", 0);
-        RestoreRefusal? refusal = null;
+        RestoreResult? result = null;
         try
         {
             // The backup receives the file beside the database, checks it and the password given
@@ -1140,7 +1140,7 @@
             // under way, or a disk without room for the file, comes back as a refusal before any
             // of it is read.
             await using var source = file.OpenReadStream(MaxRestoreUploadBytes, _cts.Token);
-            refusal = await Backup.RestoreUploadAsync(
+            result = await Backup.RestoreUploadAsync(
                 source, file.Size, backupPassword, new Progress<RestoreProgress>(ShowRestoreStep), _cts.Token);
         }
         catch (Exception ex) when (ex is IOException or Microsoft.JSInterop.JSException)
@@ -1157,13 +1157,13 @@
             // of it. The file stays chosen only for a password missing or wrong, the one refusal
             // the same file gets past.
             _isRestoring = false;
-            if (refusal?.IsPassword != true)
+            if (result?.Refusal?.IsPassword != true)
             {
                 CancelRestore();
             }
         }
 
-        if (refusal is { IsPassword: true })
+        if (result.Refusal is { IsPassword: true } refusal)
         {
             // Back to the confirmation, saying what was wrong above the box for the password.
             // Nothing of the upload was kept, so confirming again sends the file again.
@@ -1179,14 +1179,14 @@
             return;
         }
 
-        if (refusal is not null)
+        if (result.Refusal is { } turnedAway)
         {
-            ShowRestoreResult(refusal.Message, isRefused: true);
+            ShowRestoreResult(turnedAway.Message, isRefused: true);
             return;
         }
 
         // Before the reads below, so a refresh that renders while they run already shows it.
-        ShowRestoreResult("Restored — the backup's hosts, history, settings and password now apply.", isRefused: false);
+        ShowRestoreResult(RestoredSentence(result.LimitLowered), isRefused: false);
 
         // Beside the password changes in the log, since that is one of the things a restore is.
         Logger.LogInformation(
@@ -1200,6 +1200,27 @@
         // The file underneath is the backup's now.
         await LoadStatsAsync();
         _isUnlocked = await IsUnlockedAsync();
+    }
+
+    /// <summary>
+    /// What the overlay says of a restore that went through, and of the backup's size limit where
+    /// this disk could not safely hold it and it was lowered.
+    /// </summary>
+    private static string RestoredSentence(SizeLimitLowered? lowered)
+    {
+        const string Restored = "Restored — the backup's hosts, history, settings and password now apply.";
+        if (lowered is not { } limit)
+        {
+            return Restored;
+        }
+
+        var brought = limit.FromMb > 0
+            ? $"Its size limit, {limit.FromMb:N0} MB, is more than this disk can safely hold, so it is {limit.ToMb:N0} MB now"
+            : $"It had no size limit, so it is {limit.ToMb:N0} MB now, the most this disk can safely hold";
+        var pruned = limit.OverBytes > 0
+            ? $"; the oldest {FormatBytes(limit.OverBytes)} of its history is pruned over the next ping rounds."
+            : ".";
+        return $"{Restored} {brought}{pruned}";
     }
 
     /// <summary>Turns the overlay to what came of a confirmed restore, which it shows until closed.</summary>

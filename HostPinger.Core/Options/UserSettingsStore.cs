@@ -32,6 +32,9 @@ namespace HostPinger.Core.Options
         public static readonly string PasswordHashKey =
             $"{SecurityOptions.SectionName}:{nameof(SecurityOptions.PasswordHash)}";
 
+        /// <summary>The row holding the size limit, which a restore lowers in a backup this disk cannot hold.</summary>
+        internal static readonly string MaxDatabaseSizeMbKey = PingerKey(nameof(PingerOptions.MaxDatabaseSizeMb));
+
         private readonly SemaphoreSlim _gate = new(1, 1);
 
         /// <summary>Replaced whole on every save and never mutated, so reads take no lock.</summary>
@@ -54,23 +57,15 @@ namespace HostPinger.Core.Options
         }
 
         /// <summary>The pinger settings in force: the configured values, under the stored rows.</summary>
-        public PingerOptions CurrentPinger
-        {
-            get
-            {
-                var defaults = pingerDefaults.CurrentValue;
-                var rows = _rows;
-                return new PingerOptions
-                {
-                    DatabasePath = defaults.DatabasePath,
-                    IntervalSeconds = Stored(rows, nameof(PingerOptions.IntervalSeconds), defaults.IntervalSeconds),
-                    TimeoutSeconds = Stored(rows, nameof(PingerOptions.TimeoutSeconds), defaults.TimeoutSeconds),
-                    ResolveTimeoutSeconds = Stored(rows, nameof(PingerOptions.ResolveTimeoutSeconds), defaults.ResolveTimeoutSeconds),
-                    RetryAttempts = Stored(rows, nameof(PingerOptions.RetryAttempts), defaults.RetryAttempts),
-                    MaxDatabaseSizeMb = Stored(rows, nameof(PingerOptions.MaxDatabaseSizeMb), defaults.MaxDatabaseSizeMb),
-                };
-            }
-        }
+        public PingerOptions CurrentPinger => PingerUnder(_rows);
+
+        /// <summary>
+        /// The pinger settings that the rows stored in <paramref name="db"/> would put in force,
+        /// were that the database loaded: what <see cref="CurrentPinger"/> would answer then. For a
+        /// restore, which asks it of a backup before putting the backup in place.
+        /// </summary>
+        internal async Task<PingerOptions> PingerInAsync(HostPingerDbContext db, CancellationToken cancellationToken = default) =>
+            PingerUnder(await RowsInAsync(db, cancellationToken));
 
         /// <summary>
         /// The hash of the web UI password in force: the stored row when there is one — empty
@@ -86,21 +81,8 @@ namespace HostPinger.Core.Options
         /// made before the settings table existed stores nothing, and puts this install's
         /// configured password in force.
         /// </summary>
-        internal async Task<string?> PasswordHashInAsync(HostPingerDbContext db, CancellationToken cancellationToken = default)
-        {
-            await db.Database.OpenConnectionAsync(cancellationToken);
-            try
-            {
-                await using var command = db.Database.GetDbConnection().CreateCommand();
-                command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'UserSettings';";
-                var hasTable = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken)) > 0;
-                return PasswordHashUnder(hasTable ? await ReadRowsAsync(db, cancellationToken) : []);
-            }
-            finally
-            {
-                await db.Database.CloseConnectionAsync();
-            }
-        }
+        internal async Task<string?> PasswordHashInAsync(HostPingerDbContext db, CancellationToken cancellationToken = default) =>
+            PasswordHashUnder(await RowsInAsync(db, cancellationToken));
 
         public Task SaveAsync(PingerSettingsUpdate update, CancellationToken cancellationToken = default) =>
             UpdateAsync(changes =>
@@ -251,6 +233,41 @@ namespace HostPinger.Core.Options
         /// <summary>The table's rows, as the snapshot holds them.</summary>
         private static Task<Dictionary<string, string>> ReadRowsAsync(HostPingerDbContext db, CancellationToken cancellationToken) =>
             db.UserSettings.AsNoTracking().ToDictionaryAsync(s => s.Key, s => s.Value, cancellationToken);
+
+        /// <summary>
+        /// The rows of a database that is not the one loaded, which may be one made before the
+        /// settings table existed and so have none.
+        /// </summary>
+        private static async Task<Dictionary<string, string>> RowsInAsync(HostPingerDbContext db, CancellationToken cancellationToken)
+        {
+            await db.Database.OpenConnectionAsync(cancellationToken);
+            try
+            {
+                await using var command = db.Database.GetDbConnection().CreateCommand();
+                command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'UserSettings';";
+                var hasTable = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken)) > 0;
+                return hasTable ? await ReadRowsAsync(db, cancellationToken) : [];
+            }
+            finally
+            {
+                await db.Database.CloseConnectionAsync();
+            }
+        }
+
+        /// <summary>The configured pinger settings under <paramref name="rows"/>; see <see cref="CurrentPinger"/>.</summary>
+        private PingerOptions PingerUnder(Dictionary<string, string> rows)
+        {
+            var defaults = pingerDefaults.CurrentValue;
+            return new PingerOptions
+            {
+                DatabasePath = defaults.DatabasePath,
+                IntervalSeconds = Stored(rows, nameof(PingerOptions.IntervalSeconds), defaults.IntervalSeconds),
+                TimeoutSeconds = Stored(rows, nameof(PingerOptions.TimeoutSeconds), defaults.TimeoutSeconds),
+                ResolveTimeoutSeconds = Stored(rows, nameof(PingerOptions.ResolveTimeoutSeconds), defaults.ResolveTimeoutSeconds),
+                RetryAttempts = Stored(rows, nameof(PingerOptions.RetryAttempts), defaults.RetryAttempts),
+                MaxDatabaseSizeMb = Stored(rows, nameof(PingerOptions.MaxDatabaseSizeMb), defaults.MaxDatabaseSizeMb),
+            };
+        }
 
         /// <summary>
         /// The stored password row of <paramref name="rows"/> when there is one, and otherwise

@@ -238,6 +238,130 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// A backup brings the size limit of the install it was taken on, whose disk may have been
+        /// bigger. One this disk cannot safely hold is lowered to the safe limit in the backup
+        /// before the swap, so it is in force from the first round, and the restore says what it
+        /// was and what it is, and how much of the restored history is over it. That much is the
+        /// oldest, and the rounds prune it a slice at a time; the restore itself keeps it all.
+        /// </summary>
+        [Test]
+        public async Task Restore_LowersABackupsSizeLimitThatThisDiskCannotSafelyHold()
+        {
+            var backupPath = await BackupWithAsync("backup.example", "backup-hash");
+            await SeedHostWithAttemptsAsync(OptionsFor(backupPath), "busy.example", attempts: 40_000);
+            await StageSizeLimitAsync(OptionsFor(backupPath), "500000");
+            SqliteConnection.ClearAllPools();
+            var log = new TestLogger<DatabaseBackup>();
+            var crampedAfterwards = Cramped(freeBytes: 0, log);
+
+            var lowered = await crampedAfterwards.RestoreAsync(backupPath);
+
+            var restoredBytes = Convert.ToInt64(await ScalarAsync(_dbPath, "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size();"));
+            Assert.Multiple(async () =>
+            {
+                Assert.That(lowered?.FromMb, Is.EqualTo(500_000));
+                Assert.That(lowered?.ToMb, Is.EqualTo(1), "the least a limit can be, on a disk with nothing free");
+                Assert.That(lowered?.OverBytes, Is.EqualTo(restoredBytes - (1024 * 1024)).Within(16 * 1024));
+                Assert.That(_store.CurrentPinger.MaxDatabaseSizeMb, Is.EqualTo(1), "in force");
+                Assert.That(await ScalarAsync(_dbPath, "SELECT Value FROM UserSettings WHERE Key = 'Pinger:MaxDatabaseSizeMb';"),
+                    Is.EqualTo("1"), "and stored in the restored file");
+                Assert.That(await ScalarAsync(_dbPath, "SELECT COUNT(*) FROM PingAttempts;"), Is.EqualTo(40_003L),
+                    "the restore itself prunes nothing");
+                Assert.That(log.Entries.Select(e => e.Level), Is.EqualTo(new[] { LogLevel.Warning }));
+                Assert.That(log.Entries.Single().Message, Does.StartWith("The restored backup's size limit, 500000 MB,"));
+            });
+        }
+
+        /// <summary>
+        /// The room the safe limit is measured against is the room the database will have once the
+        /// restore is done: what is free now, the database being replaced, which is deleted after
+        /// the swap, and the backup, which becomes the database. Here the two databases are about
+        /// the same size and the free space is just the margin, so leaving either out halves it.
+        /// </summary>
+        [Test]
+        public async Task Restore_MeasuresTheSafeLimitAgainstTheRoomItLeaves()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 80_000);
+            var backupPath = await BackupWithAsync("backup.example", "backup-hash");
+            await SeedHostWithAttemptsAsync(OptionsFor(backupPath), "busy.example", attempts: 80_000);
+            await StageSizeLimitAsync(OptionsFor(backupPath), "500000");
+            SqliteConnection.ClearAllPools();
+            var replacedBytes = DatabaseSizeLimit.FootprintBytes(_dbPath);
+            var backupBytes = new FileInfo(backupPath).Length;
+            var expected = DatabaseSizeLimit.SafeLimitMbFor(DatabaseBackup.FreeSpaceMarginBytes + replacedBytes + backupBytes);
+            Assert.That(expected, Is.GreaterThan(4), "both databases count for something");
+
+            var lowered = await Cramped(freeBytes: DatabaseBackup.FreeSpaceMarginBytes).RestoreAsync(backupPath);
+
+            Assert.That(lowered?.ToMb, Is.EqualTo(expected).Within(1));
+        }
+
+        /// <summary>A backup's size limit that this disk can hold is restored as it is.</summary>
+        [Test]
+        public async Task Restore_KeepsABackupsSizeLimitThatFits()
+        {
+            var backupPath = await BackupWithAsync("backup.example", "backup-hash");
+            await StageSizeLimitAsync(OptionsFor(backupPath), "300");
+            SqliteConnection.ClearAllPools();
+
+            var lowered = await Cramped(freeBytes: 2048L * 1024 * 1024).RestoreAsync(backupPath);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(lowered, Is.Null);
+                Assert.That(_store.CurrentPinger.MaxDatabaseSizeMb, Is.EqualTo(300));
+            });
+        }
+
+        /// <summary>
+        /// A backup with no size limit gets the safe one: one storing the 0 that used to turn
+        /// pruning off, and one storing none, which leaves this install's configured limit in
+        /// force, here the default 1024 MB, more than the disk can take.
+        /// </summary>
+        [TestCase("0", 0)]
+        [TestCase(null, 1024)]
+        public async Task Restore_GivesABackupWithoutASafeSizeLimitTheSafeOne(string? stored, int brought)
+        {
+            var backupPath = await BackupWithAsync("backup.example", "backup-hash");
+            if (stored is not null)
+            {
+                await StageSizeLimitAsync(OptionsFor(backupPath), stored);
+            }
+
+            SqliteConnection.ClearAllPools();
+
+            var lowered = await Cramped(freeBytes: 100L * 1024 * 1024).RestoreAsync(backupPath);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(lowered?.FromMb, Is.EqualTo(brought));
+                Assert.That(lowered?.ToMb, Is.InRange(1, 99));
+                Assert.That(_store.CurrentPinger.MaxDatabaseSizeMb, Is.EqualTo(lowered?.ToMb));
+                Assert.That(lowered?.OverBytes, Is.Zero, "the backup is well under it");
+            });
+        }
+
+        /// <summary>The upload's restore hands back what became of the backup's size limit.</summary>
+        [Test]
+        public async Task RestoreUpload_SaysWhatTheBackupsSizeLimitWasLoweredTo()
+        {
+            var backupPath = await BackupWithAsync("backup.example", BackupHash);
+            await StageSizeLimitAsync(OptionsFor(backupPath), "500000");
+            SqliteConnection.ClearAllPools();
+            var upload = new UploadStream(await File.ReadAllBytesAsync(backupPath));
+
+            // Room for the upload with the margin, and not much more.
+            var result = await Cramped(freeBytes: 70L * 1024 * 1024).RestoreUploadAsync(upload, upload.Size, BackupPassword);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(result.Refusal, Is.Null);
+                Assert.That(result.LimitLowered, Is.EqualTo(new SizeLimitLowered(500_000, 3, 0)));
+                Assert.That(_store.CurrentPinger.MaxDatabaseSizeMb, Is.EqualTo(3));
+            });
+        }
+
+        /// <summary>
         /// A database replaced that will not delete is left where it is, with a warning in the log
         /// naming it, rather than failing a restore that has happened: the page would report a
         /// failure with the backup's settings and password already in force. Made to fail here by
@@ -1248,7 +1372,7 @@ namespace HostPinger.Test
             var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)));
             var reports = new List<RestoreProgress>();
 
-            var refusal = await _backup.RestoreUploadAsync(upload, upload.Size, BackupPassword, new Recorder<RestoreProgress>(reports.Add));
+            var refusal = (await _backup.RestoreUploadAsync(upload, upload.Size, BackupPassword, new Recorder<RestoreProgress>(reports.Add))).Refusal;
 
             var received = reports.Where(r => r.Step == RestoreStep.Receiving).Select(r => r.Fraction).ToList();
             Assert.Multiple(async () =>
@@ -1275,7 +1399,7 @@ namespace HostPinger.Test
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
             var upload = new UploadStream(Enumerable.Repeat((byte)0x2A, 100_000).ToArray());
 
-            var refusal = await _backup.RestoreUploadAsync(upload, upload.Size, BackupPassword);
+            var refusal = (await _backup.RestoreUploadAsync(upload, upload.Size, BackupPassword)).Refusal;
 
             Assert.Multiple(async () =>
             {
@@ -1300,7 +1424,7 @@ namespace HostPinger.Test
                 MeasureFreeBytes = () => 3L << 20,
             };
 
-            var refusal = await cramped.RestoreUploadAsync(upload, upload.Size, BackupPassword);
+            var refusal = (await cramped.RestoreUploadAsync(upload, upload.Size, BackupPassword)).Refusal;
 
             Assert.Multiple(async () =>
             {
@@ -1371,7 +1495,7 @@ namespace HostPinger.Test
             await _store.LoadAsync();
             var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)));
 
-            var refusal = await _backup.RestoreUploadAsync(upload, upload.Size, password);
+            var refusal = (await _backup.RestoreUploadAsync(upload, upload.Size, password)).Refusal;
 
             Assert.Multiple(async () =>
             {
@@ -1396,7 +1520,7 @@ namespace HostPinger.Test
             var (store, backup) = ConfiguredWith(PasswordHash.Hash("configured"));
             var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", string.Empty)));
 
-            var refusal = await backup.RestoreUploadAsync(upload, upload.Size, password);
+            var refusal = (await backup.RestoreUploadAsync(upload, upload.Size, password)).Refusal;
 
             Assert.Multiple(async () =>
             {
@@ -1418,8 +1542,8 @@ namespace HostPinger.Test
             var (store, backup) = ConfiguredWith(configured);
             var bytes = await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", hash: null));
 
-            var wrong = await backup.RestoreUploadAsync(new UploadStream(bytes), bytes.Length, BackupPassword);
-            var right = await backup.RestoreUploadAsync(new UploadStream(bytes), bytes.Length, "configured");
+            var wrong = (await backup.RestoreUploadAsync(new UploadStream(bytes), bytes.Length, BackupPassword)).Refusal;
+            var right = (await backup.RestoreUploadAsync(new UploadStream(bytes), bytes.Length, "configured")).Refusal;
 
             Assert.Multiple(async () =>
             {
@@ -1455,8 +1579,8 @@ namespace HostPinger.Test
             var (store, backup) = ConfiguredWith(configured);
             var bytes = await File.ReadAllBytesAsync(backupPath);
 
-            var none = await backup.RestoreUploadAsync(new UploadStream(bytes), bytes.Length, password: null);
-            var right = await backup.RestoreUploadAsync(new UploadStream(bytes), bytes.Length, "configured");
+            var none = (await backup.RestoreUploadAsync(new UploadStream(bytes), bytes.Length, password: null)).Refusal;
+            var right = (await backup.RestoreUploadAsync(new UploadStream(bytes), bytes.Length, "configured")).Refusal;
 
             Assert.Multiple(async () =>
             {
@@ -1485,11 +1609,11 @@ namespace HostPinger.Test
             await first.Held.Task.WaitAsync(Patience);
 
             var refusal = asked == "restore"
-                ? (await _backup.RestoreUploadAsync(second, second.Size, BackupPassword))?.Message
+                ? (await _backup.RestoreUploadAsync(second, second.Size, BackupPassword)).Refusal?.Message
                 : (await Assert.ThrowsAsync<IOException>(() => _backup.CreateSnapshotAsync()))!.Message;
             first.Release();
 
-            Assert.That(await restoring.WaitAsync(Patience), Is.Null);
+            Assert.That((await restoring.WaitAsync(Patience)).Refusal, Is.Null);
             Assert.Multiple(async () =>
             {
                 Assert.That(refusal, Is.EqualTo("A restore is under way. Try again once it has finished."));
@@ -1526,7 +1650,7 @@ namespace HostPinger.Test
             await reporting.Task.WaitAsync(Patience);
 
             var refusal = asked == "restore"
-                ? (await _backup.RestoreUploadAsync(upload, upload.Size, BackupPassword))?.Message
+                ? (await _backup.RestoreUploadAsync(upload, upload.Size, BackupPassword)).Refusal?.Message
                 : (await Assert.ThrowsAsync<IOException>(() => _backup.CreateSnapshotAsync()))!.Message;
             held.Set();
             var snapshot = await writing.WaitAsync(Patience);
@@ -1617,6 +1741,14 @@ namespace HostPinger.Test
                 new TestOptionsMonitor<SecurityOptions>(new SecurityOptions { PasswordHash = configured }));
             return (store, new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), store, new MaintenanceGate(), _fileGate, _summaries, NullLogger<DatabaseBackup>.Instance));
         }
+
+        /// <summary>A restore onto a disk with <paramref name="freeBytes"/> free beside the database.</summary>
+        private DatabaseBackup Cramped(long freeBytes, ILogger<DatabaseBackup>? log = null) =>
+            new(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries,
+                log ?? NullLogger<DatabaseBackup>.Instance)
+            {
+                MeasureFreeBytes = () => freeBytes,
+            };
 
         /// <summary>A restore whose backup goes into place and then fails to open, for the put-back.</summary>
         private DatabaseBackup FailingToOpen() =>
@@ -1728,6 +1860,13 @@ namespace HostPinger.Test
                 + "INSERT INTO Filler SELECT randomblob(4000) FROM n;";
             command.Parameters.AddWithValue("$rows", megabytes * 256);
             await command.ExecuteNonQueryAsync();
+        }
+
+        private static async Task StageSizeLimitAsync(DbContextOptions<HostPingerDbContext> options, string limitMb)
+        {
+            await using var db = new HostPingerDbContext(options);
+            await UserSettingsStore.StageAsync(db, UserSettingsStore.MaxDatabaseSizeMbKey, limitMb);
+            await db.SaveChangesAsync();
         }
 
         private static async Task StagePasswordAsync(DbContextOptions<HostPingerDbContext> options, string hash)

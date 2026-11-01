@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using HostPinger.Core.Data;
 using HostPinger.Core.Options;
 using Microsoft.Data.Sqlite;
@@ -474,8 +475,14 @@ namespace HostPinger.Core.Services
         /// Checks no password. <see cref="RestoreUploadAsync"/>, which is how a page restores, checks
         /// the backup's before it goes on to what this does.
         /// </para>
+        /// <para>
+        /// A size limit in the backup that this disk cannot safely hold, or none, is lowered to the
+        /// safe limit in the backup itself before the swap, so that it is in force from the first
+        /// round; what it was and what it became come back.
+        /// </para>
         /// </summary>
-        internal Task RestoreAsync(string candidatePath, CancellationToken cancellationToken = default) =>
+        /// <returns>The backup's size limit and what it was lowered to, or null where it fit.</returns>
+        internal Task<SizeLimitLowered?> RestoreAsync(string candidatePath, CancellationToken cancellationToken = default) =>
             Task.Run(
                 async () =>
                 {
@@ -486,7 +493,7 @@ namespace HostPinger.Core.Services
 
                     try
                     {
-                        await RestoreOnThisThreadAsync(candidatePath, cancellationToken);
+                        return await RestoreOnThisThreadAsync(candidatePath, cancellationToken);
                     }
                     finally
                     {
@@ -510,9 +517,10 @@ namespace HostPinger.Core.Services
         /// afterwards. Not looked at for a backup that puts none in force.
         /// </param>
         /// <returns>
-        /// Null once the backup is in force. Otherwise why nothing was replaced: a snapshot or
-        /// another restore under way, too little room beside the database for the file, a refusal
-        /// of the file itself, or a password missing or wrong.
+        /// Once the backup is in force, no refusal, and the backup's size limit and what it was
+        /// lowered to where this disk could not safely hold it. Otherwise why nothing was replaced:
+        /// a snapshot or another restore under way, too little room beside the database for the
+        /// file, a refusal of the file itself, or a password missing or wrong.
         /// </returns>
         /// <remarks>
         /// Every failure is an <see cref="IOException"/>, as <see cref="RestoreAsync"/>'s are,
@@ -520,7 +528,7 @@ namespace HostPinger.Core.Services
         /// page, the browser failing to read the file it chose. However it ends, the file received
         /// does not outlive this call.
         /// </remarks>
-        public async Task<RestoreRefusal?> RestoreUploadAsync(
+        public async Task<RestoreResult> RestoreUploadAsync(
             Stream source,
             long length,
             string? password,
@@ -529,14 +537,14 @@ namespace HostPinger.Core.Services
         {
             if (!TryTakeTurn(RestoreUnderWay, out var refusal))
             {
-                return new RestoreRefusal(refusal);
+                return new RestoreResult(new RestoreRefusal(refusal));
             }
 
             try
             {
                 if (RoomRefusal(length, "Receiving the backup") is { } noRoom)
                 {
-                    return new RestoreRefusal(noRoom);
+                    return new RestoreResult(new RestoreRefusal(noRoom));
                 }
 
                 var candidatePath = CreateRestoreTempPath();
@@ -548,19 +556,19 @@ namespace HostPinger.Core.Services
                     progress?.Report(new RestoreProgress(RestoreStep.Checking, null));
                     if (await ValidateBackupAsync(candidatePath, cancellationToken) is { } invalid)
                     {
-                        return new RestoreRefusal(invalid);
+                        return new RestoreResult(new RestoreRefusal(invalid));
                     }
 
                     // After the file's own checks, so that a password is only asked again for a
                     // file that can be restored once it is given.
                     if (await PasswordRefusalAsync(candidatePath, password, cancellationToken) is { } wrongPassword)
                     {
-                        return wrongPassword;
+                        return new RestoreResult(wrongPassword);
                     }
 
                     progress?.Report(new RestoreProgress(RestoreStep.Replacing, null));
-                    await Task.Run(() => RestoreOnThisThreadAsync(candidatePath, cancellationToken), CancellationToken.None);
-                    return null;
+                    var lowered = await Task.Run(() => RestoreOnThisThreadAsync(candidatePath, cancellationToken), CancellationToken.None);
+                    return new RestoreResult(Refusal: null, lowered);
                 }
                 finally
                 {
@@ -682,9 +690,9 @@ namespace HostPinger.Core.Services
             }
         }
 
-        private async Task RestoreOnThisThreadAsync(string candidatePath, CancellationToken cancellationToken)
+        private async Task<SizeLimitLowered?> RestoreOnThisThreadAsync(string candidatePath, CancellationToken cancellationToken)
         {
-            await PrepareCandidateAsync(candidatePath, cancellationToken);
+            var lowered = await PrepareCandidateAsync(candidatePath, cancellationToken);
 
             var retired = false;
             using (await maintenanceGate.AcquireAsync(cancellationToken))
@@ -721,6 +729,18 @@ namespace HostPinger.Core.Services
             {
                 await DeleteRetiredAsync();
             }
+
+            if (lowered is { } limit)
+            {
+                logger.LogWarning(
+                    "The restored backup's size limit, {From} MB, is more than this disk can safely hold, so it is {To} MB now. "
+                    + "{Over} bytes of its history are over that, and the ping rounds prune them from the oldest.",
+                    limit.FromMb,
+                    limit.ToMb,
+                    limit.OverBytes);
+            }
+
+            return lowered;
         }
 
         /// <summary>
@@ -752,13 +772,15 @@ namespace HostPinger.Core.Services
 
         /// <summary>
         /// Brings the candidate up to date and checks it has every table and column this build
-        /// reads, then puts it in WAL mode, all on connections of its own that are closed again
-        /// before the swap. Validation reads the migration history, not the tables it vouches
-        /// for, and a file can carry the one without the others; checked after the migrations,
-        /// because an older backup is only complete after them.
+        /// reads, lowers a size limit in it that this disk cannot safely hold (see
+        /// <see cref="FitSizeLimitAsync"/>), then puts it in WAL mode, all on connections of its own
+        /// that are closed again before the swap. Validation reads the migration history, not the
+        /// tables it vouches for, and a file can carry the one without the others; checked after
+        /// the migrations, because an older backup is only complete after them.
         /// </summary>
-        private async Task PrepareCandidateAsync(string candidatePath, CancellationToken cancellationToken)
+        private async Task<SizeLimitLowered?> PrepareCandidateAsync(string candidatePath, CancellationToken cancellationToken)
         {
+            SizeLimitLowered? lowered;
             try
             {
                 // Out of the pool, so that nothing holds the candidate open across the swap.
@@ -790,6 +812,8 @@ namespace HostPinger.Core.Services
                     {
                         throw new InvalidDataException($"The backup has no {missing}.");
                     }
+
+                    lowered = await FitSizeLimitAsync(db, cancellationToken);
                 }
 
                 await EnterWalAsync(candidatePath, BusyTimeoutSeconds, cancellationToken);
@@ -800,6 +824,40 @@ namespace HostPinger.Core.Services
                 // live database has not been touched, which is what the reader needs to know.
                 throw new IOException($"{ex.Message} Nothing was replaced.", ex);
             }
+
+            return lowered;
+        }
+
+        /// <summary>
+        /// Lowers the size limit the candidate in <paramref name="db"/> puts in force to the safe
+        /// limit for this disk where it is more than that, or none: the limit came from the install
+        /// the backup was taken on, whose disk may have been bigger, and kept, it would let the
+        /// restored database grow until this disk was full. Written into the candidate, so that it
+        /// is in force from the first round after the swap.
+        /// </summary>
+        /// <remarks>
+        /// Measured against the room the database will have once the restore is done: what is free
+        /// now, the database being replaced, which is deleted after the swap, and the candidate,
+        /// which becomes the database. A candidate already larger than the limit it is given keeps
+        /// all of its history through the restore, and the ping rounds after it prune the oldest of
+        /// it down to the limit, a slice a round.
+        /// </remarks>
+        /// <returns>What the limit was and what it is now, or null where it fit.</returns>
+        private async Task<SizeLimitLowered?> FitSizeLimitAsync(HostPingerDbContext db, CancellationToken cancellationToken)
+        {
+            var limitMb = (await settings.PingerInAsync(db, cancellationToken)).MaxDatabaseSizeMb;
+            var candidateBytes = await DatabasePruner.GetDatabaseSizeBytesAsync(db, cancellationToken);
+            var safeMb = DatabaseSizeLimit.SafeLimitMbFor(
+                MeasureFreeBytes() + DatabaseSizeLimit.FootprintBytes(paths.DatabasePath) + candidateBytes);
+            if (limitMb > 0 && limitMb <= safeMb)
+            {
+                return null;
+            }
+
+            await UserSettingsStore.StageAsync(
+                db, UserSettingsStore.MaxDatabaseSizeMbKey, safeMb.ToString(CultureInfo.InvariantCulture), cancellationToken);
+            await db.SaveChangesAsync(cancellationToken);
+            return new SizeLimitLowered(limitMb, safeMb, Math.Max(0, candidateBytes - ((long)safeMb * 1024 * 1024)));
         }
 
         /// <summary>
@@ -1188,4 +1246,21 @@ namespace HostPinger.Core.Services
     /// moment.
     /// </param>
     public sealed record RestoreRefusal(string Message, bool IsPassword = false);
+
+    /// <summary>What came of a restore from an upload.</summary>
+    /// <param name="Refusal">Why nothing was replaced; null once the backup is in force.</param>
+    /// <param name="LimitLowered">
+    /// Once the backup is in force: the size limit it brought and what that was lowered to, where
+    /// it was more than this disk can safely hold, or none. Null where it fit.
+    /// </param>
+    public sealed record RestoreResult(RestoreRefusal? Refusal, SizeLimitLowered? LimitLowered = null);
+
+    /// <summary>A restored backup's size limit, lowered to what this disk can safely hold.</summary>
+    /// <param name="FromMb">The limit the backup put in force: zero or less for none.</param>
+    /// <param name="ToMb">The limit in force now, the safe limit for this disk with the backup in place.</param>
+    /// <param name="OverBytes">
+    /// How much of the restored file is over the new limit: the oldest history, which the ping
+    /// rounds prune a slice a round.
+    /// </param>
+    public sealed record SizeLimitLowered(int FromMb, int ToMb, long OverBytes);
 }
