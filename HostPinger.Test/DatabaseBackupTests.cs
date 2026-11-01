@@ -433,6 +433,77 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// In WAL mode a backup no longer holds the ping rounds off while it copies. A round coming
+        /// due partway through takes the gate and writes, and what it writes lands in the database
+        /// and not in the copy, which is of the moment the copy began, and whole.
+        /// </summary>
+        [Test]
+        public async Task CreateSnapshot_LetsTheRoundsRunWhileItCopies()
+        {
+            await FillAsync(_dbPath, megabytes: 40);
+            var gate = new MaintenanceGate();
+            var round = (string?)null;
+            var backup = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, gate, _fileGate, _summaries)
+            {
+                SnapshotProgressInterval = TimeSpan.FromMilliseconds(1),
+            };
+
+            var snapshotPath = await backup.CreateSnapshotAsync(new Recorder<double>(fraction =>
+            {
+                if (fraction is > 0 and < 1 && round is null)
+                {
+                    round = RoundPartwayThrough(gate, TimeSpan.FromSeconds(1),
+                        () => SeedHostWithAttemptsAsync(_options, "during.example", attempts: 1).GetAwaiter().GetResult());
+                }
+            }));
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(round, Is.EqualTo("ran"));
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "during.example" }));
+                Assert.That(await AddressesAsync(snapshotPath), Is.Empty, "the copy is of the moment it began");
+                Assert.That(await IntegrityCheckAsync(snapshotPath), Is.EqualTo("ok"));
+            });
+        }
+
+        /// <summary>
+        /// In rollback-journal mode the copy's read would keep a round from committing until the
+        /// provider gave up and the round's pings were lost, so there a backup still holds the
+        /// rounds off at the gate while it copies, and lets go once it is done.
+        /// </summary>
+        [Test]
+        public async Task CreateSnapshot_HoldsTheRoundsOffInRollbackJournalMode()
+        {
+            await FillAsync(_dbPath, megabytes: 40);
+            SqliteConnection.ClearAllPools();
+            await using (var connection = new SqliteConnection($"Data Source={_dbPath};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                await ScalarAsync(connection, "PRAGMA journal_mode = DELETE;");
+            }
+
+            var gate = new MaintenanceGate();
+            var round = (string?)null;
+            var backup = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, gate, _fileGate, _summaries)
+            {
+                SnapshotProgressInterval = TimeSpan.FromMilliseconds(1),
+            };
+
+            await backup.CreateSnapshotAsync(new Recorder<double>(fraction =>
+            {
+                if (fraction is > 0 and < 1 && round is null)
+                {
+                    round = RoundPartwayThrough(gate, TimeSpan.FromMilliseconds(300), () => { });
+                }
+            }));
+
+            Assert.That(round, Is.EqualTo("held off"));
+            using (await gate.AcquireAsync().WaitAsync(Patience))
+            {
+            }
+        }
+
+        /// <summary>
         /// Cancelling stops the copy where it is, where the token alone would let Microsoft.Data.Sqlite
         /// run it to the end; deletes what had been written; and lets go of the maintenance gate, so
         /// the next snapshot goes ahead.
@@ -1285,6 +1356,29 @@ namespace HostPinger.Test
                     "Writing the snapshot needs about 64 MB free beside the database. The disk has 3 MB."));
                 Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-backup-*"), Is.Empty);
             });
+        }
+
+        /// <summary>
+        /// What a round coming due does, from a snapshot's report of progress: waits up to
+        /// <paramref name="patience"/> for the gate and runs <paramref name="write"/> holding it,
+        /// "ran", or gives up, "held off".
+        /// </summary>
+        private static string RoundPartwayThrough(MaintenanceGate gate, TimeSpan patience, Action write)
+        {
+            using var giveUp = new CancellationTokenSource(patience);
+            try
+            {
+                using (gate.AcquireAsync(giveUp.Token).GetAwaiter().GetResult())
+                {
+                    write();
+                }
+
+                return "ran";
+            }
+            catch (OperationCanceledException)
+            {
+                return "held off";
+            }
         }
 
         /// <summary>Snapshots that say how far they have got every <paramref name="interval"/>.</summary>

@@ -9,11 +9,11 @@ namespace HostPinger.Core.Services
 {
     /// <summary>
     /// Copies the database out as a backup and swaps a validated backup in as a restore. One of
-    /// the two runs at a time, and the other is turned away while it does. Both hold the
-    /// <see cref="MaintenanceGate"/>, so they never overlap a ping round, and both work beside the
-    /// live file: the hardened service deployments leave the data directory as the only place this
-    /// process can write. The swap also shuts the <see cref="DatabaseFileGate"/>, which keeps every
-    /// other connection off the file meanwhile.
+    /// the two runs at a time, and the other is turned away while it does. A restore's swap holds
+    /// the <see cref="MaintenanceGate"/>, so it never overlaps a ping round, and shuts the
+    /// <see cref="DatabaseFileGate"/>, which keeps every other connection off the file meanwhile;
+    /// a snapshot lets the rounds go on. Both work beside the live file: the hardened service
+    /// deployments leave the data directory as the only place this process can write.
     /// </summary>
     public sealed class DatabaseBackup(
         PingerPaths paths,
@@ -148,8 +148,16 @@ namespace HostPinger.Core.Services
         /// <para>
         /// <c>VACUUM INTO</c> rather than the online backup API because it leaves the free pages
         /// behind: a database pruned against its size limit is largely empty space, and the copy
-        /// should weigh what the data weighs. The gate keeps the monitor from writing meanwhile,
-        /// so the copy is of a settled file.
+        /// should weigh what the data weighs.
+        /// </para>
+        /// <para>
+        /// It reads the file in one transaction, so in WAL mode the copy is of the moment it began,
+        /// whatever the ping rounds write meanwhile, and they go on writing. They used to wait at the
+        /// <see cref="MaintenanceGate"/> for the whole copy, which left a gap that long in every
+        /// host's history: 75 seconds for the benchmarks' production-shaped database on the
+        /// development machine. In rollback-journal mode that read would keep a round from
+        /// committing until the provider gave up and the round's pings were lost, so there the
+        /// rounds still wait for the copy at the gate.
         /// </para>
         /// <para>
         /// SQLite says nothing about how far a <c>VACUUM INTO</c> has got, so the fraction is the
@@ -193,7 +201,13 @@ namespace HostPinger.Core.Services
         private async Task<string> WriteSnapshotAsync(IProgress<double>? progress, CancellationToken cancellationToken)
         {
             var snapshotPath = TempPath(SnapshotPrefix);
-            using var maintenanceHold = await maintenanceGate.AcquireAsync(cancellationToken);
+
+            // Asked before the copy's own connection opens, so the gate is always taken before a
+            // pass at the file gate, as a round takes them. Only a restore changes the mode while
+            // the service runs, and none can start while this holds the turn.
+            using var maintenanceHold = await IsInWalModeAsync(cancellationToken)
+                ? null
+                : await maintenanceGate.AcquireAsync(cancellationToken);
             try
             {
                 await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
@@ -265,6 +279,15 @@ namespace HostPinger.Core.Services
 
             progress?.Report(1);
             return snapshotPath;
+        }
+
+        /// <summary>Whether the database is in WAL mode, where a read never holds up a ping round's write.</summary>
+        private async Task<bool> IsInWalModeAsync(CancellationToken cancellationToken)
+        {
+            await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
+            await db.Database.OpenConnectionAsync(cancellationToken);
+            var connection = (SqliteConnection)db.Database.GetDbConnection();
+            return await ScalarAsync(connection, "PRAGMA journal_mode;", cancellationToken) is "wal";
         }
 
         /// <summary>
