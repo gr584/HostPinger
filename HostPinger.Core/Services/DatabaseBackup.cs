@@ -86,37 +86,25 @@ namespace HostPinger.Core.Services
             () => new DriveInfo(Path.GetDirectoryName(paths.DatabasePath)!).AvailableFreeSpace;
 
         /// <summary>
-        /// Called once the backup is in place, before it is opened. For the tests, which have no
-        /// other way to act at that moment: to leave the page there, or to have opening it fail.
+        /// Called with the database a restore replaces still at the path, whole and out of WAL mode,
+        /// just before the backup goes over it. For the tests, which copy it there to see what
+        /// became of a write that raced the restore.
+        /// </summary>
+        internal Func<Task>? BeforeReplacing { get; init; }
+
+        /// <summary>
+        /// Called once the backup is in place, before its settings are put in force. For the tests,
+        /// which have no other way to act at that moment: to leave the page there.
         /// </summary>
         internal Func<Task>? AfterSwap { get; init; }
-
-        /// <summary>
-        /// Called once a restore is done, with the database it replaced still at
-        /// <see cref="PreRestorePath"/>, just before that is deleted. For the tests, which read it
-        /// there to see what became of a write that raced the restore, or keep it from going.
-        /// </summary>
-        internal Func<Task>? BeforeDeletingRetired { get; init; }
-
-        /// <summary>
-        /// Where a restore keeps the database it replaces while it makes sure of the backup in its
-        /// place: what goes back if the restored file will not open, and deleted once it has.
-        /// Kept no longer than that, because a second copy as large as the database, outside the
-        /// size limit, is room the disk may need; a backup downloaded first is the undo that costs
-        /// none.
-        /// </summary>
-        public string PreRestorePath => paths.DatabasePath + ".pre-restore";
 
         /// <summary>A fresh path beside the database for an upload to be received into.</summary>
         internal string CreateRestoreTempPath() => TempPath(RestorePrefix);
 
         /// <summary>
         /// Takes the one turn a snapshot and a restore share, or says which of them holds it. One at
-        /// a time, for two reasons. Each writes a file the size of the database beside it, having
-        /// checked the disk has room for one, and two at once would each count on the same room.
-        /// And a restore keeps the database it replaces at <see cref="PreRestorePath"/>, to put back
-        /// if its file will not open, which a second restore at once would overwrite with the
-        /// first one's file.
+        /// a time, because each writes a file the size of the database beside it, having checked the
+        /// disk has room for one, and two at once would each count on the same room.
         /// </summary>
         private bool TryTakeTurn(string what, [NotNullWhen(false)] out string? refusal)
         {
@@ -447,25 +435,23 @@ namespace HostPinger.Core.Services
 
         /// <summary>
         /// Replaces the database with the validated file at <paramref name="candidatePath"/> and
-        /// reloads the settings snapshot — so when this returns, the backup's settings and password
-        /// are the ones in force — and then deletes the database it replaced. That waits at
-        /// <see cref="PreRestorePath"/> until the restored file has opened and given up its
-        /// settings, in rollback-journal mode and whole without a -wal beside it, to be put back
-        /// if it does not. The candidate file is consumed by the swap. The restored database is in
-        /// WAL mode.
+        /// puts the backup's settings in force, so when this returns, its settings and password are
+        /// the ones in force. The candidate file is consumed by the swap. The restored database is
+        /// in WAL mode.
         /// <para>
-        /// The candidate is migrated and checked where it lies, before anything is replaced and
-        /// before the maintenance gate is taken: migrating an old backup of a production-sized
-        /// database takes minutes, and ping rounds go on meanwhile rather than leaving a gap in
-        /// the history. Only the swap itself holds the gate.
+        /// The candidate is brought up to date, checked and read where it lies, before anything is
+        /// replaced and before the maintenance gate is taken: migrating an old backup of a
+        /// production-sized database takes minutes, and ping rounds go on meanwhile rather than
+        /// leaving a gap in the history. Everything a service start would do to the file is done to
+        /// it there, and its settings are read there, so that once it is in place nothing is left
+        /// to fail. Only the swap holds the gate: one rename of the candidate over the database,
+        /// after which the settings read from it go into force from memory. No copy of the database
+        /// it replaces is kept, even for that moment.
         /// </para>
         /// <para>
-        /// Every failure is an <see cref="IOException"/>, and none leaves the service without a
-        /// database it can start on. A backup that cannot be migrated or lacks part of the schema
-        /// is refused with nothing replaced. After the swap, a restored file that will not open or
-        /// give up its settings is taken out again and the database it replaced put back, in
-        /// rollback-journal mode; on a fresh install, where there was nothing to put back, an empty
-        /// database takes its place.
+        /// Every failure is an <see cref="IOException"/>, and every one comes before the swap, with
+        /// nothing replaced: a backup that cannot be migrated or lacks part of the schema, one whose
+        /// settings will not read, or a database that stays in use.
         /// </para>
         /// <para>
         /// Runs on the thread pool, for the reason <see cref="ValidateBackupAsync"/> gives: an old
@@ -692,9 +678,8 @@ namespace HostPinger.Core.Services
 
         private async Task<SizeLimitLowered?> RestoreOnThisThreadAsync(string candidatePath, CancellationToken cancellationToken)
         {
-            var lowered = await PrepareCandidateAsync(candidatePath, cancellationToken);
+            var (lowered, settingsRows) = await PrepareCandidateAsync(candidatePath, cancellationToken);
 
-            var retired = false;
             using (await maintenanceGate.AcquireAsync(cancellationToken))
             {
                 // The host summary keeps a connection of its own open, outside the pool that
@@ -706,11 +691,11 @@ namespace HostPinger.Core.Services
                 {
                     // The pages' reads and writes take no turns at the gate above. The file gate
                     // waits for the connections they have open, and keeps new ones back through
-                    // everything that follows: emptying the pool, the swap, opening the restored
-                    // file and loading its settings, or putting the old file back.
+                    // everything that follows: emptying the pool, the swap, and putting the
+                    // backup's settings in force.
                     await fileGate.WhileShutAsync(
                         TimeSpan.FromSeconds(BusyTimeoutSeconds),
-                        async () => retired = await ReplaceAsync(candidatePath, cancellationToken),
+                        () => ReplaceAsync(candidatePath, settingsRows, cancellationToken),
                         cancellationToken);
                 }
                 catch (TimeoutException ex)
@@ -721,13 +706,6 @@ namespace HostPinger.Core.Services
                 {
                     hostSummaries.Resume();
                 }
-            }
-
-            // With the rounds and the pages back at work on the restored file: nothing waits on
-            // the old one going.
-            if (retired)
-            {
-                await DeleteRetiredAsync();
             }
 
             if (lowered is { } limit)
@@ -744,43 +722,23 @@ namespace HostPinger.Core.Services
         }
 
         /// <summary>
-        /// Deletes the database a restore replaced, once the backup in its place has opened. One
-        /// that will not go is left, with a warning in the log naming it, rather than failing a
-        /// restore that has happened: the page would say it had not, with the backup's settings
-        /// and password already in force.
+        /// Brings the candidate up to date the way a service start brings up a database
+        /// (<see cref="HostPingerDatabase.InitializeAsync"/>) and checks it has every table and
+        /// column this build reads, lowers a size limit in it that this disk cannot safely hold
+        /// (see <see cref="FitSizeLimitAsync"/>), reads the settings it puts in force, then puts it
+        /// in WAL mode, all on connections of its own that are closed again before the swap. So a
+        /// file that would not start the service, or whose settings will not read, is refused
+        /// here, with nothing replaced, rather than found out once it is in place. Validation reads
+        /// the migration history, not the tables it vouches for, and a file can carry the one
+        /// without the others; checked after the migrations, because an older backup is only
+        /// complete after them.
         /// </summary>
-        private async Task DeleteRetiredAsync()
-        {
-            if (BeforeDeletingRetired is { } beforeDeleting)
-            {
-                await beforeDeleting();
-            }
-
-            try
-            {
-                File.Delete(PreRestorePath);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                logger.LogWarning(
-                    ex,
-                    "The backup is restored, but the database it replaced could not be deleted. It is "
-                    + "left at {Path}, as large as that database was; delete it by hand.",
-                    PreRestorePath);
-            }
-        }
-
-        /// <summary>
-        /// Brings the candidate up to date and checks it has every table and column this build
-        /// reads, lowers a size limit in it that this disk cannot safely hold (see
-        /// <see cref="FitSizeLimitAsync"/>), then puts it in WAL mode, all on connections of its own
-        /// that are closed again before the swap. Validation reads the migration history, not the
-        /// tables it vouches for, and a file can carry the one without the others; checked after
-        /// the migrations, because an older backup is only complete after them.
-        /// </summary>
-        private async Task<SizeLimitLowered?> PrepareCandidateAsync(string candidatePath, CancellationToken cancellationToken)
+        private async Task<(SizeLimitLowered? Lowered, Dictionary<string, string> SettingsRows)> PrepareCandidateAsync(
+            string candidatePath,
+            CancellationToken cancellationToken)
         {
             SizeLimitLowered? lowered;
+            Dictionary<string, string> settingsRows;
             try
             {
                 // Out of the pool, so that nothing holds the candidate open across the swap.
@@ -814,6 +772,7 @@ namespace HostPinger.Core.Services
                     }
 
                     lowered = await FitSizeLimitAsync(db, cancellationToken);
+                    settingsRows = await UserSettingsStore.StoredInAsync(db, cancellationToken);
                 }
 
                 await EnterWalAsync(candidatePath, BusyTimeoutSeconds, cancellationToken);
@@ -825,7 +784,7 @@ namespace HostPinger.Core.Services
                 throw new IOException($"{ex.Message} Nothing was replaced.", ex);
             }
 
-            return lowered;
+            return (lowered, settingsRows);
         }
 
         /// <summary>
@@ -861,13 +820,15 @@ namespace HostPinger.Core.Services
         }
 
         /// <summary>
-        /// Swaps the candidate in and opens it, or puts back what it replaced; returns whether a
-        /// database was retired to <see cref="PreRestorePath"/>, as <see cref="SwapIntoPlaceAsync"/>
-        /// does.
+        /// Moves the candidate over the database and puts the settings read from it in force. The
+        /// candidate was brought up to date, checked and read where it lay, so nothing after the
+        /// move can find it wanting, and there is nothing to put back.
         /// </summary>
-        private async Task<bool> ReplaceAsync(string candidatePath, CancellationToken cancellationToken)
+        private async Task ReplaceAsync(
+            string candidatePath,
+            Dictionary<string, string> settingsRows,
+            CancellationToken cancellationToken)
         {
-            bool retired;
             try
             {
                 // Pooled idle connections hold the old file open past their last use; on Windows
@@ -880,12 +841,17 @@ namespace HostPinger.Core.Services
                     await LeaveWalAsync(paths.DatabasePath, BusyTimeoutSeconds, cancellationToken);
                 }
 
-                // A journal left beside the database belongs to the file being retired. SQLite
+                // A journal left beside the database belongs to the file being replaced. SQLite
                 // would roll it into whatever sits at the database path, and rolled into the
                 // restored file it is corruption, not recovery.
                 DeleteSidecars();
 
-                retired = await SwapIntoPlaceAsync(candidatePath, cancellationToken);
+                if (BeforeReplacing is { } beforeReplacing)
+                {
+                    await beforeReplacing();
+                }
+
+                await SwapIntoPlaceAsync(candidatePath, cancellationToken);
             }
             catch (SqliteException ex)
             {
@@ -894,63 +860,16 @@ namespace HostPinger.Core.Services
                 throw new IOException($"{ex.Message} Nothing was replaced.", ex);
             }
 
-            // From here the restore finishes or is undone, whatever becomes of the page that asked
-            // for it: given up halfway, it would leave the backup's file in place under the
-            // settings and password of the one it replaced.
-            try
+            // From here the restore is done, whatever becomes of the page that asked for it. Until
+            // the settings read from the backup go in, the ones in force describe the file just
+            // replaced; the backup's password going in also invalidates unlock cookies stamped
+            // under the old one, with nothing further to do.
+            if (AfterSwap is { } afterSwap)
             {
-                if (AfterSwap is { } afterSwap)
-                {
-                    await afterSwap();
-                }
-
-                await OpenRestoredAsync(CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                try
-                {
-                    await PutBackAsync(retired);
-                }
-                catch (Exception putBackFailure)
-                {
-                    throw new IOException(
-                        $"{ex.Message} Putting the previous database back failed as well: {putBackFailure.Message}"
-                            + (retired ? $" It is kept at {PreRestorePath}." : string.Empty),
-                        ex);
-                }
-
-                throw new IOException(
-                    ex.Message + (retired
-                        ? " The previous database is back in place."
-                        : " An empty database is in its place, as there was none before."),
-                    ex);
+                await afterSwap();
             }
 
-            return retired;
-        }
-
-        /// <summary>
-        /// Opens the file just swapped in and loads its settings. The candidate was migrated and
-        /// checked before the swap, so the migrations and the check here normally find nothing to
-        /// do; they are run again because they are what a service start would run on the file,
-        /// and cheap once there is nothing to apply.
-        /// </summary>
-        private async Task OpenRestoredAsync(CancellationToken cancellationToken)
-        {
-            await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken))
-            {
-                await HostPingerDatabase.InitializeAsync(db, cancellationToken);
-                if (await FindMissingSchemaAsync(db, cancellationToken) is { } missing)
-                {
-                    throw new InvalidDataException($"The backup has no {missing}.");
-                }
-            }
-
-            // The settings snapshot still describes the file that was just retired. Reloading it
-            // puts the backup's settings and password in force — which also invalidates unlock
-            // cookies stamped under the old password, with nothing further to do.
-            await settings.LoadAsync(cancellationToken);
+            settings.PutInForce(settingsRows);
         }
 
         /// <summary>
@@ -1009,50 +928,6 @@ namespace HostPinger.Core.Services
             }
         }
 
-        /// <summary>
-        /// Takes a restored file that would not open back out, and puts the database it replaced
-        /// at the path again — or, when there was none, an empty one, so the service keeps a
-        /// database it can start on either way.
-        /// </summary>
-        private async Task PutBackAsync(bool retired)
-        {
-            // The same brief retries as the swap: on Windows a connection let go of a moment ago
-            // can still hold the file.
-            for (var attempt = 1; ; attempt++)
-            {
-                try
-                {
-                    SqliteConnection.ClearAllPools();
-
-                    // The restored file's journal, -wal and -shm are its own; beside the file put
-                    // back, SQLite would read them as that file's.
-                    DeleteSidecars();
-                    if (retired)
-                    {
-                        File.Move(PreRestorePath, paths.DatabasePath, overwrite: true);
-                    }
-                    else
-                    {
-                        File.Delete(paths.DatabasePath);
-                    }
-
-                    break;
-                }
-                catch (IOException) when (attempt < 5)
-                {
-                    await Task.Delay(200);
-                }
-            }
-
-            if (!retired)
-            {
-                await using var db = await dbFactory.CreateDbContextAsync();
-                await HostPingerDatabase.InitializeAsync(db);
-            }
-
-            await settings.LoadAsync();
-        }
-
         private void DeleteSidecars()
         {
             File.Delete(paths.DatabasePath + "-journal");
@@ -1061,10 +936,10 @@ namespace HostPinger.Core.Services
         }
 
         /// <summary>
-        /// Takes the file about to be retired out of WAL mode. Leaving it, SQLite folds whatever the
-        /// -wal still holds into the file, so the file kept to put back is whole on its own; and it
-        /// only leaves once no other connection has the file open, so this is also what waits out a
-        /// read still in progress on it, for as long as the provider retries a busy command. The
+        /// Takes the file about to be replaced out of WAL mode. SQLite only leaves it once no other
+        /// connection has the file open, so this is what waits out a read still in progress on it,
+        /// for as long as the provider retries a busy command, and leaving it folds whatever the
+        /// -wal still holds into the file, which leaves nothing of it beside the database. The
         /// application's own connections have been waited for at the <see cref="DatabaseFileGate"/>
         /// by now, so what is left to wait for here is a connection from outside it, another
         /// process's. That wait is what keeps the restored file safe: the last connection to close
@@ -1151,29 +1026,21 @@ namespace HostPinger.Core.Services
         }
 
         /// <summary>
-        /// One atomic replace, so a crash at any moment leaves a complete database on disk under
-        /// one name or another — never none. Retried briefly because a page's periodic read can
-        /// hold the file at just the wrong instant on Windows. Returns whether a database was
-        /// retired to <see cref="PreRestorePath"/>, which is what a restored file that will not
-        /// open is replaced by again.
+        /// One atomic rename of the candidate over the database, so a crash at any moment leaves
+        /// the database or the backup at the path, never neither, and no copy of the one it
+        /// replaced: the old file's space goes with the rename. Retried briefly because a page's
+        /// periodic read can hold the file at just the wrong instant on Windows. A
+        /// hostpinger.db.pre-restore that an earlier version's restore kept beside the database is
+        /// left alone.
         /// </summary>
-        private async Task<bool> SwapIntoPlaceAsync(string candidatePath, CancellationToken cancellationToken)
+        private async Task SwapIntoPlaceAsync(string candidatePath, CancellationToken cancellationToken)
         {
             for (var attempt = 1; ; attempt++)
             {
                 try
                 {
-                    if (File.Exists(paths.DatabasePath))
-                    {
-                        File.Replace(candidatePath, paths.DatabasePath, PreRestorePath, ignoreMetadataErrors: true);
-                        return true;
-                    }
-
-                    // No database to retire — restoring into a fresh install. Whatever sits at
-                    // PreRestorePath was left by an earlier version's restore, not this one, and is
-                    // left alone.
-                    File.Move(candidatePath, paths.DatabasePath);
-                    return false;
+                    File.Move(candidatePath, paths.DatabasePath, overwrite: true);
+                    return;
                 }
                 catch (IOException) when (attempt < 5)
                 {

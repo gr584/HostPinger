@@ -283,7 +283,7 @@ namespace HostPinger.UITest
                 await BackupPassword.FillAsync(WebApp.Password);
 
                 // This process holds the file open too: whatever the fixtures seeded through sits in
-                // its connection pool, still attached to the file the restore is about to retire,
+                // its connection pool, still attached to the file the restore is about to replace,
                 // and a seed made afterwards would be written there, where the application never
                 // looks. Let go of it first, so every later connection opens the restored file.
                 // First rather than after, because a connection to a WAL database that closes last
@@ -298,7 +298,7 @@ namespace HostPinger.UITest
                 await Assertions.Expect(Button(Dialog, "Cancel")).ToHaveCountAsync(0);
                 await AssertRestoreProgressAsync();
                 Assert.That(File.Exists(UiTestRun.DatabasePath + ".pre-restore"), Is.False,
-                    "the database that was replaced is deleted once the backup is in force");
+                    "no copy of the database that was replaced is kept");
 
                 // The footer's, since the header's cross is called Close too.
                 await Button(Dialog.Locator(".modal-footer"), "Close").ClickAsync();

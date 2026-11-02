@@ -1,4 +1,3 @@
-using System.Runtime.Versioning;
 using HostPinger.Core.Data;
 using HostPinger.Core.Options;
 using HostPinger.Core.Services;
@@ -32,10 +31,10 @@ namespace HostPinger.Test
         private string _dbPath = null!;
 
         /// <summary>
-        /// Where <see cref="KeepWhatWasRetiredAsync"/> copies the database a restore replaced, which
-        /// the restore deletes once the backup is in force.
+        /// Where <see cref="KeepWhatIsReplacedAsync"/> copies the database a restore replaces, which
+        /// goes with the rename that puts the backup in its place.
         /// </summary>
-        private string _retired = null!;
+        private string _replaced = null!;
 
         private DatabaseFileGate _fileGate = null!;
         private DbContextOptions<HostPingerDbContext> _options = null!;
@@ -49,7 +48,7 @@ namespace HostPinger.Test
             _directory = Path.Combine(Path.GetTempPath(), $"hostpinger-test-{Guid.NewGuid():N}");
             Directory.CreateDirectory(_directory);
             _dbPath = Path.Combine(_directory, "hostpinger.db");
-            _retired = Path.Combine(_directory, "retired.db");
+            _replaced = Path.Combine(_directory, "replaced.db");
 
             // Through a gate of its own, as the application's factory goes through one, so that a
             // restore's own connections have to be let through it.
@@ -77,7 +76,7 @@ namespace HostPinger.Test
                 _summaries,
                 NullLogger<DatabaseBackup>.Instance)
             {
-                BeforeDeletingRetired = KeepWhatWasRetiredAsync,
+                BeforeReplacing = KeepWhatIsReplacedAsync,
             };
         }
 
@@ -198,11 +197,11 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// A restore swaps the backup in and reloads the settings from it, and then deletes the
-        /// database it replaced, which waits beside the restored one until then.
+        /// A restore moves the backup over the database and puts its settings in force, and keeps
+        /// no copy of the database it replaced: the old file goes with the rename.
         /// </summary>
         [Test]
-        public async Task Restore_SwapsTheFileInReloadsSettingsAndDeletesWhatItReplaced()
+        public async Task Restore_MovesTheBackupOverTheDatabaseAndPutsItsSettingsInForce()
         {
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
             await StagePasswordAsync(_options, "current-hash");
@@ -230,10 +229,10 @@ namespace HostPinger.Test
                 Assert.That(await live.PingAttempts.CountAsync(), Is.EqualTo(3));
                 Assert.That(_store.PasswordHash, Is.EqualTo("backup-hash"),
                     "the settings snapshot must already reflect the restored file");
-                Assert.That(await AddressesAsync(_retired), Is.EqualTo(new[] { "current.example" }),
-                    "the database replaced waited beside it until then");
-                Assert.That(File.Exists(_backup.PreRestorePath), Is.False, "and is deleted once the backup is in force");
-                Assert.That(File.Exists(backupPath), Is.False, "the swap consumes the uploaded file");
+                Assert.That(await AddressesAsync(_replaced), Is.EqualTo(new[] { "current.example" }),
+                    "the database replaced was whole until the backup went over it");
+                Assert.That(FilesBesideTheDatabase(), Is.Empty,
+                    "and nothing of it is kept, while the swap consumes the uploaded file");
             });
         }
 
@@ -362,55 +361,8 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// A database replaced that will not delete is left where it is, with a warning in the log
-        /// naming it, rather than failing a restore that has happened: the page would report a
-        /// failure with the backup's settings and password already in force. Made to fail here by
-        /// taking away the right to change the directory, which is how Linux refuses a delete.
-        /// </summary>
-        [Test]
-        [Platform(Exclude = "Win", Reason = "Windows refuses a delete through a handle held open, not the directory's permissions.")]
-        [UnsupportedOSPlatform("windows")]
-        public async Task Restore_LeavesWhatItReplacedWithAWarningWhenItWillNotDelete()
-        {
-            Assume.That(Environment.UserName, Is.Not.EqualTo("root"), "permissions stop nothing root does");
-            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
-            await StagePasswordAsync(_options, "current-hash");
-            await _store.LoadAsync();
-            var backupPath = await BackupWithAsync("backup.example", "backup-hash");
-            var log = new TestLogger<DatabaseBackup>();
-            var mode = File.GetUnixFileMode(_directory);
-            var backup = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries, log)
-            {
-                BeforeDeletingRetired = () =>
-                {
-                    File.SetUnixFileMode(_directory, UnixFileMode.UserRead | UnixFileMode.UserExecute);
-                    return Task.CompletedTask;
-                },
-            };
-
-            try
-            {
-                await backup.RestoreAsync(backupPath);
-            }
-            finally
-            {
-                File.SetUnixFileMode(_directory, mode);
-            }
-
-            Assert.Multiple(async () =>
-            {
-                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example" }));
-                Assert.That(_store.PasswordHash, Is.EqualTo("backup-hash"));
-                Assert.That(await AddressesAsync(backup.PreRestorePath), Is.EqualTo(new[] { "current.example" }),
-                    "the database replaced is left where it was");
-                Assert.That(log.Entries.Select(e => e.Level), Is.EqualTo(new[] { LogLevel.Warning }));
-                Assert.That(log.Entries.Single().Message, Does.Contain(backup.PreRestorePath));
-            });
-        }
-
-        /// <summary>
         /// The host summary keeps a connection of its own open, which a swap leaves pointing at the
-        /// file it retired. A restore has it let go and read again, so the Hosts page shows the
+        /// file it replaced. A restore has it let go and read again, so the Hosts page shows the
         /// backup's hosts rather than the ones that were restored over.
         /// </summary>
         [Test]
@@ -439,13 +391,14 @@ namespace HostPinger.Test
         /// <summary>
         /// A backup comes out of VACUUM INTO in rollback-journal mode, where a long read keeps the
         /// ping rounds from committing. The restore puts it into WAL mode, the mode a new database
-        /// starts in, and leaves the file it retires in rollback-journal mode, whole on its own —
-        /// whichever mode that file was in: a new database is in WAL mode, and one restored before
-        /// this was in the other.
+        /// starts in, and takes the file it replaces out of WAL mode before the rename, whichever
+        /// mode that file was in, so that nothing of its -wal is left under the names that are the
+        /// restored file's afterwards: a new database is in WAL mode, and one restored before this
+        /// was in the other.
         /// </summary>
         [TestCase("wal")]
         [TestCase("delete")]
-        public async Task Restore_PutsTheRestoredDatabaseInWalMode(string retiredMode)
+        public async Task Restore_PutsTheRestoredDatabaseInWalMode(string replacedMode)
         {
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
             var backupPath = await _backup.CreateSnapshotAsync();
@@ -453,12 +406,12 @@ namespace HostPinger.Test
             await using (var connection = new SqliteConnection($"Data Source={_dbPath};Pooling=False"))
             {
                 await connection.OpenAsync();
-                await ScalarAsync(connection, $"PRAGMA journal_mode = {retiredMode};");
+                await ScalarAsync(connection, $"PRAGMA journal_mode = {replacedMode};");
             }
 
             Assert.Multiple(async () =>
             {
-                Assert.That(await JournalModeAsync(_dbPath), Is.EqualTo(retiredMode));
+                Assert.That(await JournalModeAsync(_dbPath), Is.EqualTo(replacedMode));
                 Assert.That(await JournalModeAsync(backupPath), Is.EqualTo("delete"), "the mode VACUUM INTO writes");
             });
 
@@ -467,8 +420,8 @@ namespace HostPinger.Test
             Assert.Multiple(async () =>
             {
                 Assert.That(await JournalModeAsync(_dbPath), Is.EqualTo("wal"));
-                Assert.That(await JournalModeAsync(_retired), Is.EqualTo("delete"),
-                    "the file kept to put back needs nothing beside it");
+                Assert.That(await JournalModeAsync(_replaced), Is.EqualTo("delete"),
+                    "the file replaced had left WAL mode before the backup went over it");
 
                 // Switching the upload to WAL mode happens on a connection of its own, closed before
                 // the swap; nothing of it may be left under the upload's name.
@@ -478,14 +431,14 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// A read still running on the file being retired is waited out before the swap. The last
+        /// A read still running on the database being replaced is waited out before the swap. The last
         /// connection to close on a WAL database deletes the -wal and -shm beside it by name, and
         /// after the swap those are the restored file's: had the restore gone ahead, closing this
         /// one would have taken them, and whatever was written to the restored file meanwhile would
         /// be invisible to every connection opened after.
         /// </summary>
         [Test]
-        public async Task Restore_WaitsOutAReadStillOpenOnTheRetiredFile()
+        public async Task Restore_WaitsOutAReadStillOpenOnTheDatabaseItReplaces()
         {
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
             var backupPath = await _backup.CreateSnapshotAsync();
@@ -794,8 +747,7 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// Restoring onto an install that has no database yet moves the backup into place, with no
-        /// undo copy to keep, since there was nothing to undo.
+        /// Restoring onto an install that has no database yet moves the backup into place.
         /// </summary>
         [Test]
         public async Task Restore_IntoAFreshInstallMovesTheBackupIntoPlace()
@@ -814,8 +766,7 @@ namespace HostPinger.Test
             Assert.Multiple(async () =>
             {
                 Assert.That(await db.Hosts.Select(h => h.Address).ToListAsync(), Is.EqualTo(new[] { "backed-up.example" }));
-                Assert.That(File.Exists(_backup.PreRestorePath), Is.False);
-                Assert.That(File.Exists(backupPath), Is.False, "consumed by the move");
+                Assert.That(FilesBesideTheDatabase(), Is.Empty, "the backup consumed by the move");
             });
         }
 
@@ -825,7 +776,7 @@ namespace HostPinger.Test
         /// that would let that connection delete the restored file's -wal as it closed.
         /// </summary>
         [Test]
-        public async Task Restore_RefusesWhileTheRetiredFileStaysInUse()
+        public async Task Restore_RefusesWhileTheDatabaseStaysInUse()
         {
             await SeedHostWithAttemptsAsync(_options, "kept.example", attempts: 1);
             var backupPath = await _backup.CreateSnapshotAsync();
@@ -857,7 +808,6 @@ namespace HostPinger.Test
             {
                 Assert.That(await db.Hosts.CountAsync(h => h.Address == "since.example"), Is.EqualTo(1), "the database was not replaced");
                 Assert.That(File.Exists(backupPath), Is.True, "the backup was not consumed");
-                Assert.That(File.Exists(backup.PreRestorePath), Is.False);
             });
         }
 
@@ -865,7 +815,7 @@ namespace HostPinger.Test
         /// A page writing while a restore waits for the file — another browser saving a host, say —
         /// used to open a connection that went back into the pool still holding the file, so the
         /// restore gave up once its wait ran out; and one that came after the file had left WAL mode
-        /// wrote into the file being retired. Now the page's connection waits at the gate until the
+        /// wrote into the file being replaced. Now the page's connection waits at the gate until the
         /// restored file is in place, and the write lands there. The restore's wait is held open
         /// here by a connection from outside the gate, as another process's would be.
         /// </summary>
@@ -895,8 +845,8 @@ namespace HostPinger.Test
                 Assert.That(writtenWhileShut, Is.False, "the write waits for the restore");
                 Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example", "written-meanwhile.example" }),
                     "the write lands in the restored file");
-                Assert.That(await AddressesAsync(_retired), Is.EqualTo(new[] { "current.example" }),
-                    "and nothing of it in the file retired");
+                Assert.That(await AddressesAsync(_replaced), Is.EqualTo(new[] { "current.example" }),
+                    "and nothing of it in the file replaced");
                 Assert.That(await IntegrityCheckAsync(_dbPath), Is.EqualTo("ok"));
             });
         }
@@ -943,8 +893,8 @@ namespace HostPinger.Test
                 Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example" }));
                 Assert.That(await ScalarAsync(_dbPath, "SELECT COUNT(*) FROM PingAttempts WHERE RoundtripMs < 1000;"), Is.EqualTo(3L),
                     "the restored file's history is its own");
-                Assert.That(await ScalarAsync(_retired, "SELECT COUNT(*) FROM PingAttempts WHERE RoundtripMs = 1000;"),
-                    Is.EqualTo(2000L), "the write committed, to the file retired");
+                Assert.That(await ScalarAsync(_replaced, "SELECT COUNT(*) FROM PingAttempts WHERE RoundtripMs = 1000;"),
+                    Is.EqualTo(2000L), "the write committed, to the file replaced");
             });
         }
 
@@ -995,23 +945,24 @@ namespace HostPinger.Test
                 Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example" }));
                 Assert.That(await ScalarAsync(_dbPath, "SELECT COUNT(*) FROM PingAttempts;"), Is.EqualTo(3L),
                     "the restored host keeps its history");
-                Assert.That(await AddressesAsync(_retired), Is.Empty, "the delete finished in the file retired");
-                Assert.That(await ScalarAsync(_retired, "SELECT COUNT(*) FROM PingAttempts;"), Is.EqualTo(0L));
+                Assert.That(await AddressesAsync(_replaced), Is.Empty, "the delete finished in the file replaced");
+                Assert.That(await ScalarAsync(_replaced, "SELECT COUNT(*) FROM PingAttempts;"), Is.EqualTo(0L));
             });
         }
 
         /// <summary>
         /// A settings save reads the rows it changes, writes them, and then updates the snapshot of
-        /// settings in force, which a restore reloads from the restored file once it is in place. A
-        /// restore that swapped the file partway through used to leave the save writing to the
-        /// restored file rows it had read from the other, and the snapshot describing either file.
-        /// Now the save keeps one connection throughout, so the restore waits for it: the save goes
-        /// to the file retired, and what is in force afterwards is the restored file's. Here the
+        /// settings in force, which a restore replaces with the rows it read from the backup once
+        /// the backup is in place. A restore that swapped the file partway through used to leave the
+        /// save writing to the restored file rows it had read from the other, and the snapshot
+        /// describing either file. Now the save keeps one connection throughout, so the restore
+        /// waits for it: the save goes to the file replaced, and what is in force afterwards is the
+        /// restored file's. Here the
         /// interval is stored in the current file and not in the backup, which is what made the
         /// save's update fail against the restored file.
         /// </summary>
         [Test]
-        public async Task Restore_LoadsTheRestoredSettingsOverASaveThatStartedBeforeIt()
+        public async Task Restore_PutsTheBackupsSettingsInForceOverASaveThatStartedBeforeIt()
         {
             await StagePasswordAsync(_options, "current-hash");
             var backupPath = await BackupWithAsync("backup.example", "backup-hash");
@@ -1035,7 +986,7 @@ namespace HostPinger.Test
             await store.LoadAsync();
             backup = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), store, new MaintenanceGate(), _fileGate, _summaries, NullLogger<DatabaseBackup>.Instance)
             {
-                BeforeDeletingRetired = KeepWhatWasRetiredAsync,
+                BeforeReplacing = KeepWhatIsReplacedAsync,
             };
 
             await store.SaveAsync(new PingerSettingsUpdate { IntervalSeconds = 77 });
@@ -1049,8 +1000,8 @@ namespace HostPinger.Test
                     "the backup stores no interval, so the default is in force");
                 Assert.That(await ScalarAsync(_dbPath, "SELECT COUNT(*) FROM UserSettings WHERE Key = 'Pinger:IntervalSeconds';"),
                     Is.EqualTo(0L), "and the restored file still stores none");
-                Assert.That(await ScalarAsync(_retired, "SELECT Value FROM UserSettings WHERE Key = 'Pinger:IntervalSeconds';"),
-                    Is.EqualTo("77"), "the save went to the file retired");
+                Assert.That(await ScalarAsync(_replaced, "SELECT Value FROM UserSettings WHERE Key = 'Pinger:IntervalSeconds';"),
+                    Is.EqualTo("77"), "the save went to the file replaced");
             });
         }
 
@@ -1089,7 +1040,6 @@ namespace HostPinger.Test
                 Assert.That(_fileGate.IsShut, Is.False);
                 Assert.That(await AddressesAsync(_dbPath).WaitAsync(Patience), Is.EqualTo(new[] { "current.example" }),
                     "the database was not replaced, and is open to the pages again");
-                Assert.That(File.Exists(backup.PreRestorePath), Is.False);
             });
         }
 
@@ -1183,50 +1133,38 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// A restored file that will not open once it is in place — standing in for the settings
-        /// failing to load, or the disk filling as it is opened — is taken out again, and the
-        /// database it replaced goes back.
+        /// A hostpinger.db.pre-restore that an earlier version's restore kept beside the database
+        /// may be the only copy of what that restore replaced, which its page said was kept, and a
+        /// restore now leaves it as it is: it neither replaces it nor deletes it. Here with a
+        /// database at the path, where the replace that kept the copy used to overwrite it, and on
+        /// a fresh install.
         /// </summary>
-        [Test]
-        public async Task Restore_PutsTheDatabaseBackWhenTheRestoredFileWillNotOpen()
+        [TestCase(true)]
+        [TestCase(false)]
+        public async Task Restore_LeavesAnEarlierVersionsUndoCopyAlone(bool withDatabase)
         {
+            var earlierUndo = _dbPath + ".pre-restore";
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
-            await StagePasswordAsync(_options, "current-hash");
-            await _store.LoadAsync();
             var backupPath = await BackupWithAsync("backup.example", "backup-hash");
-
-            var failure = await Assert.ThrowsAsync<IOException>(() => FailingToOpen().RestoreAsync(backupPath));
-
-            await AssertTheCurrentDatabaseIsBackAsync(failure!, "Opening it failed in the test. The previous database is back in place.");
-        }
-
-        /// <summary>
-        /// On a fresh install there is nothing to put back, so a backup that will not open leaves
-        /// an empty database rather than none — and not the undo an earlier restore left beside it,
-        /// which belongs to some other moment entirely.
-        /// </summary>
-        [Test]
-        public async Task Restore_IntoAFreshInstallLeavesAnEmptyDatabaseWhenTheBackupWillNotOpen()
-        {
-            var backupPath = await BackupWithAsync("backup.example", "backup-hash");
-
             SqliteConnection.ClearAllPools();
-            File.Move(_dbPath, _backup.PreRestorePath);
-            await SeedHostWithAttemptsAsync(OptionsFor(_backup.PreRestorePath), "an-earlier-undo.example", attempts: 1);
+            File.Copy(_dbPath, earlierUndo);
+            await SeedHostWithAttemptsAsync(OptionsFor(earlierUndo), "an-earlier-undo.example", attempts: 1);
             SqliteConnection.ClearAllPools();
+            if (!withDatabase)
+            {
+                foreach (var suffix in new[] { "", "-wal", "-shm" })
+                {
+                    File.Delete(_dbPath + suffix);
+                }
+            }
 
-            var failure = await Assert.ThrowsAsync<IOException>(() => FailingToOpen().RestoreAsync(backupPath));
+            await _backup.RestoreAsync(backupPath);
 
-            await using var live = new HostPingerDbContext(_options);
-            await using var undo = new HostPingerDbContext(OptionsFor(_backup.PreRestorePath));
             Assert.Multiple(async () =>
             {
-                Assert.That(failure!.Message, Is.EqualTo(
-                    "Opening it failed in the test. An empty database is in its place, as there was none before."));
-                Assert.That(await live.Database.GetPendingMigrationsAsync(), Is.Empty);
-                Assert.That(await live.Hosts.CountAsync(), Is.Zero);
-                Assert.That(await undo.Hosts.Select(h => h.Address).SingleAsync(), Is.EqualTo("an-earlier-undo.example"),
-                    "the earlier undo is left where it was");
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example" }));
+                Assert.That(await AddressesAsync(earlierUndo), Is.EqualTo(new[] { "current.example", "an-earlier-undo.example" }),
+                    "the earlier undo is left where it was, as it was");
             });
         }
 
@@ -1344,7 +1282,7 @@ namespace HostPinger.Test
 
         /// <summary>
         /// What a restore refused before the swap must leave: the current database untouched at
-        /// the path with its settings in force, no undo copy made, and the failure saying why.
+        /// the path with its settings in force, and the failure saying why.
         /// </summary>
         private async Task AssertNothingWasReplacedAsync(IOException failure, string expectedMessage)
         {
@@ -1356,7 +1294,6 @@ namespace HostPinger.Test
                 Assert.That(await live.Hosts.Select(h => h.Address).SingleAsync(), Is.EqualTo("current.example"));
                 Assert.That(await live.PingAttempts.CountAsync(), Is.EqualTo(1));
                 Assert.That(_store.PasswordHash, Is.EqualTo("current-hash"), "the settings in force are the current database's");
-                Assert.That(File.Exists(_backup.PreRestorePath), Is.False, "nothing was retired");
             });
         }
 
@@ -1502,7 +1439,6 @@ namespace HostPinger.Test
                 Assert.That(refusal, Is.EqualTo(new RestoreRefusal(expected, IsPassword: true)));
                 Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }));
                 Assert.That(_store.PasswordHash, Is.EqualTo("current-hash"), "the settings in force are the current database's");
-                Assert.That(File.Exists(_backup.PreRestorePath), Is.False, "nothing was retired");
                 Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-restore-*"), Is.Empty);
             });
         }
@@ -1619,7 +1555,7 @@ namespace HostPinger.Test
                 Assert.That(refusal, Is.EqualTo("A restore is under way. Try again once it has finished."));
                 Assert.That(second.Position, Is.Zero, "nothing of the second upload was read");
                 Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "first.example" }));
-                Assert.That(await AddressesAsync(_retired), Is.EqualTo(new[] { "current.example" }),
+                Assert.That(await AddressesAsync(_replaced), Is.EqualTo(new[] { "current.example" }),
                     "what the restore replaced was the database both meant to replace");
                 Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-backup-*"), Is.Empty, "no snapshot was written");
             });
@@ -1719,15 +1655,28 @@ namespace HostPinger.Test
             };
 
         /// <summary>
-        /// What the restores here do just before deleting the database they replaced: copy it to
-        /// <see cref="_retired"/>, for the tests that look at what became of a write that raced
-        /// the restore.
+        /// What the restores here do just before the backup goes over the database: copy the
+        /// database to <see cref="_replaced"/>, for the tests that look at what became of a write
+        /// that raced the restore. On a fresh install there is none to copy.
         /// </summary>
-        private Task KeepWhatWasRetiredAsync()
+        private Task KeepWhatIsReplacedAsync()
         {
-            File.Copy(_dbPath + ".pre-restore", _retired, overwrite: true);
+            if (File.Exists(_dbPath))
+            {
+                File.Copy(_dbPath, _replaced, overwrite: true);
+            }
+
             return Task.CompletedTask;
         }
+
+        /// <summary>
+        /// What a restore has left in the data directory, other than the database, what SQLite keeps
+        /// beside it, and the copy <see cref="KeepWhatIsReplacedAsync"/> takes.
+        /// </summary>
+        private string[] FilesBesideTheDatabase() => Directory.GetFiles(_directory)
+            .Select(path => Path.GetFileName(path))
+            .Where(name => name is not ("hostpinger.db" or "hostpinger.db-wal" or "hostpinger.db-shm" or "replaced.db"))
+            .ToArray();
 
         /// <summary>
         /// A restore onto an install that configures <paramref name="configured"/> as its password,
@@ -1748,13 +1697,6 @@ namespace HostPinger.Test
                 log ?? NullLogger<DatabaseBackup>.Instance)
             {
                 MeasureFreeBytes = () => freeBytes,
-            };
-
-        /// <summary>A restore whose backup goes into place and then fails to open, for the put-back.</summary>
-        private DatabaseBackup FailingToOpen() =>
-            new(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries, NullLogger<DatabaseBackup>.Instance)
-            {
-                AfterSwap = () => throw new InvalidDataException("Opening it failed in the test."),
             };
 
         /// <summary>
@@ -1796,28 +1738,6 @@ namespace HostPinger.Test
             {
                 return 0;
             }
-        }
-
-        /// <summary>
-        /// What a restore that failed after the swap must leave: the database it was meant to
-        /// replace back at the path, whole and in rollback-journal mode, with its settings in force
-        /// and no undo copy left over, and the failure saying why.
-        /// </summary>
-        private async Task AssertTheCurrentDatabaseIsBackAsync(IOException failure, string expectedMessage)
-        {
-            SqliteConnection.ClearAllPools();
-            await using var live = new HostPingerDbContext(_options);
-            Assert.Multiple(async () =>
-            {
-                Assert.That(failure.Message, Is.EqualTo(expectedMessage));
-                Assert.That(await live.Hosts.Select(h => h.Address).SingleAsync(), Is.EqualTo("current.example"));
-                Assert.That(await live.PingAttempts.CountAsync(), Is.EqualTo(1));
-                Assert.That(_store.PasswordHash, Is.EqualTo("current-hash"), "the settings in force are the current database's");
-                Assert.That(File.Exists(_backup.PreRestorePath), Is.False, "the file kept to put back is the live database again");
-                Assert.That(File.Exists(_dbPath + "-wal"), Is.False, "nothing of the restored file's is left beside it");
-                Assert.That(await JournalModeAsync(_dbPath), Is.EqualTo("delete"));
-                Assert.That(await IntegrityCheckAsync(_dbPath), Is.EqualTo("ok"));
-            });
         }
 
         private static DbContextOptions<HostPingerDbContext> OptionsFor(string path, DatabaseFileGate? gate = null)

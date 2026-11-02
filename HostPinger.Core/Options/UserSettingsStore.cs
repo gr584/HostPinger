@@ -56,6 +56,22 @@ namespace HostPinger.Core.Options
             _rows = await ReadRowsAsync(db, cancellationToken);
         }
 
+        /// <summary>
+        /// The rows stored in <paramref name="db"/>, a database that is not the one loaded, for
+        /// <see cref="PutInForce"/> once it is: what <see cref="LoadAsync"/> would read from it then.
+        /// For a restore, which reads its backup's before the swap, so that nothing after the swap
+        /// has anything left to read.
+        /// </summary>
+        internal static Task<Dictionary<string, string>> StoredInAsync(HostPingerDbContext db, CancellationToken cancellationToken = default) =>
+            RowsInAsync(db, cancellationToken);
+
+        /// <summary>
+        /// Puts <paramref name="rows"/>, which <see cref="StoredInAsync"/> read, in force in place of
+        /// the snapshot, as <see cref="LoadAsync"/> puts what it reads. The store holds them from
+        /// then on, and they are never changed.
+        /// </summary>
+        internal void PutInForce(Dictionary<string, string> rows) => _rows = rows;
+
         /// <summary>The pinger settings in force: the configured values, under the stored rows.</summary>
         public PingerOptions CurrentPinger => PingerUnder(_rows);
 
@@ -199,9 +215,9 @@ namespace HostPinger.Core.Options
             try
             {
                 // One connection from the first read to the snapshot's update below, so that a
-                // restore, which reloads the snapshot once its file is in place, swaps the file
+                // restore, which replaces the snapshot once its file is in place, swaps the file
                 // before the save or after it. Swapped in between, the snapshot updated here would
-                // describe the file the restore retired, its password included.
+                // describe the file the restore replaced, its password included.
                 await using var db = await dbFactory.CreateDbContextAsync(cancellationToken);
                 await db.Database.OpenConnectionAsync(cancellationToken);
                 foreach (var (key, value) in changes)

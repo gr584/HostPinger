@@ -39,7 +39,7 @@ namespace HostPinger.Core.Services
     /// the round under way, which with a host down is the whole ping timeout, or a backup's whole
     /// snapshot, with the dialog on screen and nothing to say why; the page leaving meanwhile
     /// dropped it, and a restore finishing meanwhile had it delete by an id read from the file
-    /// that restore had just retired.
+    /// that restore had just replaced.
     /// </para>
     /// <para>
     /// What every change does wait for is the moment a restore swaps the file, at the
