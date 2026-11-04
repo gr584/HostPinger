@@ -16,6 +16,8 @@
     <!-- Drives a real browser against a real instance of the application. The package carries its
          own Node runtime, so nothing has to be installed on the machine running the tests; the
          browser is whichever Chrome or Chromium is already there, found by BrowserTest. -->
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" />
     <PackageReference Include="Microsoft.Playwright" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="NUnit" />
