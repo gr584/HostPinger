@@ -187,18 +187,20 @@ and saved only when it is.
   first, in an overlay like the one that unlocks. The overlay shows how far the snapshot has got,
   and the download starts once it is written; Cancel or Escape stops it partway.
 - **Restore** — uploads a backup and, after a confirmation, replaces the current database with it.
-  Everything comes from the backup, including its password or the lack of one, so the confirmation
-  asks for the backup's password, and a backup that has one is only restored with it: whoever
-  restores it can unlock afterwards, though the browser it was restored from may need unlocking
-  again. A backup that never stored a password leaves the one configured in `appsettings.json` or
-  the environment in force, if there is one, and asks for that instead; a backup without a password
-  unlocks the service. The file is checked before anything is replaced: it must be an intact SQLite
-  database with HostPinger's schema and no triggers or views, which HostPinger never creates, and
-  one from a newer version is refused. Then the password is checked, and a wrong one brings the
-  confirmation back with the file still chosen. A backup from an older version is migrated up where
-  it lies, the way an old database is at startup, while monitoring carries on; that needs room
-  beside the database of about half the backup's size, and a backup there is no room for is refused
-  up front. One that cannot be migrated, or lacks a table, is refused with nothing replaced.
+  The file is checked before anything is replaced: it must be an intact SQLite database with
+  HostPinger's schema and no triggers or views, which HostPinger never creates, and one from a newer
+  version is refused. Everything comes from the backup, including its password or the lack of one,
+  so a backup that has one then asks for it in a step of its own, and is only restored with it:
+  whoever restores it can unlock afterwards, though the browser it was restored from may need
+  unlocking again. A wrong password can be tried again as often as it takes without sending the file
+  again, since the upload waits beside the database. Cancel or Escape leaves instead, which deletes
+  the upload and replaces nothing, and so does leaving the step alone for ten minutes. A backup that
+  never stored a password leaves the one configured in `appsettings.json` or the environment in
+  force, if there is one, and asks for that instead; a backup without a password asks for nothing
+  and unlocks the service. A backup from an older version is migrated up where it lies, once the
+  password is given, the way an old database is at startup, while monitoring carries on; that needs
+  room beside the database of about half the backup's size, and a backup there is no room for is
+  refused up front. One that cannot be migrated, or lacks a table, is refused with nothing replaced.
   Everything a service start does to a database is done to the backup where it lies, and its
   settings are read there too, before anything is replaced, so nothing is left to fail once it is in
   place: the swap is one rename of the backup over the database, and monitoring, and whatever the
@@ -215,7 +217,8 @@ and saved only when it is.
   restore asks for the current password first, in an overlay like the one that unlocks, before the
   file is chosen. Once the restore is confirmed, the overlay shows how far the upload has got, then
   the check and the swap as they happen, and then what came of it. One backup or restore runs at a
-  time: another asked for meanwhile, from any browser, is turned away with what is under way.
+  time, a restore waiting for its password included: another asked for meanwhile, from any browser,
+  is turned away with what is under way.
 - **Security** — whether a password is set, and the way to `/password` to set, change or remove
   one.
 

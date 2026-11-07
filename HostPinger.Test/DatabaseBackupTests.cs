@@ -350,7 +350,7 @@ namespace HostPinger.Test
             var upload = new UploadStream(await File.ReadAllBytesAsync(backupPath));
 
             // Room for the upload with the margin, and not much more.
-            var result = await Cramped(freeBytes: 70L * 1024 * 1024).RestoreUploadAsync(upload, upload.Size, BackupPassword);
+            var result = await Cramped(freeBytes: 70L * 1024 * 1024).RestoreUploadAsync(upload, upload.Size, Answering(BackupPassword));
 
             Assert.Multiple(() =>
             {
@@ -1309,7 +1309,7 @@ namespace HostPinger.Test
             var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)));
             var reports = new List<RestoreProgress>();
 
-            var refusal = (await _backup.RestoreUploadAsync(upload, upload.Size, BackupPassword, new Recorder<RestoreProgress>(reports.Add))).Refusal;
+            var refusal = (await _backup.RestoreUploadAsync(upload, upload.Size, Answering(BackupPassword), new Recorder<RestoreProgress>(reports.Add))).Refusal;
 
             var received = reports.Where(r => r.Step == RestoreStep.Receiving).Select(r => r.Fraction).ToList();
             Assert.Multiple(async () =>
@@ -1336,11 +1336,11 @@ namespace HostPinger.Test
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
             var upload = new UploadStream(Enumerable.Repeat((byte)0x2A, 100_000).ToArray());
 
-            var refusal = (await _backup.RestoreUploadAsync(upload, upload.Size, BackupPassword)).Refusal;
+            var refusal = (await _backup.RestoreUploadAsync(upload, upload.Size, NeverAsked)).Refusal;
 
             Assert.Multiple(async () =>
             {
-                Assert.That(refusal, Is.EqualTo(new RestoreRefusal("This file is not an SQLite database.")));
+                Assert.That(refusal, Is.EqualTo("This file is not an SQLite database."));
                 Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }));
                 Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-restore-*"), Is.Empty);
             });
@@ -1361,11 +1361,11 @@ namespace HostPinger.Test
                 MeasureFreeBytes = () => 3L << 20,
             };
 
-            var refusal = (await cramped.RestoreUploadAsync(upload, upload.Size, BackupPassword)).Refusal;
+            var refusal = (await cramped.RestoreUploadAsync(upload, upload.Size, NeverAsked)).Refusal;
 
             Assert.Multiple(async () =>
             {
-                Assert.That(refusal?.Message, Is.EqualTo(
+                Assert.That(refusal, Is.EqualTo(
                     "Receiving the backup needs about 64 MB free beside the database. The disk has 3 MB."));
                 Assert.That(upload.Position, Is.Zero, "nothing of the upload was read");
                 Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }));
@@ -1384,7 +1384,7 @@ namespace HostPinger.Test
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
             var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)), fail: true);
 
-            var failure = await Assert.ThrowsAsync<IOException>(() => _backup.RestoreUploadAsync(upload, upload.Size, BackupPassword));
+            var failure = await Assert.ThrowsAsync<IOException>(() => _backup.RestoreUploadAsync(upload, upload.Size, NeverAsked));
 
             Assert.Multiple(async () =>
             {
@@ -1406,7 +1406,7 @@ namespace HostPinger.Test
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
             var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)));
 
-            var failure = await Assert.ThrowsAsync<IOException>(() => _backup.RestoreUploadAsync(upload, 50_000, BackupPassword));
+            var failure = await Assert.ThrowsAsync<IOException>(() => _backup.RestoreUploadAsync(upload, 50_000, NeverAsked));
 
             Assert.Multiple(async () =>
             {
@@ -1417,46 +1417,248 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// A backup that puts a password in force is only restored with that password, so that
-        /// whoever restores it can unlock HostPinger afterwards. None given, or the wrong one, is
-        /// refused as a password, the refusal the page asks again after, with nothing replaced and
-        /// nothing of the upload kept.
+        /// The password is only asked for once the whole file has arrived and passed its checks, so
+        /// that giving it is the last thing between the file and the swap, and a file that would be
+        /// refused anyway never asks for one.
         /// </summary>
-        [TestCase(null, "The backup has a password. Enter it to restore the backup.")]
-        [TestCase("", "The backup has a password. Enter it to restore the backup.")]
-        [TestCase("not the backup's password", "That is not the backup's password.")]
-        public async Task RestoreUpload_RefusesAPasswordMissingOrWrongAndReplacesNothing(string? password, string expected)
+        [Test]
+        public async Task RestoreUpload_AsksForThePasswordOnceTheFileHasArrivedAndPassedItsChecks()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)));
+            var reports = new List<RestoreProgress>();
+            List<RestoreStep>? stepsWhenAsked = null;
+            long? readWhenAsked = null;
+
+            var result = await _backup.RestoreUploadAsync(
+                upload,
+                upload.Size,
+                (_, _) =>
+                {
+                    stepsWhenAsked = reports.Select(r => r.Step).Distinct().ToList();
+                    readWhenAsked = upload.Position;
+                    return Task.FromResult(BackupPassword);
+                },
+                new Recorder<RestoreProgress>(reports.Add));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(result.Refusal, Is.Null);
+                Assert.That(stepsWhenAsked, Is.EqualTo(new[] { RestoreStep.Receiving, RestoreStep.Checking }));
+                Assert.That(readWhenAsked, Is.EqualTo(upload.Size));
+                Assert.That(reports[^1].Step, Is.EqualTo(RestoreStep.Replacing), "the swap only starts once it is given");
+            });
+        }
+
+        /// <summary>
+        /// A backup that puts a password in force is only restored with that password, so that
+        /// whoever restores it can unlock HostPinger afterwards. A wrong answer asks again, saying
+        /// so, for as long as it takes, with the file that was received still waiting beside the
+        /// database, so nothing is sent again. Until the right one comes nothing is replaced.
+        /// </summary>
+        [Test]
+        public async Task RestoreUpload_AsksAgainAfterAWrongPasswordWithTheFileItHasAndReplacesNothingUntilItIsRight()
         {
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
             await StagePasswordAsync(_options, "current-hash");
             await _store.LoadAsync();
             var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)));
+            var answers = new Queue<string>(["not the backup's password", "nor is this", BackupPassword]);
+            var asked = new List<string?>();
+            var waitingFiles = new List<int>();
+            var addresses = new List<string>();
 
-            var refusal = (await _backup.RestoreUploadAsync(upload, upload.Size, password)).Refusal;
+            var result = await _backup.RestoreUploadAsync(
+                upload,
+                upload.Size,
+                async (refused, _) =>
+                {
+                    asked.Add(refused);
+                    waitingFiles.Add(Directory.EnumerateFiles(_directory, "hostpinger-restore-*.tmp").Count());
+                    addresses.AddRange(await AddressesAsync(_dbPath));
+                    Assert.That(_store.PasswordHash, Is.EqualTo("current-hash"), "the settings in force are the current database's");
+                    return answers.Dequeue();
+                });
 
             Assert.Multiple(async () =>
             {
-                Assert.That(refusal, Is.EqualTo(new RestoreRefusal(expected, IsPassword: true)));
+                Assert.That(result.Refusal, Is.Null);
+                Assert.That(asked, Is.EqualTo(new[]
+                {
+                    null, "That is not the backup's password.", "That is not the backup's password.",
+                }));
+                Assert.That(waitingFiles, Is.EqualTo(new[] { 1, 1, 1 }), "the one file received, kept for every answer");
+                Assert.That(addresses, Is.EqualTo(new[] { "current.example", "current.example", "current.example" }));
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example" }));
+                Assert.That(_store.PasswordHash, Is.EqualTo(BackupHash));
+                Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-restore-*"), Is.Empty);
+            });
+        }
+
+        /// <summary>
+        /// Somebody who cannot give the password leaves, which the page does by cancelling: the
+        /// current database and settings stay in force, nothing of the upload is kept, and the turn
+        /// goes back for the next backup or restore.
+        /// </summary>
+        [Test]
+        public async Task RestoreUpload_LeftAtThePasswordReplacesNothingAndLetsTheUploadGo()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            await StagePasswordAsync(_options, "current-hash");
+            await _store.LoadAsync();
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)));
+            var asked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var leaving = new CancellationTokenSource();
+
+            var restoring = _backup.RestoreUploadAsync(upload, upload.Size, NeverAnswering(asked), cancellationToken: leaving.Token);
+            await asked.Task.WaitAsync(Patience);
+            Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-restore-*.tmp").Count(), Is.EqualTo(1),
+                "the upload waits beside the database");
+            await leaving.CancelAsync();
+
+            await Assert.CatchAsync<OperationCanceledException>(() => restoring.WaitAsync(Patience));
+            Assert.Multiple(async () =>
+            {
                 Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }));
                 Assert.That(_store.PasswordHash, Is.EqualTo("current-hash"), "the settings in force are the current database's");
                 Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-restore-*"), Is.Empty);
+                Assert.That(File.Exists(await _backup.CreateSnapshotAsync().WaitAsync(Patience)), "the turn was given back");
+            });
+        }
+
+        /// <summary>
+        /// An overlay left open must not keep every backup and restore off for good, so a password
+        /// nobody gives lets the upload go: the restore says so, replaces nothing, and gives the turn
+        /// back.
+        /// </summary>
+        [Test]
+        public async Task RestoreUpload_LetsTheUploadGoWhenThePasswordIsNotGivenInTime()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)));
+            var backup = WaitingForAPassword(TimeSpan.FromMilliseconds(50));
+            var asked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            var result = await backup.RestoreUploadAsync(upload, upload.Size, NeverAnswering(asked)).WaitAsync(Patience);
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(asked.Task.IsCompleted, "it did ask");
+                Assert.That(result.Refusal, Is.EqualTo(
+                    "The backup's password was not given in time, so the upload was let go of and nothing was replaced."));
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }));
+                Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-restore-*"), Is.Empty);
+                Assert.That(File.Exists(await backup.CreateSnapshotAsync().WaitAsync(Patience)), "the turn was given back");
+            });
+        }
+
+        /// <summary>
+        /// The wait is for each answer rather than for them all, so somebody still trying gets the
+        /// whole of it again. The first answer outlasts its wait and comes anyway, the way one
+        /// typed at the last moment can.
+        /// </summary>
+        [Test]
+        public async Task RestoreUpload_WaitsAfreshForEachAnswer()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)));
+            var backup = WaitingForAPassword(TimeSpan.FromMilliseconds(500));
+            var asked = 0;
+            bool? outOfTimeWhenAskedAgain = null;
+
+            var result = await backup.RestoreUploadAsync(
+                upload,
+                upload.Size,
+                async (_, cancellationToken) =>
+                {
+                    if (++asked > 1)
+                    {
+                        outOfTimeWhenAskedAgain = cancellationToken.IsCancellationRequested;
+                        return BackupPassword;
+                    }
+
+                    var runOut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    await using (cancellationToken.Register(() => runOut.TrySetResult()))
+                    {
+                        await runOut.Task.WaitAsync(Patience);
+                    }
+
+                    return "not the backup's password";
+                });
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(outOfTimeWhenAskedAgain, Is.False);
+                Assert.That(result.Refusal, Is.Null);
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example" }));
+            });
+        }
+
+        /// <summary>
+        /// The upload waits for its password in the restore's turn, so another backup or restore is
+        /// turned away meanwhile, on the room counted for this one. Only that waits on it: the
+        /// swap is yet to come, so the ping rounds and the pages go on until the password is given.
+        /// </summary>
+        [TestCase("restore")]
+        [TestCase("backup")]
+        public async Task WhileARestoreWaitsForItsPassword_AnotherIsTurnedAwayAndEverythingElseGoesOn(string asked)
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var gate = new MaintenanceGate();
+            var backup = new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, gate, _fileGate, _summaries, NullLogger<DatabaseBackup>.Instance);
+            var first = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("first.example", BackupHash)));
+            var second = new UploadStream(
+                await File.ReadAllBytesAsync(await BackupWithAsync("second.example", BackupHash, "second.db")));
+            var waiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var answer = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var restoring = backup.RestoreUploadAsync(
+                first,
+                first.Size,
+                (_, _) =>
+                {
+                    waiting.TrySetResult();
+                    return answer.Task;
+                });
+            await waiting.Task.WaitAsync(Patience);
+
+            var refusal = asked == "restore"
+                ? (await backup.RestoreUploadAsync(second, second.Size, NeverAsked)).Refusal
+                : (await Assert.ThrowsAsync<IOException>(() => backup.CreateSnapshotAsync()))!.Message;
+
+            // What a round takes, and a page's write, which would each wait out the swap.
+            using var patience = new CancellationTokenSource(Patience);
+            using (await gate.AcquireAsync(patience.Token))
+            {
+                await SeedHostWithAttemptsAsync(_options, "written.example", attempts: 1).WaitAsync(Patience);
+            }
+
+            var addressesWhileWaiting = await AddressesAsync(_dbPath);
+            answer.SetResult(BackupPassword);
+
+            Assert.That((await restoring.WaitAsync(Patience)).Refusal, Is.Null);
+            Assert.Multiple(async () =>
+            {
+                Assert.That(refusal, Is.EqualTo("A restore is under way. Try again once it has finished."));
+                Assert.That(second.Position, Is.Zero, "nothing of the second upload was read");
+                Assert.That(addressesWhileWaiting, Is.EqualTo(new[] { "current.example", "written.example" }));
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "first.example" }));
+                Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-backup-*"), Is.Empty, "no snapshot was written");
             });
         }
 
         /// <summary>
         /// A backup whose password was removed puts none in force, even on an install that
         /// configures one, since the removal is a stored row and a stored row wins. So it is
-        /// restored without a password, whatever is typed, and leaves nothing locked.
+        /// restored without asking for a password, and leaves nothing locked.
         /// </summary>
-        [TestCase(null)]
-        [TestCase("whatever is typed")]
-        public async Task RestoreUpload_NeedsNoPasswordForABackupWhosePasswordWasRemoved(string? password)
+        [Test]
+        public async Task RestoreUpload_DoesNotAskForAPasswordForABackupWhosePasswordWasRemoved()
         {
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
             var (store, backup) = ConfiguredWith(PasswordHash.Hash("configured"));
             var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", string.Empty)));
 
-            var refusal = (await backup.RestoreUploadAsync(upload, upload.Size, password)).Refusal;
+            var refusal = (await backup.RestoreUploadAsync(upload, upload.Size, NeverAsked)).Refusal;
 
             Assert.Multiple(async () =>
             {
@@ -1477,14 +1679,22 @@ namespace HostPinger.Test
             var configured = PasswordHash.Hash("configured");
             var (store, backup) = ConfiguredWith(configured);
             var bytes = await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", hash: null));
+            var answers = new Queue<string>([BackupPassword, "configured"]);
+            var asked = new List<string?>();
 
-            var wrong = (await backup.RestoreUploadAsync(new UploadStream(bytes), bytes.Length, BackupPassword)).Refusal;
-            var right = (await backup.RestoreUploadAsync(new UploadStream(bytes), bytes.Length, "configured")).Refusal;
+            var result = await backup.RestoreUploadAsync(
+                new UploadStream(bytes),
+                bytes.Length,
+                (refused, _) =>
+                {
+                    asked.Add(refused);
+                    return Task.FromResult(answers.Dequeue());
+                });
 
             Assert.Multiple(async () =>
             {
-                Assert.That(wrong, Is.EqualTo(new RestoreRefusal("That is not the backup's password.", IsPassword: true)));
-                Assert.That(right, Is.Null);
+                Assert.That(asked, Is.EqualTo(new[] { null, "That is not the backup's password." }));
+                Assert.That(result.Refusal, Is.Null);
                 Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example" }));
                 Assert.That(store.PasswordHash, Is.EqualTo(configured));
             });
@@ -1493,8 +1703,8 @@ namespace HostPinger.Test
         /// <summary>
         /// A backup older than the settings table has none to read a password from, which is not a
         /// failure: like any backup storing no password, it puts this install's configured one in
-        /// force, and takes that. The table only comes with the migrations, after the password is
-        /// checked.
+        /// force, and takes that. The table only comes with the migrations, which wait for the
+        /// password, so that getting it wrong does not cost a migration first.
         /// </summary>
         [Test]
         public async Task RestoreUpload_TakesTheConfiguredPasswordForABackupOlderThanTheSettingsTable()
@@ -1514,14 +1724,23 @@ namespace HostPinger.Test
             var configured = PasswordHash.Hash("configured");
             var (store, backup) = ConfiguredWith(configured);
             var bytes = await File.ReadAllBytesAsync(backupPath);
+            var migrationsInTheBackup = await AppliedMigrationsAsync(backupPath);
+            long? migrationsWhenAsked = null;
 
-            var none = (await backup.RestoreUploadAsync(new UploadStream(bytes), bytes.Length, password: null)).Refusal;
-            var right = (await backup.RestoreUploadAsync(new UploadStream(bytes), bytes.Length, "configured")).Refusal;
+            var result = await backup.RestoreUploadAsync(
+                new UploadStream(bytes),
+                bytes.Length,
+                async (_, _) =>
+                {
+                    migrationsWhenAsked = await AppliedMigrationsAsync(
+                        Directory.EnumerateFiles(_directory, "hostpinger-restore-*.tmp").Single());
+                    return "configured";
+                });
 
             Assert.Multiple(async () =>
             {
-                Assert.That(none, Is.EqualTo(new RestoreRefusal("The backup has a password. Enter it to restore the backup.", IsPassword: true)));
-                Assert.That(right, Is.Null);
+                Assert.That(result.Refusal, Is.Null);
+                Assert.That(migrationsWhenAsked, Is.EqualTo(migrationsInTheBackup), "asked before it was migrated");
                 Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "older.example" }));
                 Assert.That(store.PasswordHash, Is.EqualTo(configured));
             });
@@ -1541,11 +1760,11 @@ namespace HostPinger.Test
             var first = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("first.example", BackupHash)), hold: true);
             var second = new UploadStream(
                 await File.ReadAllBytesAsync(await BackupWithAsync("second.example", BackupHash, "second.db")));
-            var restoring = _backup.RestoreUploadAsync(first, first.Size, BackupPassword);
+            var restoring = _backup.RestoreUploadAsync(first, first.Size, Answering(BackupPassword));
             await first.Held.Task.WaitAsync(Patience);
 
             var refusal = asked == "restore"
-                ? (await _backup.RestoreUploadAsync(second, second.Size, BackupPassword)).Refusal?.Message
+                ? (await _backup.RestoreUploadAsync(second, second.Size, NeverAsked)).Refusal
                 : (await Assert.ThrowsAsync<IOException>(() => _backup.CreateSnapshotAsync()))!.Message;
             first.Release();
 
@@ -1586,7 +1805,7 @@ namespace HostPinger.Test
             await reporting.Task.WaitAsync(Patience);
 
             var refusal = asked == "restore"
-                ? (await _backup.RestoreUploadAsync(upload, upload.Size, BackupPassword)).Refusal?.Message
+                ? (await _backup.RestoreUploadAsync(upload, upload.Size, NeverAsked)).Refusal
                 : (await Assert.ThrowsAsync<IOException>(() => _backup.CreateSnapshotAsync()))!.Message;
             held.Set();
             var snapshot = await writing.WaitAsync(Patience);
@@ -1690,6 +1909,32 @@ namespace HostPinger.Test
                 new TestOptionsMonitor<SecurityOptions>(new SecurityOptions { PasswordHash = configured }));
             return (store, new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), store, new MaintenanceGate(), _fileGate, _summaries, NullLogger<DatabaseBackup>.Instance));
         }
+
+        /// <summary>A restore that waits <paramref name="wait"/> for each answer to a backup's password.</summary>
+        private DatabaseBackup WaitingForAPassword(TimeSpan wait) =>
+            new(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries, NullLogger<DatabaseBackup>.Instance)
+            {
+                PasswordWait = wait,
+            };
+
+        /// <summary>Somebody who gives <paramref name="password"/> every time they are asked.</summary>
+        private static Func<string?, CancellationToken, Task<string>> Answering(string password) =>
+            (_, _) => Task.FromResult(password);
+
+        /// <summary>For a restore that has no call to ask for a password, which fails the test if it does.</summary>
+        private static Task<string> NeverAsked(string? refused, CancellationToken cancellationToken) =>
+            throw new AssertionException("A password was asked for.");
+
+        /// <summary>
+        /// Somebody who is asked, which sets <paramref name="asked"/>, and never answers, waiting
+        /// the way the page does until told to stop.
+        /// </summary>
+        private static Func<string?, CancellationToken, Task<string>> NeverAnswering(TaskCompletionSource asked) =>
+            (_, cancellationToken) =>
+            {
+                asked.TrySetResult();
+                return new TaskCompletionSource<string>().Task.WaitAsync(cancellationToken);
+            };
 
         /// <summary>A restore onto a disk with <paramref name="freeBytes"/> free beside the database.</summary>
         private DatabaseBackup Cramped(long freeBytes, ILogger<DatabaseBackup>? log = null) =>

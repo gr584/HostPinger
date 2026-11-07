@@ -314,6 +314,19 @@
                                     confirmed it.
                                 </p>
                                 break;
+                            case Confirming.RestoreBackupPassword:
+                                <p class="mb-2">
+                                    The backup passed its checks, and nothing has been replaced yet.
+                                    Restoring it puts a password in force, the one to unlock with from
+                                    then on, and this browser may need unlocking with it again. Enter
+                                    it to go ahead. If you cannot, cancel, and the current database
+                                    stays as it is.
+                                </p>
+                                <label class="form-label" for="backup-password">The backup's password</label>
+                                <input id="backup-password" type="password" class="form-control form-control-sm"
+                                       autocomplete="current-password"
+                                       @bind="_backupPassword" @bind:event="oninput" @ref="_backupPasswordInput" />
+                                break;
                             case Confirming.Restored:
                                 <div class="alert @(_isRestoreRefused ? "alert-danger" : "alert-success") mb-0"
                                      role="status">@_restoreResult</div>
@@ -345,16 +358,10 @@
                                     current database is kept, so download a backup first if you may
                                     want it back.
                                 </p>
-                                <p class="mb-2">
-                                    The backup's password is the one to unlock with once it is
-                                    restored, and this browser may need unlocking with it again. Enter
-                                    it here: nothing is replaced unless it is right. Leave it empty if
-                                    the backup has none, which leaves nothing locked.
+                                <p class="mb-0">
+                                    The file is uploaded and checked first, and nothing is replaced
+                                    unless it passes. If it has a password, you are asked for that next.
                                 </p>
-                                <label class="form-label" for="backup-password">The backup's password</label>
-                                <input id="backup-password" type="password" class="form-control form-control-sm"
-                                       autocomplete="current-password"
-                                       @bind="_backupPassword" @bind:event="oninput" @ref="_backupPasswordInput" />
                                 break;
                         }
                         @if (AsksPassword)
@@ -386,6 +393,9 @@
                             case Confirming.RestoreFile:
                                 @* The page's own hidden input, so the chosen file stays put; see there. *@
                                 <label for="restore-file" role="button" class="btn btn-primary btn-sm">Choose file…</label>
+                                break;
+                            case Confirming.RestoreBackupPassword:
+                                <button type="submit" class="btn btn-danger btn-sm">Restore</button>
                                 break;
                             case Confirming.Restored:
                                 <button type="button" class="btn btn-primary btn-sm" @onclick="CloseDialog">Close</button>
@@ -449,7 +459,17 @@
     // The chosen file, held while the confirmation is on screen. Confirming is a separate click
     // from choosing, because what follows replaces the database.
     private IBrowserFile? _restoreFile;
+
+    // Whether a restore is at work, which holds the overlay open. Not while it waits for the
+    // backup's password, which can be left.
     private bool _isRestoring;
+
+    // The restore under way, cancelled when it is left at the backup's password, or when the page goes.
+    private CancellationTokenSource? _restoring;
+
+    // What the restore is waiting on while it asks for the backup's password. Let go of as it is
+    // answered, since it holds the answer from then on.
+    private TaskCompletionSource<string>? _backupPasswordAnswer;
 
     // Replaced to recreate the restore input. The file lives on the browser's input element, so
     // the element has to survive until the upload has been read, and be rebuilt to be cleared.
@@ -482,8 +502,7 @@
     // a password is held here no longer than it takes to check it.
     private string _password = string.Empty;
 
-    // What is typed as the backup's password in the restore's confirmation, emptied the same way
-    // once the restore has it.
+    // What is typed as the backup's password, emptied the same way once the restore has it.
     private string _backupPassword = string.Empty;
     private ElementReference _backupPasswordInput;
 
@@ -960,9 +979,19 @@
     /// <summary>Closes the overlay without doing what it was opened for.</summary>
     private void CancelDialog()
     {
+        // Disabled by then; this is for a click that raced the render that disabled it.
+        if (_isRestoring)
+        {
+            return;
+        }
+
         if (_confirming == Confirming.Preparing)
         {
             _preparation?.Cancel();
+        }
+        else if (_confirming == Confirming.RestoreBackupPassword)
+        {
+            _restoring?.Cancel();
         }
         else if (_confirming != Confirming.Download)
         {
@@ -979,14 +1008,15 @@
         Confirming.Download => DownloadBackupAsync(),
         Confirming.RestorePassword => GiveRestorePasswordAsync(),
         Confirming.Restore => ConfirmRestoreAsync(),
+        Confirming.RestoreBackupPassword => GiveBackupPasswordAsync(),
         _ => Task.CompletedTask,
     };
 
     /// <summary>Whether the step on screen asks for the current password.</summary>
     private bool AsksPassword => _confirming is Confirming.Download or Confirming.RestorePassword;
 
-    /// <summary>Whether the step on screen asks for the backup's password: the confirmation, until it is confirmed.</summary>
-    private bool AsksBackupPassword => _confirming == Confirming.Restore && !_isRestoring;
+    /// <summary>Whether the step on screen asks for the backup's password.</summary>
+    private bool AsksBackupPassword => _confirming == Confirming.RestoreBackupPassword;
 
     private bool IsDownloading => _confirming is Confirming.Download or Confirming.Preparing;
 
@@ -1050,13 +1080,14 @@
 
     /// <summary>
     /// Cancels on a click away. Dragging a text selection out of the field also raises a click on
-    /// the overlay, so a press that started inside it is not one. A snapshot being written is
-    /// cancelled only on purpose, with Cancel or Escape: a stray click would throw away a copy
-    /// that may have taken a while.
+    /// the overlay, so a press that started inside it is not one. A snapshot being written, or a
+    /// restore waiting for the backup's password, is cancelled only on purpose, with Cancel or
+    /// Escape: a stray click would throw away a copy or an upload that may have taken a while.
     /// </summary>
     private void OnOverlayClick()
     {
-        if (!_pressedInsideDialog && !_isRestoring && _confirming != Confirming.Preparing)
+        if (!_pressedInsideDialog && !_isRestoring
+            && _confirming is not (Confirming.Preparing or Confirming.RestoreBackupPassword))
         {
             CancelDialog();
         }
@@ -1116,6 +1147,12 @@
 
     private async Task ConfirmRestoreAsync()
     {
+        // The button is disabled by then; this is for a second press that raced that render.
+        if (_isRestoring)
+        {
+            return;
+        }
+
         if (_restoreFile is not { } file)
         {
             CloseDialog();
@@ -1139,22 +1176,25 @@
             return;
         }
 
-        // Emptied as it is read, as the current password is.
-        var backupPassword = _backupPassword;
-        _backupPassword = string.Empty;
-
         _isRestoring = true;
         ShowStep("Uploading the backup…", 0);
-        RestoreResult? result = null;
+        using var restoring = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+        _restoring = restoring;
+        RestoreResult result;
         try
         {
-            // The backup receives the file beside the database, checks it and the password given
-            // for it, and puts it in place, saying which it is on; a backup or restore already
+            // The backup receives the file beside the database, checks it, asks for its password if
+            // it has one, and puts it in place, saying which it is on; a backup or restore already
             // under way, or a disk without room for the file, comes back as a refusal before any
             // of it is read.
-            await using var source = file.OpenReadStream(MaxRestoreUploadBytes, _cts.Token);
+            await using var source = file.OpenReadStream(MaxRestoreUploadBytes, restoring.Token);
             result = await Backup.RestoreUploadAsync(
-                source, file.Size, backupPassword, new Progress<RestoreProgress>(ShowRestoreStep), _cts.Token);
+                source, file.Size, AskBackupPasswordAsync, new Progress<RestoreProgress>(ShowRestoreStep), restoring.Token);
+        }
+        catch (OperationCanceledException) when (restoring.IsCancellationRequested)
+        {
+            // Left at the backup's password, which has closed the overlay, or the page has gone.
+            return;
         }
         catch (Exception ex) when (ex is IOException or Microsoft.JSInterop.JSException)
         {
@@ -1167,34 +1207,15 @@
         finally
         {
             // The overlay stays up, saying it is restoring, until here, and then says what came
-            // of it. The file stays chosen only for a password missing or wrong, the one refusal
-            // the same file gets past.
+            // of it.
+            _restoring = null;
             _isRestoring = false;
-            if (result?.Refusal?.IsPassword != true)
-            {
-                CancelRestore();
-            }
-        }
-
-        if (result.Refusal is { IsPassword: true } refusal)
-        {
-            // Back to the confirmation, saying what was wrong above the box for the password.
-            // Nothing of the upload was kept, so confirming again sends the file again.
-            if (backupPassword.Length > 0)
-            {
-                Logger.LogWarning(
-                    "Failed restore from {Address}: the backup's password was wrong.",
-                    RequestOrigin.Describe(Origin));
-            }
-
-            OpenDialog(Confirming.Restore);
-            _dialogError = refusal.Message;
-            return;
+            CancelRestore();
         }
 
         if (result.Refusal is { } turnedAway)
         {
-            ShowRestoreResult(turnedAway.Message, isRefused: true);
+            ShowRestoreResult(turnedAway, isRefused: true);
             return;
         }
 
@@ -1213,6 +1234,62 @@
         // The file underneath is the backup's now.
         await LoadStatsAsync();
         _isUnlocked = await IsUnlockedAsync();
+    }
+
+    /// <summary>
+    /// Turns the overlay to the backup's password and waits for it, which the restore asks for once
+    /// the file has passed its checks. <paramref name="refused"/> says why the last answer was
+    /// refused, above an empty box; the file stays beside the database meanwhile, so answering
+    /// again sends nothing again. The way out is the overlay's Cancel, which cancels the restore.
+    /// </summary>
+    private async Task<string> AskBackupPasswordAsync(string? refused, CancellationToken cancellationToken)
+    {
+        var answer = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await InvokeAsync(() =>
+        {
+            if (refused is not null)
+            {
+                Logger.LogWarning(
+                    "Failed restore from {Address}: the backup's password was wrong.",
+                    RequestOrigin.Describe(Origin));
+            }
+
+            _backupPasswordAnswer = answer;
+            _isRestoring = false;
+            OpenDialog(Confirming.RestoreBackupPassword);
+            _dialogError = refused;
+            StateHasChanged();
+        });
+
+        return await answer.Task.WaitAsync(cancellationToken);
+    }
+
+    private async Task GiveBackupPasswordAsync()
+    {
+        if (!await IsUnlockedAsync())
+        {
+            _restoring?.Cancel();
+            RefuseRestoreAsLocked();
+            return;
+        }
+
+        // An empty box is no guess, here as for the current password, so it goes no further.
+        if (_backupPassword.Length == 0)
+        {
+            _dialogError = "Enter the backup's password.";
+            _focusDialog = true;
+            return;
+        }
+
+        // Emptied as it is read, as the current password is.
+        var password = _backupPassword;
+        _backupPassword = string.Empty;
+
+        _isRestoring = true;
+        _confirming = Confirming.Restore;
+        ShowStep("Checking the password…", null);
+        _backupPasswordAnswer?.TrySetResult(password);
+        _backupPasswordAnswer = null;
     }
 
     /// <summary>
@@ -1322,8 +1399,14 @@
         /// <summary>The password given, and the file still to choose.</summary>
         RestoreFile,
 
-        /// <summary>The file chosen, and the restore to confirm.</summary>
+        /// <summary>The file chosen, and the restore to confirm, then the upload and its check.</summary>
         Restore,
+
+        /// <summary>
+        /// The upload checked, and the password it puts in force to give, which is the step between
+        /// the check and anything being replaced. Only reached for a backup with a password.
+        /// </summary>
+        RestoreBackupPassword,
 
         /// <summary>The restore confirmed, and what came of it: done, refused or failed.</summary>
         Restored,

@@ -33,17 +33,28 @@ namespace HostPinger.UITest
         private const string FrameworkScript = "_framework/blazor.web.js";
 
         private readonly Process _process;
+        private readonly List<string> _output;
         private readonly string _dataDirectory;
 
-        private WebApp(Process process, string dataDirectory, string databasePath, string baseUrl)
+        private WebApp(Process process, List<string> output, string dataDirectory, string databasePath, string baseUrl)
         {
             _process = process;
+            _output = output;
             _dataDirectory = dataDirectory;
             DatabasePath = databasePath;
             BaseUrl = baseUrl;
         }
 
         public string BaseUrl { get; }
+
+        /// <summary>How many of the lines the application has written so far hold <paramref name="text"/>.</summary>
+        public int LinesLogged(string text)
+        {
+            lock (_output)
+            {
+                return _output.Count(line => line.Contains(text, StringComparison.Ordinal));
+            }
+        }
 
         /// <summary>
         /// The database this instance is running on, so a test can put rows in front of a page that
@@ -96,14 +107,15 @@ namespace HostPinger.UITest
             var process = Process.Start(start)
                 ?? throw new InvalidOperationException("Could not start the application.");
 
-            // Drained so a full pipe cannot block the application; kept for the failure message.
+            // Drained so a full pipe cannot block the application; kept for the failure message,
+            // and for a test that looks for what was logged.
             var output = new List<string>();
             process.OutputDataReceived += (_, e) => Capture(output, e.Data);
             process.ErrorDataReceived += (_, e) => Capture(output, e.Data);
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
-            var app = new WebApp(process, dataDirectory, databasePath, baseUrl);
+            var app = new WebApp(process, output, dataDirectory, databasePath, baseUrl);
             try
             {
                 await app.WaitUntilAnsweringAsync(output);

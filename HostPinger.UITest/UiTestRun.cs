@@ -59,6 +59,10 @@ namespace HostPinger.UITest
         public static string DatabasePath =>
             _app?.DatabasePath ?? throw new InvalidOperationException("The application was not started for this run.");
 
+        /// <inheritdoc cref="WebApp.LinesLogged"/>
+        public static int LinesLogged(string text) =>
+            _app?.LinesLogged(text) ?? throw new InvalidOperationException("The application was not started for this run.");
+
         /// <summary>
         /// Saves what a test has seeded, asking again while the database is locked.
         /// </summary>
