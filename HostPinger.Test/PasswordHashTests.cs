@@ -60,6 +60,24 @@ namespace HostPinger.Test
             Assert.That(PasswordHash.Verify(stored, Password), Is.False);
         }
 
+        /// <summary>
+        /// The real cost of a check is the count times one pass for every 32 bytes of subkey, and the
+        /// subkey's length comes out of the stored value too: a megabyte of it would be nine hours
+        /// under the largest count allowed, and past any cap on the count. A correct password under
+        /// a subkey longer than any build writes is refused without being worked out.
+        /// </summary>
+        [Test]
+        public void Verify_RefusesASubkeyLongerThanAnyBuildWrites()
+        {
+            const int iterations = 1_000;
+            var salt = new byte[16];
+            var subkey = System.Security.Cryptography.Rfc2898DeriveBytes.Pbkdf2(
+                Password, salt, iterations, System.Security.Cryptography.HashAlgorithmName.SHA256, 33);
+            var stored = $"v1.{iterations}.{Convert.ToBase64String(salt)}.{Convert.ToBase64String(subkey)}";
+
+            Assert.That(PasswordHash.Verify(stored, Password), Is.False);
+        }
+
         [Test]
         public void Hash_SaltsEachOneSeparately()
         {

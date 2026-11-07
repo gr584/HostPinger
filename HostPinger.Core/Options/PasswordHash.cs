@@ -86,7 +86,10 @@ namespace HostPinger.Core.Options
                 return false;
             }
 
-            if (salt.Length == 0 || subkey.Length == 0)
+            // Longer than any build writes is refused too, for the reason the count is capped: every
+            // 32 bytes of it is another pass over the whole count, so a long enough one in a
+            // restored backup would cost hours whatever the count says.
+            if (salt.Length == 0 || subkey.Length == 0 || subkey.Length > SubkeyBytes)
             {
                 return false;
             }
