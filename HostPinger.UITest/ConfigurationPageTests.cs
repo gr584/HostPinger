@@ -179,14 +179,13 @@ namespace HostPinger.UITest
 
             // The test's database is copied in a moment, so the bar is seen at the start and the
             // end, and rarely in between.
-            var steps = await ProgressStepsAsync();
+            var (labels, percents) = await ProgressSeenAsync();
             Assert.Multiple(() =>
             {
-                Assert.That(steps, Is.Not.Empty);
-                Assert.That(steps.Select(s => s.Label), Has.All.EqualTo("Preparing the backup…"));
-                Assert.That(steps.Select(s => s.Percent), Has.All.InRange(0, 100));
-                Assert.That(steps.Select(s => s.Percent), Is.Ordered);
-                Assert.That(steps[^1].Percent, Is.EqualTo(100), "done before the download started");
+                Assert.That(labels, Is.EqualTo(new[] { "Preparing the backup…" }));
+                Assert.That(percents, Has.All.InRange(0, 100));
+                Assert.That(percents, Is.Ordered);
+                Assert.That(percents[^1], Is.EqualTo(100), "done before the download started");
             });
 
             Assert.That(download.SuggestedFilename, Does.StartWith("hostpinger-backup-").And.EndWith(".db"));
@@ -615,51 +614,76 @@ namespace HostPinger.UITest
         }
 
         /// <summary>
-        /// Starts noting each state the overlay's progress bar is drawn in: its label, and its
-        /// percentage or null for a bar that moves without one. A step can come and go between two
-        /// of Playwright's looks, so the page watches itself, and sees every change the circuit
-        /// sends as it is applied.
+        /// Starts noting every label and every percentage the overlay's progress bar is drawn with.
+        /// A step can come and go between two of Playwright's looks, so the page watches itself. It
+        /// reads each list off what every change replaced as well as off the bar as it stands,
+        /// because renders that land together reach an observer as a single call: going by the
+        /// bar alone lost the last percentage about one run in thirty, and a short step's label
+        /// under load. Labels and percentages are kept apart because a render sets them one at a
+        /// time, so a pair read between the two would be a state nobody was shown.
         /// </summary>
         private Task WatchProgressAsync() => Page.EvaluateAsync("""
             () => {
-                window.progressSeen = [];
-                const note = () => {
-                    const bar = document.querySelector('.modal .progress');
-                    const seen = bar && [bar.getAttribute('aria-label'), bar.getAttribute('aria-valuenow')];
-                    const last = window.progressSeen.at(-1);
-                    if (seen && (!last || last[0] !== seen[0] || last[1] !== seen[1])) {
-                        window.progressSeen.push(seen);
+                const seen = window.progressSeen = { labels: [], percents: [] };
+                const note = (list, value) => {
+                    if (value !== null && value !== list.at(-1)) {
+                        list.push(value);
                     }
                 };
-                new MutationObserver(note).observe(document.body,
-                    { subtree: true, childList: true, attributes: true, characterData: true });
+                const noteBar = bar => {
+                    note(seen.labels, bar.getAttribute('aria-label'));
+                    note(seen.percents, bar.getAttribute('aria-valuenow'));
+                };
+                new MutationObserver(records => {
+                    let changed = null;
+                    for (const { type, target, attributeName, oldValue } of records) {
+                        if (type === 'attributes' && target.matches('.progress')) {
+                            note(attributeName === 'aria-label' ? seen.labels : seen.percents, oldValue);
+                            changed = target;
+                        }
+                    }
+
+                    // Taken out of the page by now, if the overlay moved on, but still as it was.
+                    if (changed) {
+                        noteBar(changed);
+                    }
+
+                    const bar = document.querySelector('.modal .progress');
+                    if (bar) {
+                        noteBar(bar);
+                    }
+                }).observe(document.body, {
+                    subtree: true,
+                    childList: true,
+                    attributeFilter: ['aria-label', 'aria-valuenow'],
+                    attributeOldValue: true,
+                });
             }
             """);
 
-        /// <summary>What <see cref="WatchProgressAsync"/> has seen so far, in order, repeats left out.</summary>
-        private async Task<List<(string Label, int? Percent)>> ProgressStepsAsync()
+        /// <summary>What <see cref="WatchProgressAsync"/> has seen so far, each list in order, repeats left out.</summary>
+        private async Task<(string[] Labels, int[] Percents)> ProgressSeenAsync()
         {
-            var seen = await Page.EvaluateAsync<string?[][]>("() => window.progressSeen");
-            return seen.Select(s => (s[0]!, s[1] is { } percent ? int.Parse(percent) : (int?)null)).ToList();
+            var labels = await Page.EvaluateAsync<string[]>("() => window.progressSeen.labels");
+            var percents = await Page.EvaluateAsync<string[]>("() => window.progressSeen.percents");
+            return (labels, percents.Select(int.Parse).ToArray());
         }
 
         /// <summary>
         /// That a restore's bar went through its three steps in order: the upload by percentage to
         /// 100, then the check and the swap without one. Returns the upload's percentages.
         /// </summary>
-        private async Task<List<int>> AssertRestoreProgressAsync()
+        private async Task<int[]> AssertRestoreProgressAsync()
         {
-            var steps = await ProgressStepsAsync();
-            var uploaded = steps.Where(s => s.Label == "Uploading the backup…").Select(s => s.Percent ?? -1).ToList();
+            var (labels, uploaded) = await ProgressSeenAsync();
             Assert.Multiple(() =>
             {
-                Assert.That(steps.Select(s => s.Label).Distinct(), Is.EqualTo(new[]
+                Assert.That(labels, Is.EqualTo(new[]
                 {
                     "Uploading the backup…", "Checking the backup…", "Putting the backup in place…",
                 }));
                 Assert.That(uploaded, Is.Ordered.And.Not.Empty);
                 Assert.That(uploaded[^1], Is.EqualTo(100));
-                Assert.That(steps.Where(s => s.Label != "Uploading the backup…").Select(s => s.Percent), Has.All.Null);
             });
 
             return uploaded;
