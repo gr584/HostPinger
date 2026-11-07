@@ -260,7 +260,10 @@ namespace HostPinger.Core.Options
             try
             {
                 await using var command = db.Database.GetDbConnection().CreateCommand();
-                command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'UserSettings';";
+                // SQLite matches a table's name without regard to case when it reads one, so this has
+                // to as well: the rows it finds are the ones the service loads at its next start.
+                command.CommandText =
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'UserSettings' COLLATE NOCASE;";
                 var hasTable = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken)) > 0;
                 return hasTable ? await ReadRowsAsync(db, cancellationToken) : [];
             }

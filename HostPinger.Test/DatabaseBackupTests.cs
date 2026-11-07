@@ -136,6 +136,27 @@ namespace HostPinger.Test
             Assert.That(await _backup.ValidateBackupAsync(foreignPath), Is.EqualTo("No HostPinger schema was found in this file."));
         }
 
+        /// <summary>
+        /// A history row with no id is nothing a migration writes, so the file is refused like any
+        /// other without HostPinger's schema. Reading the id threw instead, past everything that
+        /// reports a refused file, which left the page's overlay on the check with nothing said.
+        /// </summary>
+        [Test]
+        public async Task ValidateBackup_RejectsAMigrationHistoryWithNoId()
+        {
+            var craftedPath = Path.Combine(_directory, "crafted.db");
+            await using (var connection = new SqliteConnection($"Data Source={craftedPath};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = "CREATE TABLE __EFMigrationsHistory (MigrationId TEXT);"
+                    + "INSERT INTO __EFMigrationsHistory VALUES (NULL);";
+                await command.ExecuteNonQueryAsync();
+            }
+
+            Assert.That(await _backup.ValidateBackupAsync(craftedPath), Is.EqualTo("No HostPinger schema was found in this file."));
+        }
+
         [Test]
         public async Task ValidateBackup_RejectsNewerMigrations()
         {
@@ -1643,6 +1664,45 @@ namespace HostPinger.Test
                 Assert.That(addressesWhileWaiting, Is.EqualTo(new[] { "current.example", "written.example" }));
                 Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "first.example" }));
                 Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-backup-*"), Is.Empty, "no snapshot was written");
+            });
+        }
+
+        /// <summary>
+        /// SQLite matches a table's name without regard to case, so everything that loads settings
+        /// reads a settings table named in another case. The check for the table looked for the
+        /// exact name, found none, and so found no password: the backup went in without asking for
+        /// the one it brings, and left none in force until the next start, when it took effect.
+        /// </summary>
+        [Test]
+        public async Task RestoreUpload_ReadsASettingsTableNamedInAnotherCase()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var backupPath = await BackupWithAsync("backup.example", BackupHash);
+            await using (var connection = new SqliteConnection($"Data Source={backupPath};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = "ALTER TABLE UserSettings RENAME TO Renamed; ALTER TABLE Renamed RENAME TO usersettings;";
+                await command.ExecuteNonQueryAsync();
+            }
+
+            var upload = new UploadStream(await File.ReadAllBytesAsync(backupPath));
+            var asked = 0;
+
+            var result = await _backup.RestoreUploadAsync(
+                upload,
+                upload.Size,
+                (_, _) =>
+                {
+                    asked++;
+                    return Task.FromResult(BackupPassword);
+                });
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(result.Refusal, Is.Null);
+                Assert.That(asked, Is.EqualTo(1), "it asked for the password the backup brings");
+                Assert.That(_store.PasswordHash, Is.EqualTo(BackupHash), "and that password is in force");
             });
         }
 

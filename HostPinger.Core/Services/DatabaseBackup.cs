@@ -41,6 +41,8 @@ namespace HostPinger.Core.Services
 
         private static readonly byte[] SqliteHeader = "SQLite format 3\0"u8.ToArray();
 
+        private const string NoSchemaRefusal = "No HostPinger schema was found in this file.";
+
         private const string DefinesCodeRefusal = "This file defines triggers or views, which a HostPinger database never has.";
 
         private const string DefinesCodeQuery = "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('trigger', 'view');";
@@ -393,7 +395,7 @@ namespace HostPinger.Core.Services
                     cancellationToken);
                 if (Convert.ToInt64(historyTables) == 0)
                 {
-                    return "No HostPinger schema was found in this file.";
+                    return NoSchemaRefusal;
                 }
 
                 // The migrations create no triggers and no views, so a file holding either was
@@ -411,6 +413,11 @@ namespace HostPinger.Core.Services
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
                 {
+                    if (reader.IsDBNull(0))
+                    {
+                        return NoSchemaRefusal;
+                    }
+
                     applied.Add(reader.GetString(0));
                 }
             }
@@ -562,8 +569,8 @@ namespace HostPinger.Core.Services
                         return new RestoreResult(invalid);
                     }
 
-                    // After the file's own checks, so that a password is only asked for a file that
-                    // can be restored once it is given.
+                    // After the file's own checks, so that nobody is asked for the password of a file
+                    // that they would turn away.
                     if (await PasswordRefusalAsync(candidatePath, askPassword, cancellationToken) is { } notGiven)
                     {
                         return new RestoreResult(notGiven);
