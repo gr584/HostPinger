@@ -186,7 +186,8 @@ and saved only when it is.
   needs room for it there. Unlock to use it; with a password set, it asks for the current one
   first, in an overlay like the one that unlocks. The overlay shows how far the snapshot has got,
   and the download starts once it is written; Cancel or Escape stops it partway.
-- **Restore** — uploads a backup and, after a confirmation, replaces the current database with it.
+- **Restore** — uploads a backup and replaces the current database with it. The overlay says so
+  before the file is chosen, and choosing it starts the restore, with no confirmation after that.
   The file is checked before anything is replaced: it must be an intact SQLite database with
   HostPinger's schema and no triggers or views, which HostPinger never creates, and one from a newer
   version is refused. Everything comes from the backup, including its password or the lack of one,
@@ -196,11 +197,12 @@ and saved only when it is.
   again, since the upload waits beside the database. Cancel or Escape leaves instead, which deletes
   the upload and replaces nothing, and so does leaving the step alone for ten minutes. A backup that
   never stored a password leaves the one configured in `appsettings.json` or the environment in
-  force, if there is one, and asks for that instead; a backup without a password asks for nothing
-  and unlocks the service. A backup from an older version is migrated up where it lies, once the
-  password is given, the way an old database is at startup, while monitoring carries on; that needs
-  room beside the database of about half the backup's size, and a backup there is no room for is
-  refused up front. One that cannot be migrated, or lacks a table, is refused with nothing replaced.
+  force, if there is one, and asks for that instead; a backup without a password asks for nothing,
+  goes straight in once it has passed, and unlocks the service. A backup from an older version is
+  migrated up where it lies, once the password is given, the way an old database is at startup,
+  while monitoring carries on; that needs room beside the database of about half the backup's size,
+  and a backup there is no room for is refused up front. One that cannot be migrated, or lacks a
+  table, is refused with nothing replaced.
   Everything a service start does to a database is done to the backup where it lies, and its
   settings are read there too, before anything is replaced, so nothing is left to fail once it is in
   place: the swap is one rename of the backup over the database, and monitoring, and whatever the
@@ -215,8 +217,8 @@ and saved only when it is.
   A `hostpinger.db.pre-restore` that an earlier version's restore kept beside the database is left
   alone; delete it by hand once it is not wanted. Unlock to restore; with a password set, the
   restore asks for the current password first, in an overlay like the one that unlocks, before the
-  file is chosen. Once the restore is confirmed, the overlay shows how far the upload has got, then
-  the check and the swap as they happen, and then what came of it. One backup or restore runs at a
+  file is chosen. Once it is chosen, the overlay shows how far the upload has got, then the check
+  and the swap as they happen, and then what came of it. One backup or restore runs at a
   time, a restore waiting for its password included: another asked for meanwhile, from any browser,
   is turned away with what is under way.
 - **Security** — whether a password is set, and the way to `/password` to set, change or remove

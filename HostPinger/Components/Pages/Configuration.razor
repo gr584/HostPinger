@@ -114,33 +114,22 @@
                 <dt>Restore</dt>
                 <dd>
                     @*
-                        The visible control is the label, styled to sit beside Download backup;
+                        The button opens the overlay, which asks for the current password if one
+                        is set, says what a restore replaces, and offers a label for this input:
                         clicking a label opens its input's file picker, which is what lets the
                         input itself stay hidden without a line of script. Hidden but always in
                         the DOM: the browser keeps the chosen file on the input element itself,
-                        and reading it on confirm goes back to that element — unmounting it is
-                        how an upload loses its file. Cancelling re-keys the input instead, which
-                        recreates it empty and lets the browser drop the choice. Choosing a file
-                        opens the confirmation below.
-
-                        With a password set, the button opens that overlay first instead, to ask
-                        for the password before a file is chosen; the overlay then offers a label
-                        for the same input.
+                        and reading it for the upload goes back to that element — unmounting it
+                        is how an upload loses its file. Cancelling re-keys the input instead,
+                        which recreates it empty and lets the browser drop the choice. Choosing a
+                        file starts the restore.
                     *@
                     <InputFile id="restore-file" @key="_restoreInputKey" OnChange="OnRestoreFileSelected"
                                disabled="@(!_isUnlocked)" class="d-none" />
-                    @if (Gate.IsPasswordSet)
-                    {
-                        <button type="button" class="btn btn-outline-primary btn-sm" disabled="@(!_isUnlocked)"
-                                @onclick="RequestRestoreAsync">Restore backup…</button>
-                    }
-                    else
-                    {
-                        <label for="restore-file" role="button"
-                               class="btn btn-outline-primary btn-sm@(_isUnlocked ? null : " disabled")">Restore backup…</label>
-                    }
+                    <button type="button" class="btn btn-outline-primary btn-sm" disabled="@(!_isUnlocked)"
+                            @onclick="RequestRestoreAsync">Restore backup…</button>
                     <div class="form-text">
-                        Uploading a backup replaces the current database after a confirmation.
+                        Uploading a backup replaces the current database.
                         @if (_restoreStatus is not null)
                         {
                             <span class="config-refused">@_restoreStatus</span>
@@ -309,9 +298,15 @@
                                 </p>
                                 break;
                             case Confirming.RestoreFile:
+                                <p class="text-danger">
+                                    Choose the backup to restore. It replaces everything — hosts,
+                                    history, settings and the password — and no copy of the current
+                                    database is kept, so download a backup first if you may want it
+                                    back.
+                                </p>
                                 <p class="mb-0">
-                                    Choose the backup to restore. Nothing is replaced until you have
-                                    confirmed it.
+                                    The file is uploaded and checked first, and nothing is replaced
+                                    unless it passes. If it has a password, you are asked for that next.
                                 </p>
                                 break;
                             case Confirming.RestoreBackupPassword:
@@ -332,7 +327,7 @@
                                      role="status">@_restoreResult</div>
                                 break;
                             case Confirming.Preparing:
-                            case Confirming.Restore when _isRestoring:
+                            case Confirming.Restore:
                                 @*
                                     A fraction for the steps that have one, and otherwise a bar that
                                     moves without saying how far, for the ones SQLite gives no measure
@@ -350,18 +345,6 @@
                                     <div class="progress-bar@(ProgressPercent is null ? " progress-bar-striped progress-bar-animated" : null)"
                                          style="width: @(ProgressPercent ?? 100)%"></div>
                                 </div>
-                                break;
-                            default:
-                                <p class="text-danger">
-                                    Restore <code>@_restoreFile?.Name</code>? It replaces everything —
-                                    hosts, history, settings and the password — and no copy of the
-                                    current database is kept, so download a backup first if you may
-                                    want it back.
-                                </p>
-                                <p class="mb-0">
-                                    The file is uploaded and checked first, and nothing is replaced
-                                    unless it passes. If it has a password, you are asked for that next.
-                                </p>
                                 break;
                         }
                         @if (AsksPassword)
@@ -400,11 +383,8 @@
                             case Confirming.Restored:
                                 <button type="button" class="btn btn-primary btn-sm" @onclick="CloseDialog">Close</button>
                                 break;
-                            case Confirming.Preparing:
-                                break;
-                            default:
-                                <button type="submit" class="btn btn-danger btn-sm"
-                                        disabled="@_isRestoring">@(_isRestoring ? "Restoring…" : "Confirm restore")</button>
+                            case Confirming.Restore:
+                                <button type="button" class="btn btn-danger btn-sm" disabled>Restoring…</button>
                                 break;
                         }
                     </div>
@@ -450,14 +430,13 @@
     // The backup status only ever reports a refusal — a download that starts is its own feedback.
     private string? _backupStatus;
 
-    // Beside the restore control, which only ever reports the locked refusal: whatever comes of
-    // confirming a restore is said in the overlay instead, in the step after the confirmation.
+    // Beside the restore control, which only ever reports the locked refusal: whatever comes of a
+    // restore is said in the overlay instead.
     private string? _restoreStatus;
     private string? _restoreResult;
     private bool _isRestoreRefused;
 
-    // The chosen file, held while the confirmation is on screen. Confirming is a separate click
-    // from choosing, because what follows replaces the database.
+    // The chosen file, kept for a restore that has to ask for the current password first.
     private IBrowserFile? _restoreFile;
 
     // Whether a restore is at work, which holds the overlay open. Not while it waits for the
@@ -894,9 +873,10 @@
     }
 
     /// <summary>
-    /// Starts a restore with the current password, before any file is chosen, so that a refusal
-    /// costs nobody a trip through the file picker. Only offered while a password is set; without
-    /// one, the page's own label goes straight to the picker.
+    /// Opens the overlay on the current password while one is set, before any file is chosen, so
+    /// that a refusal costs nobody a trip through the file picker, and otherwise on the step that
+    /// says what a restore replaces and offers the picker. Never straight to the picker: choosing
+    /// a file starts the restore, so that step is the only warning there is.
     /// </summary>
     private async Task RequestRestoreAsync()
     {
@@ -907,7 +887,7 @@
         }
 
         CancelRestore();
-        OpenDialog(Confirming.RestorePassword);
+        OpenDialog(Gate.IsPasswordSet ? Confirming.RestorePassword : Confirming.RestoreFile);
     }
 
     private async Task GiveRestorePasswordAsync()
@@ -923,17 +903,34 @@
             return;
         }
 
-        // Straight on to the confirmation when a file is already chosen, which is the case when
-        // the confirmation itself sent the overlay back here; see ConfirmRestoreAsync.
+        // Straight on to the restore when a file is already chosen, which is the case when it got
+        // here ahead of the password; see RestoreFileAsync.
         _restorePasswordGiven = true;
-        OpenDialog(_restoreFile is null ? Confirming.RestoreFile : Confirming.Restore);
+        if (_restoreFile is { } file)
+        {
+            await RestoreFileAsync(file);
+        }
+        else
+        {
+            OpenDialog(Confirming.RestoreFile);
+        }
     }
 
-    private void OnRestoreFileSelected(InputFileChangeEventArgs e)
+    /// <summary>
+    /// Starts the restore, which is what choosing the file means. Ignored while one is under way,
+    /// when only the browser's developer tools can reach the input: the first would turn a second
+    /// away, and the refusal would take the overlay from it.
+    /// </summary>
+    private async Task OnRestoreFileSelected(InputFileChangeEventArgs e)
     {
+        if (_restoring is not null)
+        {
+            return;
+        }
+
         _restoreFile = e.File;
         _restoreStatus = null;
-        OpenDialog(Confirming.Restore);
+        await RestoreFileAsync(e.File);
     }
 
     private void CancelRestore()
@@ -1001,13 +998,12 @@
         CloseDialog();
     }
 
-    // Choosing a file is the label's doing rather than a submit, and the result has only Close, so
-    // neither step has anything here.
+    // Choosing a file is the label's doing rather than a submit, a restore at work takes no answer,
+    // and the result has only Close, so none of those steps has anything here.
     private Task SubmitDialogAsync() => _confirming switch
     {
         Confirming.Download => DownloadBackupAsync(),
         Confirming.RestorePassword => GiveRestorePasswordAsync(),
-        Confirming.Restore => ConfirmRestoreAsync(),
         Confirming.RestoreBackupPassword => GiveBackupPasswordAsync(),
         _ => Task.CompletedTask,
     };
@@ -1145,20 +1141,8 @@
     /// <summary>What the overlay says above its password box; a wait outranks the refusal it came with.</summary>
     private string? DialogNotice => Remaining is { } left ? PasswordAttempt.Waiting(left) : _dialogError;
 
-    private async Task ConfirmRestoreAsync()
+    private async Task RestoreFileAsync(IBrowserFile file)
     {
-        // The button is disabled by then; this is for a second press that raced that render.
-        if (_isRestoring)
-        {
-            return;
-        }
-
-        if (_restoreFile is not { } file)
-        {
-            CloseDialog();
-            return;
-        }
-
         if (!await IsUnlockedAsync())
         {
             RefuseRestoreAsLocked();
@@ -1176,6 +1160,7 @@
             return;
         }
 
+        OpenDialog(Confirming.Restore);
         _isRestoring = true;
         ShowStep("Uploading the backup…", 0);
         using var restoring = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
@@ -1396,10 +1381,10 @@
         /// <summary>The current password, which a restore asks for before anything else.</summary>
         RestorePassword,
 
-        /// <summary>The password given, and the file still to choose.</summary>
+        /// <summary>What a restore replaces, and the file still to choose, which starts it.</summary>
         RestoreFile,
 
-        /// <summary>The file chosen, and the restore to confirm, then the upload and its check.</summary>
+        /// <summary>The restore at work: the upload, its check, and putting it in place.</summary>
         Restore,
 
         /// <summary>
@@ -1408,7 +1393,7 @@
         /// </summary>
         RestoreBackupPassword,
 
-        /// <summary>The restore confirmed, and what came of it: done, refused or failed.</summary>
+        /// <summary>What came of the restore: done, refused or failed.</summary>
         Restored,
 
         /// <summary>The snapshot for a download being written, after the password if one is set.</summary>
