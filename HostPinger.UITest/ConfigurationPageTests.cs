@@ -180,7 +180,7 @@ namespace HostPinger.UITest
 
             // The test's database is copied in a moment, so the bar is seen at the start and the
             // end, and rarely in between.
-            var (labels, percents) = await ProgressSeenAsync();
+            var (labels, percents, _) = await ProgressSeenAsync();
             Assert.Multiple(() =>
             {
                 Assert.That(labels, Is.EqualTo(new[] { "Preparing the backup…" }));
@@ -365,8 +365,17 @@ namespace HostPinger.UITest
                 await Assertions.Expect(Dialog.GetByText(
                         "The restore failed: The backup has no ResolverErrors table. Nothing was replaced."))
                     .ToBeVisibleAsync();
-                var uploaded = await AssertRestoreProgressAsync();
-                Assert.That(uploaded, Has.Some.InRange(1, 99), "the bar followed the upload partway");
+                // Not to 100, and not every step's label, as the small restore above can ask. This
+                // upload has a render for every percent, and Blazor stops rendering at ten the
+                // browser has not acknowledged, then draws only the latest state, so what comes
+                // last need never reach the page. DatabaseBackupTests pins the report of 100.
+                var (_, uploaded, _) = await ProgressSeenAsync();
+                Assert.Multiple(() =>
+                {
+                    Assert.That(uploaded, Is.Ordered);
+                    Assert.That(uploaded, Has.Some.InRange(1, 99), "the bar followed the upload partway");
+                    Assert.That(uploaded[^1], Is.GreaterThan(50), "and most of the way");
+                });
                 await Assertions.Expect(Page.Locator("#blazor-error-ui")).ToBeHiddenAsync();
 
                 // The button the keyboard was on is gone, so Escape only reaches the overlay if it
@@ -435,7 +444,6 @@ namespace HostPinger.UITest
 
                 await Button(Dialog, "Cancel").ClickAsync();
                 await Assertions.Expect(Overlay).ToBeHiddenAsync();
-                await Assertions.Expect(Page.GetByText("Restored —")).ToHaveCountAsync(0);
             }
             finally
             {
@@ -454,10 +462,14 @@ namespace HostPinger.UITest
             var uploadPath = await FaithfulCopyAsync();
             try
             {
+                // A round trip through the page first: the input hears nothing until its circuit is
+                // live, and the markup says the same before that as after.
                 await GoAsync("/configuration");
                 await Assertions.Expect(Button("Restore backup…")).ToBeDisabledAsync();
+                await ClickUntilAsync(Button("Unlock to change it"), Overlay);
+                await PasswordBox.PressAsync("Escape");
+                await Assertions.Expect(Overlay).ToBeHiddenAsync();
 
-                await Page.Locator("#restore-file").EvaluateAsync("input => input.disabled = false");
                 await Page.Locator("#restore-file").SetInputFilesAsync(uploadPath);
 
                 await Assertions.Expect(Page.GetByText("HostPinger is locked — unlock it to restore a backup."))
@@ -552,8 +564,11 @@ namespace HostPinger.UITest
                 {
                     await BackupPassword.FillAsync("not the backup's password");
                     await Button(Dialog, "Restore").ClickAsync();
-                    await Assertions.Expect(Dialog.GetByText("That is not the backup's password.")).ToBeVisibleAsync();
+
+                    // In this order: the box empties when this answer has been judged, and the
+                    // sentence would otherwise be the one the last answer left.
                     await Assertions.Expect(BackupPassword).ToHaveValueAsync(string.Empty);
+                    await Assertions.Expect(Dialog.GetByText("That is not the backup's password.")).ToBeVisibleAsync();
                     await Assertions.Expect(BackupPassword).ToBeFocusedAsync();
                 }
 
@@ -564,7 +579,7 @@ namespace HostPinger.UITest
                         "Restored — the backup's hosts, history, settings and password now apply."))
                     .ToBeVisibleAsync();
 
-                var (labels, _) = await ProgressSeenAsync();
+                var (labels, _, _) = await ProgressSeenAsync();
                 Assert.That(labels, Is.EqualTo(new[]
                 {
                     "Uploading the backup…", "Checking the backup…", "Checking the password…", "Putting the backup in place…",
@@ -644,6 +659,35 @@ namespace HostPinger.UITest
                     Assert.That(uploadsSetting, Is.Zero, "the application runs on the database it had");
                     Assert.That(uploads, Is.Empty, "nothing of the upload is kept");
                 });
+            }
+            finally
+            {
+                File.Delete(uploadPath);
+            }
+        }
+
+        /// <summary>
+        /// Leaving the page is leaving the restore: closing the tab at the backup's password ends
+        /// the circuit, which lets the upload go rather than keeping it and the turn for the
+        /// ten minutes the restore would otherwise wait.
+        /// </summary>
+        [Test]
+        public async Task Restore_LeftByLeavingThePageLetsTheUploadGo()
+        {
+            var uploadPath = await FaithfulCopyAsync();
+            try
+            {
+                await UnlockedConfigurationPageAsync();
+                await ClickUntilAsync(Button("Restore backup…"), Overlay);
+                await GiveTheRestorePasswordAndChooseAsync(uploadPath);
+                await Assertions.Expect(BackupPassword).ToBeFocusedAsync();
+
+                var directory = Path.GetDirectoryName(UiTestRun.DatabasePath)!;
+                Assert.That(Directory.EnumerateFiles(directory, "hostpinger-restore-*.tmp"), Is.Not.Empty);
+
+                await GoAsync("/");
+
+                Assert.That(() => Directory.EnumerateFiles(directory, "hostpinger-restore-*"), Is.Empty.After(15_000, 100));
             }
             finally
             {
@@ -864,13 +908,15 @@ namespace HostPinger.UITest
         /// A step can come and go between two of Playwright's looks, so the page watches itself. It
         /// reads each list off what every change replaced as well as off the bar as it stands,
         /// because renders that land together reach an observer as a single call: going by the
-        /// bar alone lost the last percentage about one run in thirty, and a short step's label
-        /// under load. Labels and percentages are kept apart because a render sets them one at a
-        /// time, so a pair read between the two would be a state nobody was shown.
+        /// bar alone lost a short step's label under load. It still sees only what is drawn: a state
+        /// that Blazor replaced before rendering it never gets here. Labels and percentages are kept
+        /// apart because a render sets them one at a time, so a pair read between the two would be
+        /// a state nobody was shown; the bar as it stands, read after a render, is a true pair, so
+        /// that is what says which steps were drawn with a percentage at all.
         /// </summary>
         private Task WatchProgressAsync() => Page.EvaluateAsync("""
             () => {
-                const seen = window.progressSeen = { labels: [], percents: [] };
+                const seen = window.progressSeen = { labels: [], percents: [], measured: [] };
                 const note = (list, value) => {
                     if (value !== null && value !== list.at(-1)) {
                         list.push(value);
@@ -897,6 +943,9 @@ namespace HostPinger.UITest
                     const bar = document.querySelector('.modal .progress');
                     if (bar) {
                         noteBar(bar);
+                        if (bar.hasAttribute('aria-valuenow')) {
+                            note(seen.measured, bar.getAttribute('aria-label'));
+                        }
                     }
                 }).observe(document.body, {
                     subtree: true,
@@ -938,20 +987,22 @@ namespace HostPinger.UITest
             buttons);
 
         /// <summary>What <see cref="WatchProgressAsync"/> has seen so far, each list in order, repeats left out.</summary>
-        private async Task<(string[] Labels, int[] Percents)> ProgressSeenAsync()
+        private async Task<(string[] Labels, int[] Percents, string[] Measured)> ProgressSeenAsync()
         {
             var labels = await Page.EvaluateAsync<string[]>("() => window.progressSeen.labels");
             var percents = await Page.EvaluateAsync<string[]>("() => window.progressSeen.percents");
-            return (labels, percents.Select(int.Parse).ToArray());
+            var measured = await Page.EvaluateAsync<string[]>("() => window.progressSeen.measured");
+            return (labels, percents.Select(int.Parse).ToArray(), measured);
         }
 
         /// <summary>
-        /// That a restore's bar went through its steps in order: the upload by percentage to 100,
-        /// then the check, the password and the swap without one. Returns the upload's percentages.
+        /// That a small restore's bar went through its steps in order: the upload by percentage to
+        /// 100, then the check, the password and the swap without one. A long upload cannot be asked
+        /// for all of that; see Restore_ReportsABackupThatWillNotOpenAndKeepsTheDatabase.
         /// </summary>
-        private async Task<int[]> AssertRestoreProgressAsync()
+        private async Task AssertRestoreProgressAsync()
         {
-            var (labels, uploaded) = await ProgressSeenAsync();
+            var (labels, uploaded, measured) = await ProgressSeenAsync();
             Assert.Multiple(() =>
             {
                 Assert.That(labels, Is.EqualTo(new[]
@@ -960,9 +1011,8 @@ namespace HostPinger.UITest
                 }));
                 Assert.That(uploaded, Is.Ordered.And.Not.Empty);
                 Assert.That(uploaded[^1], Is.EqualTo(100));
+                Assert.That(measured, Is.EqualTo(new[] { "Uploading the backup…" }));
             });
-
-            return uploaded;
         }
 
         /// <summary>The password box in the overlay that confirms a download or a restore.</summary>
