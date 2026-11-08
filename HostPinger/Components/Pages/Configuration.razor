@@ -115,17 +115,16 @@
                 <dd>
                     @*
                         The button opens the overlay, which asks for the current password if one
-                        is set, says what a restore replaces, and offers a label for this input:
-                        clicking a label opens its input's file picker, which is what lets the
-                        input itself stay hidden without a line of script. Hidden but always in
-                        the DOM: the browser keeps the chosen file on the input element itself,
-                        and reading it for the upload goes back to that element — unmounting it
-                        is how an upload loses its file. Cancelling re-keys the input instead,
-                        which recreates it empty and lets the browser drop the choice. Choosing a
-                        file starts the restore.
+                        is set, says what a restore replaces, and offers a button that clicks this
+                        input. Hidden but always in the DOM: the browser keeps the chosen file on
+                        the input element itself, and reading it for the upload goes back to that
+                        element — unmounting it is how an upload loses its file. Cancelling re-keys
+                        the input instead, which recreates it empty and lets the browser drop the
+                        choice. Choosing a file starts the restore, which asks again whether this
+                        browser may: nothing here is disabled, or the overlay's button would go
+                        dead with no word of why once the page noticed it was locked.
                     *@
-                    <InputFile id="restore-file" @key="_restoreInputKey" OnChange="OnRestoreFileSelected"
-                               disabled="@(!_isUnlocked)" class="d-none" />
+                    <InputFile id="restore-file" @key="_restoreInputKey" OnChange="OnRestoreFileSelected" class="d-none" />
                     <button type="button" class="btn btn-outline-primary btn-sm" disabled="@(!_isUnlocked)"
                             @onclick="RequestRestoreAsync">Restore backup…</button>
                     <div class="form-text">
@@ -313,9 +312,10 @@
                                 <p class="mb-2">
                                     The backup passed its checks, and nothing has been replaced yet.
                                     Restoring it puts a password in force, the one to unlock with from
-                                    then on, and this browser may need unlocking with it again. Enter
-                                    it to go ahead. If you cannot, cancel, and the current database
-                                    stays as it is.
+                                    then on, and this browser may need unlocking with it again. A
+                                    backup that stores none takes the password configured for this
+                                    install. Enter it to go ahead. If you cannot, cancel, and the
+                                    current database stays as it is.
                                 </p>
                                 <label class="form-label" for="backup-password">The backup's password</label>
                                 <input id="backup-password" type="password" class="form-control form-control-sm"
@@ -330,8 +330,9 @@
                             case Confirming.Restore:
                                 @*
                                     A fraction for the steps that have one, and otherwise a bar that
-                                    moves without saying how far, for the ones SQLite gives no measure
-                                    of: checking a backup, and migrating and swapping it in.
+                                    moves without saying how far, for the ones nothing gives a measure
+                                    of: checking a backup and its password, and migrating and swapping
+                                    it in.
                                 *@
                                 <div class="d-flex justify-content-between mb-2">
                                     <span>@_progressLabel</span>
@@ -374,8 +375,14 @@
                                 <button type="submit" class="btn btn-primary btn-sm" disabled="@IsWaiting">Continue</button>
                                 break;
                             case Confirming.RestoreFile:
-                                @* The page's own hidden input, so the chosen file stays put; see there. *@
-                                <label for="restore-file" role="button" class="btn btn-primary btn-sm">Choose file…</label>
+                                @*
+                                    The page's own hidden input, so the chosen file stays put; see
+                                    there. A button rather than a label for it, which the keyboard
+                                    cannot reach. The picker only opens from the browser's own click,
+                                    so that goes straight to the input rather than by way of the circuit.
+                                *@
+                                <button type="button" class="btn btn-primary btn-sm" @ref="_chooseFile"
+                                        onclick="document.getElementById('restore-file').click()">Choose file…</button>
                                 break;
                             case Confirming.RestoreBackupPassword:
                                 <button type="submit" class="btn btn-danger btn-sm">Restore</button>
@@ -469,6 +476,7 @@
     private Confirming _confirming;
     private ElementReference _dialog;
     private ElementReference _passwordInput;
+    private ElementReference _chooseFile;
     private bool _pressedInsideDialog;
     private bool _focusDialog;
     private string? _dialogError;
@@ -519,11 +527,15 @@
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         // Focusing puts the keyboard inside the overlay, which is what lets Escape reach
-        // OnDialogKeyDown: the password box when there is one, the overlay itself otherwise.
+        // OnDialogKeyDown: the password box or the file button when there is one, the overlay
+        // itself otherwise.
         if (_focusDialog && _confirming != Confirming.Nothing)
         {
             _focusDialog = false;
-            await (AsksPassword ? _passwordInput : AsksBackupPassword ? _backupPasswordInput : _dialog).FocusAsync();
+            var focus = _confirming == Confirming.RestoreFile
+                ? _chooseFile
+                : AsksPassword ? _passwordInput : AsksBackupPassword ? _backupPasswordInput : _dialog;
+            await focus.FocusAsync();
         }
 
         // Started from a render that has happened in a browser, as the unlock overlay starts its
@@ -768,6 +780,15 @@
     /// </summary>
     private async Task RequestDownloadAsync()
     {
+        if (IsRestoreUnderWay)
+        {
+            return;
+        }
+
+        // Pressed from behind a restore's overlay, this takes the overlay over, so the restore is
+        // left: a current password given for it must not outlive its step.
+        CancelRestore();
+
         // A locked browser goes straight through too, to be turned away there: there is no point
         // asking it for a password first.
         if (Gate.IsPasswordSet && await IsUnlockedAsync())
@@ -878,8 +899,18 @@
     /// says what a restore replaces and offers the picker. Never straight to the picker: choosing
     /// a file starts the restore, so that step is the only warning there is.
     /// </summary>
+    /// <remarks>
+    /// The overlay does not hold the keyboard in, so this and Download backup can be pressed from
+    /// behind it. Neither may do anything while a restore is under way: replacing the step that
+    /// waits for the backup's password would leave nothing that can answer it or cancel it.
+    /// </remarks>
     private async Task RequestRestoreAsync()
     {
+        if (IsRestoreUnderWay)
+        {
+            return;
+        }
+
         if (!await IsUnlockedAsync())
         {
             RefuseRestoreAsLocked();
@@ -923,7 +954,7 @@
     /// </summary>
     private async Task OnRestoreFileSelected(InputFileChangeEventArgs e)
     {
-        if (_restoring is not null)
+        if (IsRestoreUnderWay)
         {
             return;
         }
@@ -935,9 +966,15 @@
 
     private void CancelRestore()
     {
+        // Rebuilt only when it holds a file: a new input takes a round trip to come alive, and
+        // choosing a file from it before then would go unheard.
+        if (_restoreFile is not null)
+        {
+            _restoreInputKey = new object();
+        }
+
         _restoreFile = null;
         _restorePasswordGiven = false;
-        _restoreInputKey = new object();
     }
 
     private void RefuseRestoreAsLocked()
@@ -1015,6 +1052,9 @@
     private bool AsksBackupPassword => _confirming == Confirming.RestoreBackupPassword;
 
     private bool IsDownloading => _confirming is Confirming.Download or Confirming.Preparing;
+
+    /// <summary>Whether a restore has started and not ended, whether at work or waiting for a password.</summary>
+    private bool IsRestoreUnderWay => _restoring is not null;
 
     /// <summary>Starts a long step's bar: at <paramref name="progress"/>, or moving without a measure when null.</summary>
     private void ShowStep(string label, double? progress)
@@ -1266,12 +1306,11 @@
             return;
         }
 
-        // Emptied as it is read, as the current password is.
+        // Emptied as it is read, as the current password is, which opening the next step does, and
+        // that takes down what was said of the last answer too.
         var password = _backupPassword;
-        _backupPassword = string.Empty;
-
+        OpenDialog(Confirming.Restore);
         _isRestoring = true;
-        _confirming = Confirming.Restore;
         ShowStep("Checking the password…", null);
         _backupPasswordAnswer?.TrySetResult(password);
         _backupPasswordAnswer = null;
@@ -1298,7 +1337,7 @@
         return $"{Restored} {brought}{pruned}";
     }
 
-    /// <summary>Turns the overlay to what came of a confirmed restore, which it shows until closed.</summary>
+    /// <summary>Turns the overlay to what came of a restore, which it shows until closed.</summary>
     private void ShowRestoreResult(string result, bool isRefused)
     {
         _restoreResult = result;

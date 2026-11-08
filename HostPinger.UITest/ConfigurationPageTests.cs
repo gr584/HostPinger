@@ -407,10 +407,12 @@ namespace HostPinger.UITest
         /// offers: anyone with the browser's developer tools can put a file on the page's hidden
         /// input directly, with no password given. That asks for the password instead of uploading
         /// anything, and once it is given goes straight on with the same file. A password given for
-        /// an earlier restore, since cancelled, does not count.
+        /// an earlier restore does not count, whether that was left by its Cancel or by Download
+        /// backup on the page behind the overlay, which the keyboard can reach.
         /// </summary>
-        [Test]
-        public async Task Restore_ChosenWithoutThePasswordAsksForItInstead()
+        [TestCase("Cancel")]
+        [TestCase("Download backup")]
+        public async Task Restore_ChosenWithoutThePasswordAsksForItInstead(string leavingBy)
         {
             // A faithful copy, as above, in case it restores after all.
             var uploadPath = Path.Combine(Path.GetTempPath(), $"hostpinger-ui-upload-{Guid.NewGuid():N}.db");
@@ -431,6 +433,13 @@ namespace HostPinger.UITest
                 await CurrentPassword.FillAsync(WebApp.Password);
                 await Button(Dialog, "Continue").ClickAsync();
                 await Assertions.Expect(Button(Dialog, "Choose file…")).ToBeVisibleAsync();
+                if (leavingBy == "Download backup")
+                {
+                    await Button(leavingBy).FocusAsync();
+                    await Page.Keyboard.PressAsync("Enter");
+                    await Assertions.Expect(CurrentPassword).ToBeFocusedAsync();
+                }
+
                 await Button(Dialog, "Cancel").ClickAsync();
                 await Assertions.Expect(Overlay).ToBeHiddenAsync();
 
@@ -584,6 +593,8 @@ namespace HostPinger.UITest
                 {
                     "Uploading the backup…", "Checking the backup…", "Checking the password…", "Putting the backup in place…",
                 }));
+                Assert.That(await Page.EvaluateAsync<bool>("() => window.progressSeen.noticeOverBar"), Is.False,
+                    "what was said of a wrong answer does not stay up while the right one goes ahead");
                 Assert.That(() => UiTestRun.LinesLogged(WrongAnswer) - loggedBefore, Is.EqualTo(2).After(5000, 50));
 
                 await Button(Dialog.Locator(".modal-footer"), "Close").ClickAsync();
@@ -688,6 +699,76 @@ namespace HostPinger.UITest
                 await GoAsync("/");
 
                 Assert.That(() => Directory.EnumerateFiles(directory, "hostpinger-restore-*"), Is.Empty.After(15_000, 100));
+            }
+            finally
+            {
+                File.Delete(uploadPath);
+            }
+        }
+
+        /// <summary>
+        /// A restore can be driven from the keyboard, which a label for the hidden input could not
+        /// be: the step that offers the file takes the focus on a real button, which opens the
+        /// picker, and Escape still leaves. With no way to reach the picker there is no restore at
+        /// all, now that choosing the file is what starts one.
+        /// </summary>
+        [Test]
+        public async Task Restore_ChoosesItsFileFromTheKeyboard()
+        {
+            var uploadPath = await FaithfulCopyAsync();
+            try
+            {
+                await UnlockedConfigurationPageAsync();
+                await ClickUntilAsync(Button("Restore backup…"), Overlay);
+                await CurrentPassword.FillAsync(WebApp.Password);
+                await CurrentPassword.PressAsync("Enter");
+                await Assertions.Expect(Button(Dialog, "Choose file…")).ToBeFocusedAsync();
+
+                var chooser = await Page.RunAndWaitForFileChooserAsync(() => Page.Keyboard.PressAsync("Enter"));
+                await chooser.SetFilesAsync(uploadPath);
+                await Assertions.Expect(BackupPassword).ToBeFocusedAsync();
+
+                await BackupPassword.PressAsync("Escape");
+                await Assertions.Expect(Overlay).ToBeHiddenAsync();
+            }
+            finally
+            {
+                File.Delete(uploadPath);
+            }
+        }
+
+        /// <summary>
+        /// The overlay does not hold the keyboard in, so Restore backup and Download backup can be
+        /// pressed from behind it. While a restore waits for the backup's password they do nothing:
+        /// either would replace the step, leaving nothing that can answer the restore or cancel it,
+        /// and it would hold the turn and the upload for ten minutes with no way out.
+        /// </summary>
+        [Test]
+        public async Task Restore_IsNotDisturbedFromBehindItsOverlay()
+        {
+            var uploadPath = await FaithfulCopyAsync();
+            try
+            {
+                await UnlockedConfigurationPageAsync();
+                await ClickUntilAsync(Button("Restore backup…"), Overlay);
+                await GiveTheRestorePasswordAndChooseAsync(uploadPath);
+                await Assertions.Expect(BackupPassword).ToBeFocusedAsync();
+
+                foreach (var behind in new[] { "Restore backup…", "Download backup" })
+                {
+                    await Button(behind).FocusAsync();
+                    await Page.Keyboard.PressAsync("Enter");
+                }
+
+                // Nothing on screen marks a press that is ignored, so they get a round trip first.
+                await Page.WaitForTimeoutAsync(1000);
+                await Assertions.Expect(BackupPassword).ToBeVisibleAsync();
+
+                await BackupPassword.PressAsync("Escape");
+                await Assertions.Expect(Overlay).ToBeHiddenAsync();
+                var directory = Path.GetDirectoryName(UiTestRun.DatabasePath)!;
+                Assert.That(() => Directory.EnumerateFiles(directory, "hostpinger-restore-*"), Is.Empty.After(5000, 50),
+                    "the step was still the one that can cancel the restore");
             }
             finally
             {
@@ -916,7 +997,7 @@ namespace HostPinger.UITest
         /// </summary>
         private Task WatchProgressAsync() => Page.EvaluateAsync("""
             () => {
-                const seen = window.progressSeen = { labels: [], percents: [], measured: [] };
+                const seen = window.progressSeen = { labels: [], percents: [], measured: [], noticeOverBar: false };
                 const note = (list, value) => {
                     if (value !== null && value !== list.at(-1)) {
                         list.push(value);
@@ -946,6 +1027,8 @@ namespace HostPinger.UITest
                         if (bar.hasAttribute('aria-valuenow')) {
                             note(seen.measured, bar.getAttribute('aria-label'));
                         }
+
+                        seen.noticeOverBar ||= document.querySelector('.modal .alert') !== null;
                     }
                 }).observe(document.body, {
                     subtree: true,
