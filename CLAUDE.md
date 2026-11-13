@@ -66,11 +66,8 @@ commit without one is left out of them. README's Development section has the res
 
 ## Subagent effort
 
-Workflow agents and subagents run at `high` effort at most, whatever effort the session runs at.
-Set `effort` on every `agent()` call in a workflow script and on every Agent tool call. An agent
-with no `effort` inherits the session's level.
-
-- `high` for verify, judge and synthesis stages, and for agents that write code.
-- `medium` for scouting, searching and other mechanical fan-out.
-
+Workflow agents and subagents run at `medium` effort.
+Set `effort` on every `agent()` call in a workflow script and on every Agent tool call.
 A prompt that asks for a different level for a particular task overrides this.
+Always plan yourself, don't use agents for planning.
+Always verify agent work yourself.
