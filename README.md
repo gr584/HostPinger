@@ -218,7 +218,10 @@ and saved only when it is.
   alone; delete it by hand once it is not wanted. Unlock to restore; with a password set, the
   restore asks for the current password first, in an overlay like the one that unlocks, before the
   file is chosen. Once it is chosen, the overlay shows how far the upload has got, then the check
-  and the swap as they happen, and then what came of it. One backup or restore runs at a
+  and the swap as they happen, and then what came of it. The check reads the whole backup, with
+  about how far it has got for one of 40 MB or more, and takes a few seconds a gigabyte. A backup
+  larger than 2 GB can take minutes for each gigabyte past the second on a machine without the
+  memory to hold the file: SQLite reads only a file's first 2 GB the fast way. One backup or restore runs at a
   time, a restore waiting for its password included: another asked for meanwhile, from any browser,
   is turned away with what is under way.
 - **Security** — whether a password is set, and the way to `/password` to set, change or remove
