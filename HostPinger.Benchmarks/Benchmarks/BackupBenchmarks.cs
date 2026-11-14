@@ -1,7 +1,6 @@
 using BenchmarkDotNet.Attributes;
 using HostPinger.Benchmarks.Infrastructure;
 using HostPinger.Core.Services;
-using Microsoft.Data.Sqlite;
 
 namespace HostPinger.Benchmarks.Benchmarks
 {
@@ -99,20 +98,21 @@ namespace HostPinger.Benchmarks.Benchmarks
     /// <summary>
     /// Checking an uploaded backup before anything is replaced, <see cref="DatabaseBackup.ValidateBackupAsync"/>:
     /// SQLite's quick_check over the whole file, read through a memory map, then its schema and
-    /// migrations. The page shows a bar meanwhile, and nothing else waits on it. Beside it, as the
-    /// baseline, the check this replaced: integrity_check read a page at a time, which also looks
-    /// every row up in every index.
+    /// migrations. The page shows a bar meanwhile, and nothing else waits on it.
     /// </summary>
     /// <remarks>
     /// Cold as well as warm, and here it is the file being checked that is dropped from memory, not
     /// the database. An upload has only just been written, but a machine without the memory to keep
-    /// a file of this size finds little of it there, and that is where the old check took minutes:
-    /// it reads each table's pages from the last to the first, which nothing reads ahead of.
+    /// a file of this size finds little of it there. That is where the check this replaced took
+    /// minutes, integrity_check read a page at a time: 164 s on this snapshot against 16 s warm,
+    /// measured as this benchmark's baseline in a4d29df and then taken out, since it was most of
+    /// the run. SQLite reads each table's pages from the last to the first, which nothing reads
+    /// ahead of, so a change that takes the memory map away shows here in the cold case.
     /// </remarks>
     [BenchmarkCategory("Restore")]
     [PageBenchmark(
         "Checking a backup",
-        "`DatabaseBackup.ValidateBackupAsync` on a snapshot of the database: the check of the file, the schema and the migrations. `FullIntegrityCheck` is the baseline, the `PRAGMA integrity_check` it ran before; cold is with the snapshot out of memory.")]
+        "`DatabaseBackup.ValidateBackupAsync` on a snapshot of the database: the check of the file, the schema and the migrations. Cold is with the snapshot out of memory.")]
     [WarmupCount(1)]
     [IterationCount(3)]
     public class ValidateBackupBenchmarks : DatabaseBenchmark
@@ -123,21 +123,6 @@ namespace HostPinger.Benchmarks.Benchmarks
 
         [ParamsSource(nameof(CacheStateValues))]
         public CacheState Cache { get; set; }
-
-        [Benchmark(Baseline = true)]
-        public async Task<string?> FullIntegrityCheck()
-        {
-            await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
-            {
-                DataSource = _candidate,
-                Mode = SqliteOpenMode.ReadOnly,
-                Pooling = false,
-            }.ToString());
-            await connection.OpenAsync();
-            await using var command = connection.CreateCommand();
-            command.CommandText = "PRAGMA integrity_check;";
-            return (string?)await command.ExecuteScalarAsync();
-        }
 
         [Benchmark]
         public Task<string?> ValidateBackup() => Database.Backup.ValidateBackupAsync(_candidate);
