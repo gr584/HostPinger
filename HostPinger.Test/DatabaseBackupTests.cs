@@ -725,9 +725,72 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// The check of a file large enough to wait for says about how far it has got as it goes,
+        /// always further and never done, which is said by the step after it starting. A small
+        /// file's has no measure: it is over before a bar could be read, and the first thing it
+        /// could say is most of the way.
+        /// </summary>
+        [Test]
+        public async Task ValidateBackup_SaysHowFarTheCheckHasGot()
+        {
+            await SeedHostWithAttemptsAsync(_options, "checked.example", attempts: 2000);
+            var small = await _backup.CreateSnapshotAsync();
+            await FillAsync(_dbPath, megabytes: 40);
+            var copy = await _backup.CreateSnapshotAsync();
+            var smallReports = new List<double>();
+            var reports = new List<double>();
+
+            var smallRefusal = await _backup.ValidateBackupAsync(small, new Recorder<double>(smallReports.Add));
+            var refusal = await _backup.ValidateBackupAsync(copy, new Recorder<double>(reports.Add));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(smallRefusal, Is.Null);
+                Assert.That(smallReports, Is.Empty);
+                Assert.That(refusal, Is.Null);
+                Assert.That(reports, Has.Count.GreaterThan(1).And.Ordered.And.Unique);
+                Assert.That(reports, Has.All.GreaterThan(0).And.All.LessThan(1));
+            });
+        }
+
+        /// <summary>
+        /// A cancel stops the check where it is rather than after the rest of the file: the check
+        /// of a large upload outlasts the page that asked for it otherwise, with the restore's turn
+        /// taken and the upload on the disk until it ends.
+        /// </summary>
+        [Test]
+        public async Task ValidateBackup_StopsCheckingWhenCancelled()
+        {
+            await SeedHostWithAttemptsAsync(_options, "checked.example", attempts: 2000);
+            await FillAsync(_dbPath, megabytes: 40);
+            var copy = await _backup.CreateSnapshotAsync();
+            using var cancel = new CancellationTokenSource();
+            var reports = new List<double>();
+
+            var cancelled = _backup.ValidateBackupAsync(
+                copy,
+                new Recorder<double>(fraction =>
+                {
+                    reports.Add(fraction);
+                    cancel.Cancel();
+                }),
+                cancel.Token);
+
+            // A check left to finish is cancelled too, by the next thing asked of the file, and has
+            // nothing more to say meanwhile. Only one that SQLite was stopped in carries SQLite's
+            // word for it.
+            Assert.That(
+                async () => await cancelled,
+                Throws.InstanceOf<OperationCanceledException>()
+                    .With.InnerException.InstanceOf<SqliteException>()
+                    .With.InnerException.Property(nameof(SqliteException.SqliteErrorCode)).EqualTo(9));
+            Assert.That(reports, Has.Count.EqualTo(1));
+        }
+
+        /// <summary>
         /// A file that starts like a database and is damaged after its header is refused, whether
-        /// the damage is somewhere SQLite only notices when it checks — an index no longer matching
-        /// its table — or somewhere it cannot read past at all, the schema itself.
+        /// the damage is somewhere SQLite only notices when it checks — a page of an index that is
+        /// no longer a page of one — or somewhere it cannot read past at all, the schema itself.
         /// </summary>
         [TestCase("index")]
         [TestCase("schema")]
@@ -749,12 +812,13 @@ namespace HostPinger.Test
                 }
                 else
                 {
-                    // The tail of an index page holds its entries' keys; changing them leaves rows
-                    // the index no longer finds.
+                    // An index page opens with what kind of page it is and where its entries lie.
+                    // Nothing reads this index until something asks for a host's history, so only
+                    // the check stands between the file and the swap.
                     var root = Convert.ToInt64(await ScalarAsync(
                         connection, "SELECT rootpage FROM sqlite_master WHERE name = 'IX_PingAttempts_HostId_TimestampUtc';"));
-                    offset = (root - 1) * pageSize + pageSize - 64;
-                    length = 48;
+                    offset = (root - 1) * pageSize;
+                    length = 8;
                 }
             }
 
@@ -1345,7 +1409,11 @@ namespace HostPinger.Test
                 Assert.That(received, Is.Ordered.And.Not.Empty);
                 Assert.That(received[^1], Is.EqualTo(1));
                 Assert.That(received.Count(fraction => fraction is > 0 and < 1), Is.Positive, "partway, not only before and after");
-                Assert.That(reports.Where(r => r.Step != RestoreStep.Receiving).Select(r => r.Fraction), Has.All.Null);
+                Assert.That(reports.First(r => r.Step == RestoreStep.Checking).Fraction, Is.Null, "no measure until the check has one");
+                Assert.That(
+                    reports.Where(r => r.Step == RestoreStep.Checking && r.Fraction is not null).Select(r => r.Fraction),
+                    Is.Ordered.And.All.LessThan(1));
+                Assert.That(reports.Where(r => r.Step == RestoreStep.Replacing).Select(r => r.Fraction), Has.All.Null);
                 Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-restore-*"), Is.Empty);
             });
         }

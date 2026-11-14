@@ -1078,8 +1078,8 @@
     private int? ProgressPercent => _progress is { } fraction ? (int)(fraction * 100) : null;
 
     /// <summary>
-    /// Follows a restore through its steps: the upload by how far it has got, the check and the
-    /// swap without a measure. The reports reach the circuit in the order they were made and ahead
+    /// Follows a restore through its steps: the upload by how far it has got, the check by about
+    /// how far once it has a measure, which a small file's never does, and the swap without one. The reports reach the circuit in the order they were made and ahead
     /// of the restore's end, so one arriving once the overlay has moved on is only ever a stray.
     /// </summary>
     private void ShowRestoreStep(RestoreProgress progress)

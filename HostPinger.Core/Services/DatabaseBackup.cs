@@ -50,6 +50,35 @@ namespace HostPinger.Core.Services
         private const string DataBytesQuery =
             "SELECT (page_count - freelist_count) * page_size FROM pragma_page_count(), pragma_freelist_count(), pragma_page_size();";
 
+        private const string FailedCheck = "The file failed SQLite's integrity check.";
+
+        /// <summary>
+        /// How often the check of an upload is asked whether to go on, and says how far it has got:
+        /// every so many pages while SQLite walks the file's pages, and every so many steps of its
+        /// program while it reads the rows. SQLite counts the two in the one setting.
+        /// </summary>
+        private const int CheckStep = 1000;
+
+        /// <summary>
+        /// Steps of SQLite's program that reading the rows takes for each page of the file: 260 to
+        /// 280 on a HostPinger history, where the attempts are nearly all of the file. Only the
+        /// check's bar depends on it.
+        /// </summary>
+        private const int CheckRowStepsPerPage = 270;
+
+        /// <summary>
+        /// The part of the check's bar given to the walk over the pages, which is most of its time,
+        /// and nearly all of it for a file that is not in memory.
+        /// </summary>
+        private const double CheckWalkShare = 0.7;
+
+        /// <summary>
+        /// The pages a file has before its check is given a measure, 40 MB of them. A smaller file
+        /// is checked in less time than a bar takes to read, and its walk is over before SQLite
+        /// has asked once, so its bar would start most of the way along.
+        /// </summary>
+        private const int CheckMeasuredFromPages = 10 * CheckStep;
+
         private const string StayedInUse = "The database stayed in use, so nothing was replaced. Try the restore again.";
 
         private const string SnapshotUnderWay = "A backup is being written";
@@ -355,14 +384,32 @@ namespace HostPinger.Core.Services
         /// and so is one defining anything that would run inside this application.
         /// </summary>
         /// <remarks>
-        /// Runs on the thread pool: Microsoft.Data.Sqlite does no asynchronous I/O, and the integrity
-        /// check reads the whole file, which for a gigabyte is seconds the page asking would
-        /// otherwise sit frozen through.
+        /// <para>
+        /// Runs on the thread pool: Microsoft.Data.Sqlite does no asynchronous I/O, and the check
+        /// reads the whole file, which for a gigabyte is seconds the page asking would otherwise
+        /// sit frozen through. <paramref name="progress"/> hears how far the check of a file large
+        /// enough to wait for has got, by an estimate that stays short of 1, and a cancel stops
+        /// the check where it is.
+        /// </para>
+        /// <para>
+        /// The check is SQLite's quick_check, which reads every page and every row and is what
+        /// SQLite asks for before anything else is read from a file that came from outside. It
+        /// does not look every row up in every index, as integrity_check does: that was nine
+        /// tenths of the time a gigabyte took, and what it finds, an index that no longer matches
+        /// its table, makes for wrong answers rather than a file that cannot be read. A backup
+        /// written here has its indexes built anew by the snapshot.
+        /// </para>
         /// </remarks>
-        internal Task<string?> ValidateBackupAsync(string candidatePath, CancellationToken cancellationToken = default) =>
-            Task.Run(() => ValidateOnThisThreadAsync(candidatePath, cancellationToken), cancellationToken);
+        internal Task<string?> ValidateBackupAsync(
+            string candidatePath,
+            IProgress<double>? progress = null,
+            CancellationToken cancellationToken = default) =>
+            Task.Run(() => ValidateOnThisThreadAsync(candidatePath, progress, cancellationToken), cancellationToken);
 
-        private async Task<string?> ValidateOnThisThreadAsync(string candidatePath, CancellationToken cancellationToken)
+        private async Task<string?> ValidateOnThisThreadAsync(
+            string candidatePath,
+            IProgress<double>? progress,
+            CancellationToken cancellationToken)
         {
             if (!await HasSqliteHeaderAsync(candidatePath, cancellationToken))
             {
@@ -384,9 +431,9 @@ namespace HostPinger.Core.Services
                 await using var connection = new SqliteConnection(connectionString);
                 await connection.OpenAsync(cancellationToken);
 
-                if (await ScalarAsync(connection, "PRAGMA integrity_check;", cancellationToken) is not "ok")
+                if (!await PassesCheckAsync(connection, new FileInfo(candidatePath).Length, progress, cancellationToken))
                 {
-                    return "The file failed SQLite's integrity check.";
+                    return FailedCheck;
                 }
 
                 var historyTables = await ScalarAsync(
@@ -421,11 +468,17 @@ namespace HostPinger.Core.Services
                     applied.Add(reader.GetString(0));
                 }
             }
-            catch (SqliteException)
+            catch (SqliteException ex)
             {
+                // The check stopped for a cancel, which is how SQLite reports being told to stop.
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException("The check was cancelled.", ex, cancellationToken);
+                }
+
                 // A file corrupt enough that reading it throws is the same answer as one whose
                 // integrity check fails, told less politely.
-                return "The file failed SQLite's integrity check.";
+                return FailedCheck;
             }
 
             // The migrations this build ships, read from the assembly: the context never opens.
@@ -447,6 +500,77 @@ namespace HostPinger.Core.Services
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// Whether the file open on <paramref name="connection"/> passes SQLite's quick_check,
+        /// which stops at the first thing it finds wrong, since one is enough to refuse the file.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Read through a memory map rather than a page at a time. The check walks each table's
+        /// pages from the last to the first, and an operating system only reads ahead of a file
+        /// read forwards: a gigabyte that was not in memory took over two minutes a page at a
+        /// time and three seconds mapped, and no better with the whole file read into memory
+        /// first where there was not the memory to keep it. SQLite maps as much of the file as it
+        /// was built to allow, two gigabytes in the build this ships with, reads the rest as
+        /// before, and reads all of it as before where mapping fails. A disk that fails under a
+        /// mapped read ends the process rather than the check; the file is one this process has
+        /// just written, on the disk the database itself is on.
+        /// </para>
+        /// <para>
+        /// SQLite asks every <see cref="CheckStep"/> whether to go on, which is where a cancel
+        /// stops it and where <paramref name="progress"/> comes from: the walk over the pages
+        /// measured against the file's pages, then the rows against what a history's rows take,
+        /// for a file of <see cref="CheckMeasuredFromPages"/> or more.
+        /// </para>
+        /// </remarks>
+        private static async Task<bool> PassesCheckAsync(
+            SqliteConnection connection,
+            long fileBytes,
+            IProgress<double>? progress,
+            CancellationToken cancellationToken)
+        {
+            await ScalarAsync(
+                connection, string.Create(CultureInfo.InvariantCulture, $"PRAGMA mmap_size = {fileBytes};"), cancellationToken);
+            var pages = Convert.ToInt64(await ScalarAsync(connection, "PRAGMA page_count;", cancellationToken));
+
+            var measured = progress is not null && pages >= CheckMeasuredFromPages;
+            var walkCalls = Math.Max(1, pages / CheckStep);
+            var rowCalls = Math.Max(1, pages * CheckRowStepsPerPage / CheckStep);
+            long calls = 0;
+            var percentSaid = 0;
+            SQLitePCL.raw.sqlite3_progress_handler(
+                connection.Handle,
+                CheckStep,
+                _ =>
+                {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        return 1;
+                    }
+
+                    if (!measured)
+                    {
+                        return 0;
+                    }
+
+                    calls++;
+                    var fraction = calls <= walkCalls
+                        ? CheckWalkShare * calls / walkCalls
+                        : CheckWalkShare + ((1 - CheckWalkShare) * (calls - walkCalls) / rowCalls);
+                    var percent = (int)(Math.Min(fraction, 0.99) * 100);
+                    if (percent > percentSaid)
+                    {
+                        percentSaid = percent;
+                        progress!.Report(percent / 100.0);
+                    }
+
+                    return 0;
+                },
+                null);
+
+            return await ScalarAsync(connection, "PRAGMA quick_check(1);", cancellationToken) is "ok";
         }
 
         /// <summary>
@@ -510,8 +634,8 @@ namespace HostPinger.Core.Services
         /// asks for the password it puts in force, if it puts one in force, and puts it in place as
         /// <see cref="RestoreAsync"/> does, all in the one turn, so that nothing else of this class
         /// writes beside the database from the room check to the swap.
-        /// <paramref name="progress"/> hears which part is under way, and how much of the upload has
-        /// arrived while it arrives.
+        /// <paramref name="progress"/> hears which part is under way, how much of the upload has
+        /// arrived while it arrives, and about how far the check has got.
         /// </summary>
         /// <param name="askPassword">
         /// Asks whoever restores the backup for its password, and gives what they answered. It is
@@ -564,7 +688,10 @@ namespace HostPinger.Core.Services
                     await ReceiveAsync(source, candidatePath, length, progress, cancellationToken);
 
                     progress?.Report(new RestoreProgress(RestoreStep.Checking, null));
-                    if (await ValidateBackupAsync(candidatePath, cancellationToken) is { } invalid)
+                    var checking = progress is null
+                        ? null
+                        : new CheckReports(fraction => progress.Report(new RestoreProgress(RestoreStep.Checking, fraction)));
+                    if (await ValidateBackupAsync(candidatePath, checking, cancellationToken) is { } invalid)
                     {
                         return new RestoreResult(invalid);
                     }
@@ -1132,6 +1259,12 @@ namespace HostPinger.Core.Services
             }
         }
 
+        /// <summary>Passes the check's reports on as they are made, on the thread that makes them.</summary>
+        private sealed class CheckReports(Action<double> report) : IProgress<double>
+        {
+            public void Report(double value) => report(value);
+        }
+
         private string TempPath(string prefix) => Path.Combine(
             Path.GetDirectoryName(paths.DatabasePath)!,
             $"{prefix}{Guid.NewGuid():N}{TempExtension}");
@@ -1153,8 +1286,9 @@ namespace HostPinger.Core.Services
     /// <summary>How far a restore from an upload has got.</summary>
     /// <param name="Step">The part under way.</param>
     /// <param name="Fraction">
-    /// How much of the upload has arrived, while it is arriving; null for the parts SQLite gives no
-    /// measure of.
+    /// How much of the upload has arrived, while it is arriving, and about how far the check has
+    /// got, once it has a measure: an estimate that stays short of 1. Null for a check that has
+    /// none yet and for the swap, which SQLite gives no measure of.
     /// </param>
     public readonly record struct RestoreProgress(RestoreStep Step, double? Fraction);
 
