@@ -10,6 +10,14 @@
 #   firewall-cmd --permanent --add-port=8080/tcp && firewall-cmd --reload
 ASPNETCORE_HTTP_PORTS=8080
 
+# Further names the web UI answers to, separated by semicolons. Without any it answers to its
+# address, to a name without a dot, to names under local suffixes such as .local, .lan and
+# .home.arpa, and to this machine's own name; a request under any other name gets a 400 saying so.
+# That is what keeps a website from reaching the UI through a browser on this network, so list the
+# names it is really reached by rather than *, which turns the check off. *.example.com is every
+# name under example.com.
+#Security__AllowedHostNames=hostpinger.example.com
+
 # The .NET runtime opens a debugger transport and a diagnostics socket as it starts, neither of
 # which an installed service has any use for: PrivateTmp= in the unit already puts both somewhere
 # dotnet-counters and dotnet-dump cannot reach without entering the service's namespace, and on a

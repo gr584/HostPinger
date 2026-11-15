@@ -142,9 +142,35 @@ namespace HostPinger
             // own, so that no page holds one.
             builder.Services.AddSingleton<DatabaseReads>();
 
+            // Which names in a request's Host header are answered; see HostNameFilter.
+            var hostNames = HostNameFilter.FromConfiguration(builder.Configuration);
+            builder.Services.AddSingleton(hostNames);
+
             var app = builder.Build();
 
+            if (hostNames.AnswersToAnyName)
+            {
+                app.Logger.LogWarning(
+                    "{Variable} lists *, so requests are answered under any name. A website can then reach this "
+                    + "service through a browser on its network.",
+                    HostNameFilter.EnvironmentVariable);
+            }
+            else
+            {
+                app.Logger.LogInformation(
+                    "Answering to addresses, names without a dot, names under local suffixes, this machine's "
+                    + "names ({OwnNames}) and the names listed in {Variable} ({Configured}).",
+                    string.Join(", ", hostNames.OwnNames),
+                    HostNameFilter.EnvironmentVariable,
+                    hostNames.Configured.Count > 0 ? string.Join(", ", hostNames.Configured) : "none");
+            }
+
             // Configure the HTTP request pipeline.
+
+            // First, so that a request under a name this service does not answer to reaches
+            // nothing at all: not a page, not the circuit, not the error handler's page.
+            app.UseMiddleware<HostNameFilterMiddleware>();
+
             if (!app.Environment.IsDevelopment())
             {
                 app.UseExceptionHandler("/Error");

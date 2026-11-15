@@ -32,6 +32,15 @@ namespace HostPinger.UITest
         /// </summary>
         private const string FrameworkScript = "_framework/blazor.web.js";
 
+        /// <summary>
+        /// A name in public DNS's shape that this instance is told to answer to, and the star under
+        /// which it answers to more, so a test can tell a listed name from one that is not.
+        /// </summary>
+        public const string ListedHostName = "pinger.listed.example";
+
+        /// <inheritdoc cref="ListedHostName"/>
+        public const string ListedHostNames = $"{ListedHostName};*.starred.example";
+
         private readonly Process _process;
         private readonly List<string> _output;
         private readonly string _dataDirectory;
@@ -103,6 +112,9 @@ namespace HostPinger.UITest
             // The development settings name a database inside the checkout; this is read after
             // them and is what keeps the run in its own temporary directory.
             start.Environment["Pinger__DatabasePath"] = databasePath;
+
+            // As a deployment reached by a full name sets it; HostNameFilterTests asks under these.
+            start.Environment["Security__AllowedHostNames"] = ListedHostNames;
 
             var process = Process.Start(start)
                 ?? throw new InvalidOperationException("Could not start the application.");

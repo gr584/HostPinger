@@ -641,6 +641,7 @@ edited on the Configuration page, as described above. Everything else is environ
 | --- | --- |
 | `ASPNETCORE_HTTP_PORTS` | Listening port, on every interface. 8080 on Linux, 5000 on Windows. |
 | `TZ` | Time zone for displayed timestamps. They are rendered server-side, so this decides what users see. Linux only — Windows takes the system time zone. |
+| `Security__AllowedHostNames` | Further names the web UI answers to, separated by semicolons. See [Names the service answers to](#names-the-service-answers-to). |
 | `Pinger__DatabasePath` | Database location. Defaults to `/var/lib/hostpinger/hostpinger.db` on Linux and `%ProgramData%\HostPinger\hostpinger.db` on Windows. |
 | `DOTNET_EnableDiagnostics` | `0` in the shipped Linux environment file, which keeps the runtime from opening a debugger transport and a diagnostics socket a service does not need. See below. |
 
@@ -661,6 +662,45 @@ MSI writes that value back to the default.
 Changing the port on either platform leaves the firewall behind: neither Linux package opens one,
 and the rule the MSI adds names port 5000. `Set-NetFirewallRule -DisplayName 'HostPinger web UI' -LocalPort
 <new>` moves it, until the next upgrade puts 5000 back.
+
+### Names the service answers to
+
+HostPinger is meant to be reached on a local network, and it only answers requests that name it the
+way a local network does:
+
+- its address, IPv4 or IPv6;
+- a name without a dot, such as `monitor` or `localhost`;
+- a name under a suffix that public DNS does not hand out: `.local`, `.lan`, `.home.arpa`,
+  `.internal`, `.localdomain`, `.home`, `.corp`, `.test` and `.localhost`;
+- what its machine is called, with its domain where the system knows one.
+
+A request under any other name gets a 400 that says so and names the setting below, instead of the
+page, and the first one for each name is a warning in the service's log.
+
+This is what stops a website reaching the UI through a browser on the same network, which keeping
+the service off the internet does not: the site points a name of its own at the service's address,
+and the browser, which can reach that address, then treats the service as part of the site. Such a
+page could read whatever anyone on the network can read, and on a HostPinger without a password
+change it too. It has to arrive under a name its owner holds in public DNS, though, and none of the
+names above can be held there.
+
+A service reached by a full name, such as `hostpinger.example.com`, has to be told that name:
+
+```
+Security__AllowedHostNames=hostpinger.example.com;monitor.example.org
+```
+
+`*.example.com` stands for every name under `example.com`, though not `example.com` itself. A lone
+`*` answers to every name, as releases before this one did, and gives the protection up; the
+service says so in its log at every start. The setting is read from the environment or
+`appsettings.json` only, never from the database, so restoring a backup cannot change it.
+
+Behind a reverse proxy the name checked is the one the proxy sends on. Most send the service's own
+address unless told otherwise, which HostPinger answers to whatever the browser asked the proxy
+for, so there it is the proxy that has to turn unknown names away: in nginx, a `server_name` for
+the real name and a default server that refuses the rest. A proxy that passes the browser's name
+through (`proxy_set_header Host $host`) leaves the check to HostPinger, which then needs the name
+listed as above.
 
 ## How ICMP is permitted
 
