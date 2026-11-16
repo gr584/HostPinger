@@ -51,8 +51,8 @@ namespace HostPinger.Core.Services
         }
 
         /// <summary>
-        /// Saves <paramref name="limitMb"/> as the size limit, or says why not: it is under 1 MB, or
-        /// more than <see cref="SafeLimitMb"/>.
+        /// Saves <paramref name="limitMb"/> as the size limit, or says why not: it is under 1 MB,
+        /// more than <see cref="SafeLimitMb"/>, or a backup or a restore is under way.
         /// </summary>
         /// <returns>Null once the limit is saved, and otherwise the sentence to show whoever asked.</returns>
         public async Task<string?> SaveAsync(int limitMb, CancellationToken cancellationToken = default)
@@ -69,7 +69,15 @@ namespace HostPinger.Core.Services
                     + "free space beside them come to, so that a backup's copy always fits.";
             }
 
-            await settings.SaveAsync(new PingerSettingsUpdate { MaxDatabaseSizeMb = limitMb }, cancellationToken);
+            try
+            {
+                await settings.SaveAsync(new PingerSettingsUpdate { MaxDatabaseSizeMb = limitMb }, cancellationToken);
+            }
+            catch (ChangeRefusedException ex)
+            {
+                return ex.Message;
+            }
+
             return null;
         }
 

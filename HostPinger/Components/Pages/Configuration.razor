@@ -14,6 +14,7 @@
 @inject IHttpContextAccessor HttpContextAccessor
 @inject LockPrompt Prompt
 @inject DatabaseBackup Backup
+@inject ChangeLockout Lockout
 @inject DatabaseSizeLimit SizeLimit
 @inject BackupDownloadTokens Tokens
 @inject IJSRuntime JS
@@ -30,6 +31,14 @@
         HostPinger is locked, so the settings below can be read but not changed.
         <button type="button" class="btn btn-link btn-sm p-0 align-baseline"
                 @onclick="() => Prompt.Request()">Unlock</button> to edit them.
+    </p>
+}
+
+@if (_underWay is { } underWay && !OwnsHold)
+{
+    <p class="text-muted lockout-notice">
+        @ChangeLockout.Describe(underWay), so the settings below can be read but not changed until it has
+        finished.
     </p>
 }
 
@@ -63,10 +72,10 @@
                 <dt><label for="max-db-size">Maximum size</label></dt>
                 <dd>
                     <div class="input-group input-group-sm config-input">
-                        <InputNumber id="max-db-size" class="form-control" disabled="@(!_isUnlocked)"
+                        <InputNumber id="max-db-size" class="form-control" disabled="@(!CanChange)"
                                      @bind-Value="_databaseForm.MaxDatabaseSizeMb" />
                         <span class="input-group-text">MB</span>
-                        <button type="submit" class="btn btn-primary" disabled="@(!_isUnlocked)">Save</button>
+                        <button type="submit" class="btn btn-primary" disabled="@(!CanChange)">Save</button>
                     </div>
                     <ValidationMessage For="() => _databaseForm.MaxDatabaseSizeMb" />
                     <div class="form-text">
@@ -99,11 +108,12 @@
 
                 <dt>Backup</dt>
                 <dd>
-                    <button type="button" class="btn btn-outline-primary btn-sm" disabled="@(!_isUnlocked)"
+                    <button type="button" class="btn btn-outline-primary btn-sm" disabled="@(!CanStart)"
                             @onclick="RequestDownloadAsync">Download backup</button>
                     <div class="form-text">
                         A compacted snapshot of the whole database: hosts, history, settings and
-                        the password, if one is set, all travel with it.
+                        the password, if one is set, all travel with it. No browser can change
+                        anything while it is written.
                         @if (_backupStatus is not null)
                         {
                             <span class="config-refused">@_backupStatus</span>
@@ -125,10 +135,11 @@
                         dead with no word of why once the page noticed it was locked.
                     *@
                     <InputFile id="restore-file" @key="_restoreInputKey" OnChange="OnRestoreFileSelected" class="d-none" />
-                    <button type="button" class="btn btn-outline-primary btn-sm" disabled="@(!_isUnlocked)"
+                    <button type="button" class="btn btn-outline-primary btn-sm" disabled="@(!CanStart)"
                             @onclick="RequestRestoreAsync">Restore backup…</button>
                     <div class="form-text">
-                        Uploading a backup replaces the current database.
+                        Uploading a backup replaces the current database. No browser can change
+                        anything from this button until the restore has ended.
                         @if (_restoreStatus is not null)
                         {
                             <span class="config-refused">@_restoreStatus</span>
@@ -152,14 +163,14 @@
                 <h5 class="card-title">Pinger config</h5>
                 <div class="config-actions">
                     <button type="button" class="btn btn-outline-danger btn-sm" disabled="@(!HasPingerChanges)" @onclick="RevertPinger">Cancel</button>
-                    <button type="submit" class="btn btn-primary btn-sm" disabled="@(!_isUnlocked || !HasPingerChanges)">Save</button>
+                    <button type="submit" class="btn btn-primary btn-sm" disabled="@(!CanChange || !HasPingerChanges)">Save</button>
                 </div>
             </div>
             <dl class="config-list">
                 <dt><label for="ping-interval">Ping interval</label></dt>
                 <dd>
                     <div class="input-group input-group-sm config-input">
-                        <InputNumber id="ping-interval" class="form-control" disabled="@(!_isUnlocked)"
+                        <InputNumber id="ping-interval" class="form-control" disabled="@(!CanChange)"
                                      @bind-Value="_pingerForm.IntervalSeconds" />
                         <span class="input-group-text">seconds</span>
                     </div>
@@ -170,7 +181,7 @@
                 <dt><label for="ping-timeout">Timeout</label></dt>
                 <dd>
                     <div class="input-group input-group-sm config-input">
-                        <InputNumber id="ping-timeout" class="form-control" disabled="@(!_isUnlocked)"
+                        <InputNumber id="ping-timeout" class="form-control" disabled="@(!CanChange)"
                                      @bind-Value="_pingerForm.TimeoutSeconds" />
                         <span class="input-group-text">seconds</span>
                     </div>
@@ -181,7 +192,7 @@
                 <dt><label for="resolve-timeout">Resolve timeout</label></dt>
                 <dd>
                     <div class="input-group input-group-sm config-input">
-                        <InputNumber id="resolve-timeout" class="form-control" disabled="@(!_isUnlocked)"
+                        <InputNumber id="resolve-timeout" class="form-control" disabled="@(!CanChange)"
                                      @bind-Value="_pingerForm.ResolveTimeoutSeconds" />
                         <span class="input-group-text">seconds</span>
                     </div>
@@ -196,7 +207,7 @@
                 <dt><label for="retry-attempts">Retry attempts</label></dt>
                 <dd>
                     <div class="input-group input-group-sm config-input">
-                        <InputNumber id="retry-attempts" class="form-control" disabled="@(!_isUnlocked)"
+                        <InputNumber id="retry-attempts" class="form-control" disabled="@(!CanChange)"
                                      @bind-Value="_pingerForm.RetryAttempts" />
                         <span class="input-group-text">attempts</span>
                     </div>
@@ -311,8 +322,8 @@
                             case Confirming.RestoreBackupPassword:
                                 <p class="mb-2">
                                     The backup passed its checks, and nothing has been replaced yet.
-                                    Restoring it puts a password in force, the one to unlock with from
-                                    then on, and this browser may need unlocking with it again. A
+                                    Restoring it puts a password in force, and locks every browser,
+                                    this one included, until it is unlocked with that password. A
                                     backup that stores none takes the password configured for this
                                     install. Enter it to go ahead. If you cannot, cancel, and the
                                     current database stays as it is.
@@ -354,6 +365,17 @@
                             <input id="backup-current-password" type="password" class="form-control form-control-sm"
                                    autocomplete="current-password"
                                    @bind="_password" @bind:event="oninput" @ref="_passwordInput" />
+                        }
+                        @if (StepLeft is { } stepLeft)
+                        {
+                            @*
+                                Every step that waits for somebody says so, and for how long: the
+                                whole of HostPinger is waiting with it.
+                            *@
+                            <div class="form-text step-wait">
+                                No browser can change anything while this is open. It closes itself
+                                in <span class="step-left">@FormatLeft(stepLeft)</span>.
+                            </div>
                         }
                     </div>
                     <div class="modal-footer">
@@ -485,6 +507,18 @@
     // file is chosen. Forgotten with the chosen file, so it never carries over to the next restore.
     private bool _restorePasswordGiven;
 
+    // The hold on the lockout while this page has it: from Download backup or Restore backup…
+    // being pressed, through the overlay's steps that wait for somebody. Handed to the backup or
+    // the restore when its work starts, which gives it back when it ends.
+    private ChangeLockout.Hold? _hold;
+
+    // The hold once the backup or the restore has it, kept only to say how long the backup's
+    // password step has left.
+    private ChangeLockout.Hold? _handedOver;
+
+    // Which of a backup and a restore is under way, from any browser, and null while neither is.
+    private LockoutActivity? _underWay;
+
     // What is typed in the overlay's password box. Emptied after every attempt, right or wrong, so
     // a password is held here no longer than it takes to check it.
     private string _password = string.Empty;
@@ -520,9 +554,134 @@
     {
         SyncFromConfiguration();
         _isUnlocked = await IsUnlockedAsync();
+        if (RendererInfo.IsInteractive)
+        {
+            // Listening before looking, so that one starting in between is not missed.
+            Lockout.Changed += OnLockoutChanged;
+        }
+
+        _underWay = Lockout.Active;
         await LoadStatsAsync();
         _ = AutoRefreshAsync();
     }
+
+    // Raised on whichever thread took the hold or gave it back, so handed to this page's circuit.
+    private void OnLockoutChanged() => _ = InvokeAsync(() =>
+    {
+        _underWay = Lockout.Active;
+        StateHasChanged();
+    });
+
+    /// <summary>
+    /// Whether the settings can be edited: by an unlocked browser, while no backup or restore is
+    /// under way. A courtesy to the reader; the save handlers ask again, and so does the store.
+    /// </summary>
+    private bool CanChange => _isUnlocked && _underWay is null;
+
+    /// <summary>Whether this page has the backup or the restore that is under way.</summary>
+    private bool OwnsHold => _hold is not null || _preparation is not null || _restoring is not null;
+
+    /// <summary>
+    /// Whether a backup or a restore can be asked for: not while another browser has one under
+    /// way. This page's own leaves the buttons as they are, behind its overlay; see
+    /// <see cref="RequestRestoreAsync"/>.
+    /// </summary>
+    private bool CanStart => _isUnlocked && (_underWay is null || OwnsHold);
+
+    /// <summary>
+    /// Takes the lockout's hold for this page, or says why not: another backup or restore has it.
+    /// From here until the hold is given back no browser changes anything, so what is asked next,
+    /// whether this browser is unlocked and for the current password, still holds when the backup
+    /// is written or the database replaced.
+    /// </summary>
+    private async Task<string?> TakeHoldAsync(LockoutActivity activity)
+    {
+        var take = await Lockout.TakeAsync(activity, _cts.Token);
+        if (take.Hold is not { } hold)
+        {
+            return take.Refusal;
+        }
+
+        _hold = hold;
+
+        // Fires on whichever thread ends the hold, its own timer among them, so nothing may come
+        // out of it: a page that has gone has no circuit left to hand this to.
+        hold.Ended.Register(() =>
+        {
+            try
+            {
+                _ = InvokeAsync(() => OnHoldEnded(hold));
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
+            {
+            }
+        });
+        return null;
+    }
+
+    /// <summary>Gives back the hold this page has, if it has one.</summary>
+    private void ReleaseHold()
+    {
+        var hold = _hold;
+        _hold = null;
+        hold?.Dispose();
+    }
+
+    /// <summary>
+    /// Takes down an overlay left waiting until its hold ran out, and says so beside the button:
+    /// every browser was held out for as long as it stood open. A hold that ended any other way
+    /// was given back from here, or by the backup or the restore it was handed to.
+    /// </summary>
+    private void OnHoldEnded(ChangeLockout.Hold hold)
+    {
+        if (_hold != hold)
+        {
+            return;
+        }
+
+        _hold = null;
+        if (!hold.RanOut)
+        {
+            return;
+        }
+
+        const string LeftWaiting = "was left waiting for more than five minutes, so it was let go of. Start it again.";
+        if (hold.Activity == LockoutActivity.Backup)
+        {
+            _backupStatus = $"The backup {LeftWaiting}";
+        }
+        else
+        {
+            _restoreStatus = $"The restore {LeftWaiting}";
+            _isRestoreRefused = true;
+        }
+
+        CancelRestore();
+        CloseDialog();
+        StateHasChanged();
+    }
+
+    /// <summary>
+    /// What the step on screen has left before its hold runs out and the overlay closes itself;
+    /// null for a step that is not waiting for anybody.
+    /// </summary>
+    private TimeSpan? StepLeft
+    {
+        get
+        {
+            if (_confirming is not (Confirming.Download or Confirming.RestorePassword or Confirming.RestoreFile
+                    or Confirming.RestoreBackupPassword)
+                || (_hold ?? _handedOver)?.WaitingUntil is not { } until)
+            {
+                return null;
+            }
+
+            var left = until - DateTimeOffset.UtcNow;
+            return left > TimeSpan.Zero ? left : TimeSpan.Zero;
+        }
+    }
+
+    private static string FormatLeft(TimeSpan left) => $"{(int)left.TotalMinutes}:{left.Seconds:00}";
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -540,7 +699,7 @@
 
         // Started from a render that has happened in a browser, as the unlock overlay starts its
         // own; see CountDownAsync.
-        if (IsWaiting && !_isCountingDown)
+        if (IsCounting && !_isCountingDown)
         {
             _isCountingDown = true;
             _ = CountDownAsync();
@@ -702,15 +861,26 @@
             return;
         }
 
-        await SettingsStore.SaveAsync(
-            new PingerSettingsUpdate
-            {
-                IntervalSeconds = _pingerForm.IntervalSeconds,
-                TimeoutSeconds = _pingerForm.TimeoutSeconds,
-                ResolveTimeoutSeconds = _pingerForm.ResolveTimeoutSeconds,
-                RetryAttempts = _pingerForm.RetryAttempts,
-            },
-            _cts.Token);
+        try
+        {
+            await SettingsStore.SaveAsync(
+                new PingerSettingsUpdate
+                {
+                    IntervalSeconds = _pingerForm.IntervalSeconds,
+                    TimeoutSeconds = _pingerForm.TimeoutSeconds,
+                    ResolveTimeoutSeconds = _pingerForm.ResolveTimeoutSeconds,
+                    RetryAttempts = _pingerForm.RetryAttempts,
+                },
+                _cts.Token);
+        }
+        catch (ChangeRefusedException ex)
+        {
+            // A backup or a restore under way: the button is disabled then, so this takes one
+            // starting between the last render and the click.
+            _pingerStatus = ex.Message;
+            _isPingerSaveRefused = true;
+            return;
+        }
 
         // The save is in force the moment it returns, so re-reading the store catches it up.
         SyncFromConfiguration();
@@ -775,23 +945,47 @@
     }
 
     /// <summary>
-    /// Asks for the current password before a download, and goes straight on to writing the
+    /// Takes the lockout's hold, which keeps every browser from changing anything until the
+    /// backup is written, then asks for the current password, or goes straight on to writing the
     /// snapshot when there is none to ask for.
     /// </summary>
     private async Task RequestDownloadAsync()
     {
-        if (IsRestoreUnderWay)
+        // A restore or a backup at work here already has the overlay, and the hold.
+        if (IsRestoreUnderWay || _preparation is not null)
         {
             return;
         }
 
         // Pressed from behind a restore's overlay, this takes the overlay over, so the restore is
-        // left: a current password given for it must not outlive its step.
+        // left: its hold is given back, and a current password given for it must not outlive its
+        // step.
         CancelRestore();
+        CloseDialog();
+        _backupStatus = null;
 
-        // A locked browser goes straight through too, to be turned away there: there is no point
-        // asking it for a password first.
-        if (Gate.IsPasswordSet && await IsUnlockedAsync())
+        // A locked browser is turned away before it takes the hold, which would close every other
+        // browser's dialogs for nothing.
+        if (!await IsUnlockedAsync())
+        {
+            RefuseDownloadAsLocked();
+            return;
+        }
+
+        if (await TakeHoldAsync(LockoutActivity.Backup) is { } refusal)
+        {
+            _backupStatus = refusal;
+            return;
+        }
+
+        // The answer that counts: no password can be set or changed from here on.
+        if (!await IsUnlockedAsync())
+        {
+            RefuseDownloadAsLocked();
+            return;
+        }
+
+        if (Gate.IsPasswordSet)
         {
             OpenDialog(Confirming.Download);
             return;
@@ -800,13 +994,26 @@
         await DownloadBackupAsync();
     }
 
+    private void RefuseDownloadAsLocked()
+    {
+        ReleaseHold();
+        CloseDialog();
+        _backupStatus = "HostPinger is locked — unlock it to download a backup.";
+        _isUnlocked = false;
+    }
+
     private async Task DownloadBackupAsync()
     {
+        // Without the hold there is nothing to go on with: it ran out, which has closed the
+        // overlay, and this is a press that raced that.
+        if (_hold is not { Activity: LockoutActivity.Backup } hold)
+        {
+            return;
+        }
+
         if (!await IsUnlockedAsync())
         {
-            CloseDialog();
-            _backupStatus = "HostPinger is locked — unlock it to download a backup.";
-            _isUnlocked = false;
+            RefuseDownloadAsLocked();
             return;
         }
 
@@ -831,8 +1038,12 @@
         string? failure = null;
         try
         {
-            // Progress<T> hands each report to the circuit, as the page's own events are.
+            // The hold is the backup's from here, which gives it back once the copy is written:
+            // the download itself is outside it. Progress<T> hands each report to the circuit, as
+            // the page's own events are.
+            _hold = null;
             snapshotPath = await Backup.CreateSnapshotAsync(
+                hold,
                 new Progress<double>(fraction =>
                 {
                     if (!preparation.IsCancellationRequested)
@@ -851,6 +1062,8 @@
         }
         finally
         {
+            // For a way out before the backup took it over.
+            hold.Dispose();
             if (_preparation == preparation)
             {
                 _preparation = null;
@@ -894,10 +1107,12 @@
     }
 
     /// <summary>
-    /// Opens the overlay on the current password while one is set, before any file is chosen, so
-    /// that a refusal costs nobody a trip through the file picker, and otherwise on the step that
-    /// says what a restore replaces and offers the picker. Never straight to the picker: choosing
-    /// a file starts the restore, so that step is the only warning there is.
+    /// Takes the lockout's hold, which keeps every browser from changing anything until the
+    /// restore has ended, and opens the overlay: on the current password while one is set, before
+    /// any file is chosen, so that a refusal costs nobody a trip through the file picker, and
+    /// otherwise on the step that says what a restore replaces and offers the picker. Never
+    /// straight to the picker: choosing a file starts the restore, so that step is the only
+    /// warning there is.
     /// </summary>
     /// <remarks>
     /// The overlay does not hold the keyboard in, so this and Download backup can be pressed from
@@ -906,11 +1121,13 @@
     /// </remarks>
     private async Task RequestRestoreAsync()
     {
-        if (IsRestoreUnderWay)
+        if (IsRestoreUnderWay || _preparation is not null)
         {
             return;
         }
 
+        // A locked browser is turned away before it takes the hold, which would close every other
+        // browser's dialogs for nothing.
         if (!await IsUnlockedAsync())
         {
             RefuseRestoreAsLocked();
@@ -918,6 +1135,22 @@
         }
 
         CancelRestore();
+        CloseDialog();
+        _restoreStatus = null;
+        if (await TakeHoldAsync(LockoutActivity.Restore) is { } refusal)
+        {
+            RefuseRestore(refusal);
+            return;
+        }
+
+        // The answer that counts: no password can be set or changed from here until the restore
+        // has ended, so a browser unlocked now is still unlocked when the database is replaced.
+        if (!await IsUnlockedAsync())
+        {
+            RefuseRestoreAsLocked();
+            return;
+        }
+
         OpenDialog(Gate.IsPasswordSet ? Confirming.RestorePassword : Confirming.RestoreFile);
     }
 
@@ -941,9 +1174,15 @@
         {
             await RestoreFileAsync(file);
         }
+        else if (_hold?.TryStartWaiting() == true)
+        {
+            // A step of its own, with the whole wait to itself.
+            OpenDialog(Confirming.RestoreFile);
+        }
         else
         {
-            OpenDialog(Confirming.RestoreFile);
+            // The hold ran out as the password was being checked.
+            RefuseRestore("The restore was left waiting too long, so it was let go of. Start it again.");
         }
     }
 
@@ -975,13 +1214,23 @@
 
         _restoreFile = null;
         _restorePasswordGiven = false;
+
+        // With the steps goes the hold they were taken under, and with the hold whatever was
+        // asked under it: every browser can change things again.
+        ReleaseHold();
     }
 
     private void RefuseRestoreAsLocked()
     {
-        _restoreStatus = "HostPinger is locked — unlock it to restore a backup.";
-        _isRestoreRefused = true;
+        RefuseRestore("HostPinger is locked — unlock it to restore a backup.");
         _isUnlocked = false;
+    }
+
+    /// <summary>Leaves the restore before it has started, and says why beside its button.</summary>
+    private void RefuseRestore(string why)
+    {
+        _restoreStatus = why;
+        _isRestoreRefused = true;
         CancelRestore();
         CloseDialog();
     }
@@ -1027,8 +1276,9 @@
         {
             _restoring?.Cancel();
         }
-        else if (_confirming != Confirming.Download)
+        else
         {
+            // Gives the hold back, a download's as well as a restore's.
             CancelRestore();
         }
 
@@ -1139,7 +1389,7 @@
         try
         {
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
-            while (IsWaiting && await timer.WaitForNextTickAsync(_cts.Token))
+            while (IsCounting && await timer.WaitForNextTickAsync(_cts.Token))
             {
                 if (_confirming != Confirming.Nothing)
                 {
@@ -1178,6 +1428,12 @@
     /// <summary>Whether a guess sent now would be turned away without being looked at.</summary>
     private bool IsWaiting => Remaining > TimeSpan.Zero;
 
+    /// <summary>
+    /// Whether the overlay has a second to count: a wait before the next guess is looked at, or a
+    /// step that closes itself when its time runs out.
+    /// </summary>
+    private bool IsCounting => IsWaiting || StepLeft is not null;
+
     /// <summary>What the overlay says above its password box; a wait outranks the refusal it came with.</summary>
     private string? DialogNotice => Remaining is { } left ? PasswordAttempt.Waiting(left) : _dialogError;
 
@@ -1189,17 +1445,41 @@
             return;
         }
 
-        // The overlay's steps ask for the password before the file, but they are only what the
-        // page offers: a file can be put on the hidden input without them, from the browser's
-        // developer tools. This is what holds, and it holds before the upload, so nothing crosses
-        // the network for a restore that would be turned away. The file stays chosen, and the
-        // password step comes straight back here once it is given.
+        // The overlay's steps take the hold and ask for the password before the file, but they
+        // are only what the page offers: a file can be put on the hidden input without them, from
+        // the browser's developer tools, or with the steps left until the hold ran out. This is
+        // what holds, and it holds before the upload, so nothing crosses the network for a
+        // restore that would be turned away. Without the hold it is taken here, and the unlock
+        // asked again under it; the file stays chosen, and the password step comes straight back
+        // here once it is given.
+        if (_hold is not { Activity: LockoutActivity.Restore })
+        {
+            // A current password given under a hold that has gone was given for another restore.
+            ReleaseHold();
+            _restorePasswordGiven = false;
+            if (await TakeHoldAsync(LockoutActivity.Restore) is { } refusal)
+            {
+                RefuseRestore(refusal);
+                return;
+            }
+
+            if (!await IsUnlockedAsync())
+            {
+                RefuseRestoreAsLocked();
+                return;
+            }
+        }
+
         if (Gate.IsPasswordSet && !_restorePasswordGiven)
         {
             OpenDialog(Confirming.RestorePassword);
             return;
         }
 
+        // The hold is the restore's from here, which gives it back when it ends.
+        var hold = _hold!;
+        _hold = null;
+        _handedOver = hold;
         OpenDialog(Confirming.Restore);
         _isRestoring = true;
         ShowStep("Uploading the backup…", 0);
@@ -1214,7 +1494,7 @@
             // of it is read.
             await using var source = file.OpenReadStream(MaxRestoreUploadBytes, restoring.Token);
             result = await Backup.RestoreUploadAsync(
-                source, file.Size, AskBackupPasswordAsync, new Progress<RestoreProgress>(ShowRestoreStep), restoring.Token);
+                hold, source, file.Size, AskBackupPasswordAsync, new Progress<RestoreProgress>(ShowRestoreStep), restoring.Token);
         }
         catch (OperationCanceledException) when (restoring.IsCancellationRequested)
         {
@@ -1232,7 +1512,10 @@
         finally
         {
             // The overlay stays up, saying it is restoring, until here, and then says what came
-            // of it.
+            // of it. The restore has given the hold back by now; this is for a way out before it
+            // took it over, the browser failing to open the file.
+            hold.Dispose();
+            _handedOver = null;
             _restoring = null;
             _isRestoring = false;
             CancelRestore();
@@ -1409,7 +1692,14 @@
 
     // Cancelled rather than disposed, because a read can land after the page has gone; see PageReads.
     // Also what stops the overlay's countdown, if one is running.
-    public void Dispose() => _cts.Cancel();
+    // A hold this page still has goes back with it; one handed to a backup or a restore ends with
+    // that, which the cancel stops.
+    public void Dispose()
+    {
+        Lockout.Changed -= OnLockoutChanged;
+        _cts.Cancel();
+        ReleaseHold();
+    }
 
     /// <summary>What the overlay is open for, and for a restore, which step of it.</summary>
     private enum Confirming

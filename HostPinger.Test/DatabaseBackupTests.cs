@@ -1642,55 +1642,65 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// The wait is for each answer rather than for them all, so somebody still trying gets the
-        /// whole of it again. The first answer outlasts its wait and comes anyway, the way one
-        /// typed at the last moment can.
+        /// The wait is for the step, not for each answer: every browser is kept from changing
+        /// anything while it lasts, so a run of wrong answers must not draw it out. The first
+        /// answer is wrong and comes with most of the wait gone; the second is never given, and is
+        /// let go of when the one wait runs out rather than a whole wait later.
         /// </summary>
         [Test]
-        public async Task RestoreUpload_WaitsAfreshForEachAnswer()
+        public async Task RestoreUpload_WaitsOnceForAllTheAnswers()
         {
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
             var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)));
-            var backup = WaitingForAPassword(TimeSpan.FromMilliseconds(500));
+            var wait = TimeSpan.FromMilliseconds(1500);
+            var backup = WaitingForAPassword(wait);
             var asked = 0;
-            bool? outOfTimeWhenAskedAgain = null;
+            var firstAsked = DateTimeOffset.MinValue;
+            var letGo = DateTimeOffset.MinValue;
 
             var result = await backup.RestoreUploadAsync(
                 upload,
                 upload.Size,
                 async (_, cancellationToken) =>
                 {
-                    if (++asked > 1)
+                    if (++asked == 1)
                     {
-                        outOfTimeWhenAskedAgain = cancellationToken.IsCancellationRequested;
-                        return BackupPassword;
+                        firstAsked = DateTimeOffset.UtcNow;
+                        await Task.Delay(1000, cancellationToken);
+                        return "not the backup's password";
                     }
 
-                    var runOut = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                    await using (cancellationToken.Register(() => runOut.TrySetResult()))
+                    try
                     {
-                        await runOut.Task.WaitAsync(Patience);
+                        await Task.Delay(Patience, cancellationToken);
+                    }
+                    finally
+                    {
+                        letGo = DateTimeOffset.UtcNow;
                     }
 
-                    return "not the backup's password";
-                });
+                    return BackupPassword;
+                }).WaitAsync(Patience);
 
             Assert.Multiple(async () =>
             {
-                Assert.That(outOfTimeWhenAskedAgain, Is.False);
-                Assert.That(result.Refusal, Is.Null);
-                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example" }));
+                Assert.That(asked, Is.EqualTo(2), "the wrong answer was asked about again");
+                Assert.That(result.Refusal, Is.EqualTo(
+                    "The backup's password was not given in time, so the upload was let go of and nothing was replaced."));
+                Assert.That(letGo - firstAsked, Is.LessThan(wait + TimeSpan.FromMilliseconds(900)),
+                    "let go of when the one wait ran out, not a second wait after the wrong answer");
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }));
             });
         }
 
         /// <summary>
-        /// The upload waits for its password in the restore's turn, so another backup or restore is
-        /// turned away meanwhile, on the room counted for this one. Only that waits on it: the
-        /// swap is yet to come, so the ping rounds and the pages go on until the password is given.
+        /// The upload waits for its password under the restore's hold, so another backup or restore
+        /// is turned away meanwhile, on the room counted for this one. The ping rounds do not wait
+        /// on it: the swap is yet to come, so they go on until the password is given.
         /// </summary>
         [TestCase("restore")]
         [TestCase("backup")]
-        public async Task WhileARestoreWaitsForItsPassword_AnotherIsTurnedAwayAndEverythingElseGoesOn(string asked)
+        public async Task WhileARestoreWaitsForItsPassword_AnotherIsTurnedAwayAndTheRoundsGoOn(string asked)
         {
             await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
             var gate = new MaintenanceGate();
@@ -1714,7 +1724,7 @@ namespace HostPinger.Test
                 ? (await backup.RestoreUploadAsync(second, second.Size, NeverAsked)).Refusal
                 : (await Assert.ThrowsAsync<IOException>(() => backup.CreateSnapshotAsync()))!.Message;
 
-            // What a round takes, and a page's write, which would each wait out the swap.
+            // What a round takes, and its write, which would wait out the swap.
             using var patience = new CancellationTokenSource(Patience);
             using (await gate.AcquireAsync(patience.Token))
             {
@@ -1940,11 +1950,270 @@ namespace HostPinger.Test
 
             Assert.Multiple(async () =>
             {
-                Assert.That(refusal, Is.EqualTo("A backup is being written. Try again once it has finished."));
+                Assert.That(refusal, Is.EqualTo("A backup is under way. Try again once it has finished."));
                 Assert.That(upload.Position, Is.Zero, "nothing of the upload was read");
                 Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }), "nothing was restored");
                 Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-backup-*"), Is.EqualTo(new[] { snapshot }),
                     "and no second snapshot written");
+            });
+        }
+
+        /// <summary>
+        /// From a restore's start to its end, nothing a page would change is changed: a host, a
+        /// setting, the size limit and, most of all, the password, which a restore must not replace
+        /// if it was set after the restore started. Each is refused in the words the page shows,
+        /// and the restore goes through on what was there when it started.
+        /// </summary>
+        [Test]
+        public async Task WhileARestoreIsUnderWay_NothingIsChangedFromAPage()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var (lockout, store, backup, hosts, sizeLimit) = Sharing();
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", hash: null)), hold: true);
+            var restoring = backup.RestoreUploadAsync(upload, upload.Size, NeverAsked);
+            await upload.Held.Task.WaitAsync(Patience);
+            const string Refused = "A restore is under way. Nothing can be changed until it has finished.";
+
+            var host = await Assert.ThrowsAsync<ChangeRefusedException>(() => hosts.AddAsync("new", "new.example", isEnabled: true).WaitAsync(Patience));
+            var pause = await Assert.ThrowsAsync<ChangeRefusedException>(() => hosts.SetEnabledAsync(1, isEnabled: false).WaitAsync(Patience));
+            var edit = await Assert.ThrowsAsync<ChangeRefusedException>(() => hosts.UpdateAsync(1, "edited", "edited.example", isEnabled: true).WaitAsync(Patience));
+            var delete = await Assert.ThrowsAsync<ChangeRefusedException>(() => hosts.DeleteAsync(1).WaitAsync(Patience));
+            var setting = await Assert.ThrowsAsync<ChangeRefusedException>(() => store.SaveAsync(new PingerSettingsUpdate { IntervalSeconds = 99 }).WaitAsync(Patience));
+            var password = await Assert.ThrowsAsync<ChangeRefusedException>(() => store.SavePasswordHashAsync("set-meanwhile").WaitAsync(Patience));
+            var limit = await sizeLimit.SaveAsync(1);
+            var whileRestoring = (await AddressesAsync(_dbPath), store.PasswordHash, lockout.Active);
+            upload.Release();
+            var result = await restoring.WaitAsync(Patience);
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(
+                    new[] { host!.Message, pause!.Message, edit!.Message, delete!.Message, setting!.Message, password!.Message, limit },
+                    Is.All.EqualTo(Refused));
+                Assert.That(whileRestoring.Item1, Is.EqualTo(new[] { "current.example" }), "nothing reached the database");
+                Assert.That(whileRestoring.PasswordHash, Is.Null.Or.Empty, "and no password was set");
+                Assert.That(whileRestoring.Active, Is.EqualTo(LockoutActivity.Restore));
+                Assert.That(result.Refusal, Is.Null);
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example" }));
+                Assert.That(lockout.Active, Is.Null, "the hold was given back");
+            });
+
+            // And a change goes through again.
+            await store.SaveAsync(new PingerSettingsUpdate { IntervalSeconds = 99 });
+            Assert.That(store.CurrentPinger.IntervalSeconds, Is.EqualTo(99));
+        }
+
+        /// <summary>
+        /// A backup keeps the pages from changing anything too, for as long as its copy is
+        /// written, and no longer: the file is downloaded with the hold already given back.
+        /// </summary>
+        [Test]
+        public async Task WhileABackupIsBeingWritten_NothingIsChangedFromAPage()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var (lockout, store, backup, hosts, _) = Sharing();
+            using var held = new ManualResetEventSlim();
+            var reporting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var writing = backup.CreateSnapshotAsync(new Recorder<double>(fraction =>
+            {
+                if (fraction == 1)
+                {
+                    reporting.TrySetResult();
+                    held.Wait(Patience);
+                }
+            }));
+            await reporting.Task.WaitAsync(Patience);
+
+            var host = await Assert.ThrowsAsync<ChangeRefusedException>(() => hosts.SetEnabledAsync(1, isEnabled: false).WaitAsync(Patience));
+            var password = await Assert.ThrowsAsync<ChangeRefusedException>(() => store.SavePasswordHashAsync("set-meanwhile").WaitAsync(Patience));
+            held.Set();
+            var snapshot = await writing.WaitAsync(Patience);
+
+            Assert.Multiple(() =>
+            {
+                const string Refused = "A backup is under way. Nothing can be changed until it has finished.";
+                Assert.That(new[] { host!.Message, password!.Message }, Is.All.EqualTo(Refused));
+                Assert.That(File.Exists(snapshot));
+                Assert.That(lockout.Active, Is.Null, "the hold was given back with the copy written");
+            });
+
+            // And a change goes through again.
+            await store.SavePasswordHashAsync("set-afterwards");
+            Assert.That(store.PasswordHash, Is.EqualTo("set-afterwards"));
+        }
+
+        /// <summary>
+        /// A page takes the hold when the button is pressed and hands it to the restore, which
+        /// works under that one rather than asking for another, and gives it back when it is done.
+        /// </summary>
+        [Test]
+        public async Task RestoreUpload_WorksUnderTheHoldHandedInAndGivesItBack()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var (lockout, _, backup, _, _) = Sharing();
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", hash: null)));
+            var hold = (await lockout.TakeAsync(LockoutActivity.Restore)).Hold!;
+
+            var result = await backup.RestoreUploadAsync(hold, upload, upload.Size, NeverAsked).WaitAsync(Patience);
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(result.Refusal, Is.Null);
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "backup.example" }));
+                Assert.That(hold.Ended.IsCancellationRequested, Is.True);
+                Assert.That(lockout.Active, Is.Null);
+            });
+        }
+
+        /// <summary>
+        /// A hold left waiting until it ran out has let every browser change things again, so
+        /// what was asked under it no longer holds, and a restore handed it replaces nothing.
+        /// </summary>
+        [Test]
+        public async Task RestoreUpload_RefusesAHoldLeftWaitingTooLong()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var lockout = new ChangeLockout { WaitLimit = TimeSpan.FromMilliseconds(50) };
+            var backup = new DatabaseBackup(
+                new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries, NullLogger<DatabaseBackup>.Instance, lockout);
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", hash: null)));
+            var hold = (await lockout.TakeAsync(LockoutActivity.Restore)).Hold!;
+            var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var registration = hold.Ended.Register(() => ended.TrySetResult());
+            await ended.Task.WaitAsync(Patience);
+
+            var result = await backup.RestoreUploadAsync(hold, upload, upload.Size, NeverAsked).WaitAsync(Patience);
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(result.Refusal, Is.EqualTo(
+                    "The restore was left waiting too long, so it was let go of and nothing was replaced."));
+                Assert.That(upload.Position, Is.Zero, "nothing of the upload was read");
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }));
+            });
+        }
+
+        /// <summary>A restore cancelled before it has started on the hold handed in still gives it back.</summary>
+        [Test]
+        public async Task RestoreUpload_CancelledGivesTheHoldHandedInBack()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var (lockout, _, backup, _, _) = Sharing();
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", hash: null)), hold: true);
+            var hold = (await lockout.TakeAsync(LockoutActivity.Restore)).Hold!;
+            using var leaving = new CancellationTokenSource();
+
+            var restoring = backup.RestoreUploadAsync(hold, upload, upload.Size, NeverAsked, cancellationToken: leaving.Token);
+            await upload.Held.Task.WaitAsync(Patience);
+            await leaving.CancelAsync();
+            upload.Release();
+
+            await Assert.CatchAsync<OperationCanceledException>(() => restoring.WaitAsync(Patience));
+            Assert.Multiple(async () =>
+            {
+                Assert.That(lockout.Active, Is.Null);
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "current.example" }));
+            });
+        }
+
+        /// <summary>
+        /// The same for a backup: written under the hold the page took at the button, which is
+        /// given back with the copy done, and refused under one that ran out.
+        /// </summary>
+        [Test]
+        public async Task CreateSnapshot_WorksUnderTheHoldHandedInAndRefusesOneLeftWaitingTooLong()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var lockout = new ChangeLockout { WaitLimit = TimeSpan.FromMilliseconds(300) };
+            var backup = new DatabaseBackup(
+                new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries, NullLogger<DatabaseBackup>.Instance, lockout);
+
+            var hold = (await lockout.TakeAsync(LockoutActivity.Backup)).Hold!;
+            var snapshot = await backup.CreateSnapshotAsync(hold).WaitAsync(Patience);
+            var givenBack = lockout.Active is null && hold.Ended.IsCancellationRequested;
+
+            var left = (await lockout.TakeAsync(LockoutActivity.Backup)).Hold!;
+            var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var registration = left.Ended.Register(() => ended.TrySetResult());
+            await ended.Task.WaitAsync(Patience);
+            var refused = await Assert.ThrowsAsync<IOException>(() => backup.CreateSnapshotAsync(left));
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(File.Exists(snapshot));
+                Assert.That(givenBack, Is.True);
+                Assert.That(refused!.Message, Is.EqualTo(
+                    "The backup was left waiting too long, so it was let go of and nothing was written."));
+                Assert.That(Directory.EnumerateFiles(_directory, "hostpinger-backup-*"), Is.EqualTo(new[] { snapshot }));
+            });
+        }
+
+        /// <summary>
+        /// The hosts of the restored file reach the pages before the hold is given back, which is
+        /// when the pages get their controls back. Ids are not carried from one file to the other,
+        /// so a page handed its controls first could change a row it drew from the file just
+        /// replaced, and land on whichever host has that id in this one.
+        /// </summary>
+        [Test]
+        public async Task Restore_HandsThePagesTheRestoredHostsBeforeItGivesTheHoldBack()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            await _summaries.LoadAsync();
+            var (lockout, _, backup, _, _) = Sharing();
+            var heard = new List<string>();
+            _summaries.Updated += summary =>
+            {
+                lock (heard)
+                {
+                    heard.Add($"hosts: {string.Join(", ", summary.Rows.Select(row => row.Host.Address))}");
+                }
+            };
+            lockout.Changed += () =>
+            {
+                lock (heard)
+                {
+                    heard.Add(lockout.Active is null ? "given back" : "taken");
+                }
+            };
+            var upload = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", hash: null)));
+
+            var result = await backup.RestoreUploadAsync(upload, upload.Size, NeverAsked).WaitAsync(Patience);
+
+            Assert.That(result.Refusal, Is.Null);
+            Assert.That(heard, Is.EqualTo(new[] { "taken", "hosts: backup.example", "given back" }));
+        }
+
+        /// <summary>
+        /// After a restore every browser has to be unlocked with the password the backup brought,
+        /// even where that is the very password already in force, as it is for a backup of this
+        /// install: each restore stamps the backup anew, so an unlock issued before it no longer
+        /// counts. The stamp is in the restored database, so it holds across a restart too.
+        /// </summary>
+        [Test]
+        public async Task Restore_ChangesWhatAnUnlockIsStampedWithEvenForTheSamePassword()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            await StagePasswordAsync(_options, BackupHash);
+            await _store.LoadAsync();
+            var before = _store.UnlockStamp;
+
+            var first = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash)));
+            await _backup.RestoreUploadAsync(first, first.Size, Answering(BackupPassword)).WaitAsync(Patience);
+            var afterFirst = _store.UnlockStamp;
+            var second = new UploadStream(await File.ReadAllBytesAsync(await BackupWithAsync("backup.example", BackupHash, "second.db")));
+            await _backup.RestoreUploadAsync(second, second.Size, Answering(BackupPassword)).WaitAsync(Patience);
+            var afterSecond = _store.UnlockStamp;
+
+            var (restarted, _) = ConfiguredWith(null);
+            await restarted.LoadAsync();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(_store.PasswordHash, Is.EqualTo(BackupHash), "the same password throughout");
+                Assert.That(before, Is.Not.Empty);
+                Assert.That(afterFirst, Is.Not.EqualTo(before));
+                Assert.That(afterSecond, Is.Not.EqualTo(afterFirst).And.Not.EqualTo(before));
+                Assert.That(restarted.UnlockStamp, Is.EqualTo(afterSecond), "read back from the restored file");
             });
         }
 
@@ -2038,12 +2307,36 @@ namespace HostPinger.Test
             return (store, new DatabaseBackup(new PingerPaths(_dbPath), new TestDb.Factory(_options), store, new MaintenanceGate(), _fileGate, _summaries, NullLogger<DatabaseBackup>.Instance));
         }
 
-        /// <summary>A restore that waits <paramref name="wait"/> for each answer to a backup's password.</summary>
+        /// <summary>
+        /// A backup with the stores a page changes things through, all sharing one lockout, as the
+        /// application's do.
+        /// </summary>
+        private (ChangeLockout Lockout, UserSettingsStore Store, DatabaseBackup Backup, HostStore Hosts, DatabaseSizeLimit SizeLimit) Sharing()
+        {
+            var lockout = new ChangeLockout();
+            var store = new UserSettingsStore(
+                new TestDb.Factory(_options),
+                new TestOptionsMonitor<PingerOptions>(new PingerOptions()),
+                new TestOptionsMonitor<SecurityOptions>(new SecurityOptions()),
+                lockout);
+            var backup = new DatabaseBackup(
+                new PingerPaths(_dbPath), new TestDb.Factory(_options), store, new MaintenanceGate(), _fileGate, _summaries, NullLogger<DatabaseBackup>.Instance, lockout);
+            var hosts = new HostStore(new TestDb.Factory(_options), _summaries, NullLogger<HostStore>.Instance, lockout: lockout);
+            var sizeLimit = new DatabaseSizeLimit(new PingerPaths(_dbPath), store, NullLogger<DatabaseSizeLimit>.Instance);
+            return (lockout, store, backup, hosts, sizeLimit);
+        }
+
+        /// <summary>A restore that waits <paramref name="wait"/> at a backup's password, for all the answers together.</summary>
         private DatabaseBackup WaitingForAPassword(TimeSpan wait) =>
-            new(new PingerPaths(_dbPath), new TestDb.Factory(_options), _store, new MaintenanceGate(), _fileGate, _summaries, NullLogger<DatabaseBackup>.Instance)
-            {
-                PasswordWait = wait,
-            };
+            new(
+                new PingerPaths(_dbPath),
+                new TestDb.Factory(_options),
+                _store,
+                new MaintenanceGate(),
+                _fileGate,
+                _summaries,
+                NullLogger<DatabaseBackup>.Instance,
+                new ChangeLockout { WaitLimit = wait });
 
         /// <summary>Somebody who gives <paramref name="password"/> every time they are asked.</summary>
         private static Func<string?, CancellationToken, Task<string>> Answering(string password) =>

@@ -1,5 +1,6 @@
 using HostPinger.Core.Data;
 using HostPinger.Core.Options;
+using HostPinger.Core.Services;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
@@ -174,6 +175,68 @@ namespace HostPinger.Test
             await _store.SavePasswordHashAsync(null);
 
             Assert.That(_store.PasswordHash, Is.Empty);
+        }
+
+        /// <summary>
+        /// While a backup or a restore is under way, neither a setting nor the password is saved:
+        /// a restore must not replace a password that was set after it started. Refused before the
+        /// database or the settings in force are touched.
+        /// </summary>
+        [Test]
+        public async Task Saves_AreRefusedWhileARestoreIsUnderWay()
+        {
+            var lockout = new ChangeLockout();
+            var store = new UserSettingsStore(new TestDb.Factory(_options), _pingerDefaults, _securityDefaults, lockout);
+            using var hold = (await lockout.TakeAsync(LockoutActivity.Restore)).Hold!;
+
+            var setting = await Assert.ThrowsAsync<ChangeRefusedException>(
+                () => store.SaveAsync(new PingerSettingsUpdate { IntervalSeconds = 45 }));
+            var password = await Assert.ThrowsAsync<ChangeRefusedException>(() => store.SavePasswordHashAsync("a-hash"));
+
+            await using var db = new HostPingerDbContext(_options);
+            Assert.Multiple(async () =>
+            {
+                const string Refused = "A restore is under way. Nothing can be changed until it has finished.";
+                Assert.That(new[] { setting!.Message, password!.Message }, Is.All.EqualTo(Refused));
+                Assert.That(store.CurrentPinger.IntervalSeconds, Is.EqualTo(new PingerOptions().IntervalSeconds));
+                Assert.That(store.PasswordHash, Is.Null.Or.Empty);
+                Assert.That(await db.UserSettings.CountAsync(), Is.Zero, "nothing was written");
+            });
+        }
+
+        /// <summary>
+        /// What an unlock is stamped with: nothing while no password is in force, and otherwise a
+        /// fingerprint that moves with the password and with the restore that put the database in
+        /// place, so that either stops the unlocks issued before it from counting.
+        /// </summary>
+        [Test]
+        public async Task UnlockStamp_MovesWithThePasswordAndWithARestore()
+        {
+            var none = _store.UnlockStamp;
+            await _store.SavePasswordHashAsync("first-hash");
+            var first = _store.UnlockStamp;
+            await _store.SavePasswordHashAsync("second-hash");
+            var second = _store.UnlockStamp;
+
+            // What a restore does: the backup's rows go in force, the stamp it wrote among them.
+            _store.PutInForce(new Dictionary<string, string>
+            {
+                [UserSettingsStore.PasswordHashKey] = "second-hash",
+                [UserSettingsStore.RestoreStampKey] = "0123456789ABCDEF",
+            });
+            var restored = _store.UnlockStamp;
+            _store.PutInForce(new Dictionary<string, string> { [UserSettingsStore.RestoreStampKey] = "0123456789ABCDEF" });
+            var restoredWithout = _store.UnlockStamp;
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(none, Is.Empty);
+                Assert.That(first, Is.Not.Empty);
+                Assert.That(second, Is.Not.EqualTo(first));
+                Assert.That(restored, Is.Not.EqualTo(second), "the same password, restored");
+                Assert.That(restored, Does.StartWith(second), "the password's own fingerprint is still what it starts from");
+                Assert.That(restoredWithout, Is.Empty, "a restore that brings no password leaves nothing to unlock");
+            });
         }
 
         private UserSettingsStore CreateStore() =>

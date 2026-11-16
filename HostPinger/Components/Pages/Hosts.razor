@@ -10,6 +10,7 @@
 @inject IJSRuntime JS
 @inject PasswordGate Gate
 @inject LockPrompt Prompt
+@inject ChangeLockout Lockout
 @implements IDisposable
 
 @* The landing page, so the bare product name rather than "HostPinger - Hosts". *@
@@ -21,7 +22,7 @@
     <span class="text-muted">
         @if (_rows.Count == 0)
         {
-            @(_isUnlocked ? "No hosts yet — add one to start monitoring." : "No hosts yet.")
+            @(CanChange ? "No hosts yet — add one to start monitoring." : "No hosts yet.")
         }
         else
         {
@@ -33,9 +34,14 @@
             <text> <button type="button" class="btn btn-link btn-sm p-0 align-baseline"
                           @onclick="() => Prompt.Request()">Unlock</button> to add, edit or pause hosts.</text>
         }
+        @if (_underWay is { } underWay)
+        {
+            @* Said here as well as in the top row, beside the controls it has taken away. *@
+            <span class="lockout-notice"> @ChangeLockout.Describe(underWay), so hosts cannot be changed until it has finished.</span>
+        }
     </span>
     @* flex-shrink-0 so a narrow window wraps the hint rather than squashing the button. *@
-    @if (_isUnlocked)
+    @if (CanChange)
     {
         <button class="btn btn-primary btn-sm flex-shrink-0" @onclick="BeginAdd">Add host</button>
     }
@@ -154,14 +160,14 @@
                             @* Shown either way, so a locked reader can still see what is paused. *@
                             <div class="form-check form-switch">
                                 <input class="form-check-input" type="checkbox" role="switch"
-                                       disabled="@(!_isUnlocked)"
+                                       disabled="@(!CanChange)"
                                        title="@PauseTitle(row.Host.IsEnabled)"
                                        checked="@row.Host.IsEnabled"
                                        @onchange="e => SetEnabledAsync(row.Host.Id, (bool)e.Value!)" />
                             </div>
                         </td>
                         <td class="actions">
-                            @if (_isUnlocked)
+                            @if (CanChange)
                             {
                                 <button class="btn btn-sm btn-outline-primary" @onclick="() => BeginEdit(row.Host)" @onclick:stopPropagation>Edit</button>
                             }
@@ -295,6 +301,10 @@
     // that a password set or removed elsewhere reaches the controls within a few seconds.
     private bool _isUnlocked;
 
+    // Which of a backup and a restore is under way, from any browser, and null while neither is.
+    // Nothing can be changed meanwhile, so the controls are held back as they are while locked.
+    private LockoutActivity? _underWay;
+
     // Bumped to have the rows rebuilt rather than diffed; see the key on the row.
     private int _rowGeneration;
 
@@ -327,8 +337,13 @@
         if (RendererInfo.IsInteractive)
         {
             Summaries.Updated += OnSummariesUpdated;
+
+            // Listening before looking, so that one starting in between is not missed.
+            Lockout.Changed += OnLockoutChanged;
             _ = AutoRefreshAsync();
         }
+
+        _underWay = Lockout.Active;
     }
 
     /// <summary>
@@ -384,6 +399,31 @@
         Apply(summary);
         StateHasChanged();
     });
+
+    /// <summary>
+    /// Takes the start and the end of a backup or a restore, raised on whichever thread took the
+    /// hold or gave it back. At the start the dialog is closed, whatever was typed into it: its
+    /// change could only be refused, and after a restore the id it holds would name whichever
+    /// host has that id in the restored file. At the end the controls come back, and by then a
+    /// restore has already handed this page the restored hosts, which were queued ahead of this.
+    /// </summary>
+    private void OnLockoutChanged() => _ = InvokeAsync(() =>
+    {
+        _underWay = Lockout.Active;
+        if (_underWay is not null)
+        {
+            CloseForm();
+        }
+
+        StateHasChanged();
+    });
+
+    /// <summary>
+    /// Whether the controls that change hosts are offered: to an unlocked browser, while no backup
+    /// or restore is under way. A courtesy to the reader, as hiding them from a locked browser is:
+    /// what decides whether anything is written is asked again in every handler, and by the store.
+    /// </summary>
+    private bool CanChange => _isUnlocked && _underWay is null;
 
     /// <summary>
     /// Takes a summary as the rows on screen, in this page's order: the rows are every page's, and
@@ -692,9 +732,11 @@
         await JS.InvokeVoidAsync("history.replaceState", null, string.Empty, address);
     }
 
-    private string PauseTitle(bool isEnabled) => _isUnlocked
-        ? isEnabled ? "Pause monitoring" : "Resume monitoring"
-        : "Unlock to pause or resume monitoring";
+    private string PauseTitle(bool isEnabled) => _underWay is { } underWay
+        ? $"{ChangeLockout.Describe(underWay)}, so nothing can be changed until it has finished"
+        : _isUnlocked
+            ? isEnabled ? "Pause monitoring" : "Resume monitoring"
+            : "Unlock to pause or resume monitoring";
 
     private static string RelativeTime(DateTime timestampUtc)
     {
@@ -714,6 +756,7 @@
     public void Dispose()
     {
         Summaries.Updated -= OnSummariesUpdated;
+        Lockout.Changed -= OnLockoutChanged;
         _cts.Cancel();
     }
 

@@ -53,6 +53,30 @@ namespace HostPinger.Test
             Directory.Delete(_directory, recursive: true);
         }
 
+        /// <summary>
+        /// A read handed on after a later one has been is dropped. The loop's read of a file can
+        /// be handed on after a restore has replaced that file and handed on its own read of the
+        /// restored one; the pages must not be put back to the replaced file's hosts, whose ids
+        /// mean other hosts now, with their controls just given back.
+        /// </summary>
+        [Test]
+        public void Publish_DropsAReadHandedOnAfterALaterOne()
+        {
+            var earlier = new HostSummarySnapshot([], MissesToDown: 1);
+            var later = new HostSummarySnapshot([], MissesToDown: 2);
+            var heard = new List<HostSummarySnapshot>();
+            _cache.Updated += heard.Add;
+
+            _cache.Publish(later, sequence: 2);
+            _cache.Publish(earlier, sequence: 1);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(_cache.Current, Is.SameAs(later));
+                Assert.That(heard, Is.EqualTo(new[] { later }));
+            });
+        }
+
         /// <summary>What the first page after a start draws: the hosts as they stand, read before it asks.</summary>
         [Test]
         public async Task LoadAsync_ReadsTheHostsAsTheyStand()

@@ -23,7 +23,8 @@ namespace HostPinger.Core.Options
     public class UserSettingsStore(
         IDbContextFactory<HostPingerDbContext> dbFactory,
         IOptionsMonitor<PingerOptions> pingerDefaults,
-        IOptionsMonitor<SecurityOptions> securityDefaults)
+        IOptionsMonitor<SecurityOptions> securityDefaults,
+        ChangeLockout? lockout = null)
     {
         /// <summary>
         /// The row holding the hash of the web UI password, which <see cref="RemovePasswordAsync"/>
@@ -35,7 +36,16 @@ namespace HostPinger.Core.Options
         /// <summary>The row holding the size limit, which a restore lowers in a backup this disk cannot hold.</summary>
         internal static readonly string MaxDatabaseSizeMbKey = PingerKey(nameof(PingerOptions.MaxDatabaseSizeMb));
 
+        /// <summary>
+        /// The row a restore writes into the backup it puts in place, a new value each time, which
+        /// every unlock is stamped with; see <see cref="UnlockStamp"/>.
+        /// </summary>
+        internal static readonly string RestoreStampKey = $"{SecurityOptions.SectionName}:RestoreStamp";
+
         private readonly SemaphoreSlim _gate = new(1, 1);
+
+        // One of its own where none is shared, which nothing ever takes a hold on.
+        private readonly ChangeLockout _lockout = lockout ?? new ChangeLockout();
 
         /// <summary>Replaced whole on every save and never mutated, so reads take no lock.</summary>
         private Dictionary<string, string> _rows = [];
@@ -100,6 +110,32 @@ namespace HostPinger.Core.Options
         internal async Task<string?> PasswordHashInAsync(HostPingerDbContext db, CancellationToken cancellationToken = default) =>
             PasswordHashUnder(await RowsInAsync(db, cancellationToken));
 
+        /// <summary>
+        /// What an unlock has to have been issued under to count: a fingerprint of the password in
+        /// force, and of the restore that put the database in place. Empty when no password is in
+        /// force. Changing or removing the password changes it, and so does every restore, even of
+        /// a backup that brings the very password already in force, so that after a restore every
+        /// browser has to be unlocked with the password the backup brought.
+        /// </summary>
+        public string UnlockStamp
+        {
+            get
+            {
+                // One snapshot for both, so that a restore landing between two reads cannot pair
+                // one database's password with another's restore.
+                var rows = _rows;
+                var hash = PasswordHashUnder(rows);
+                return string.IsNullOrEmpty(hash)
+                    ? string.Empty
+                    : global::HostPinger.Core.Options.PasswordHash.Stamp(hash) + rows.GetValueOrDefault(RestoreStampKey, string.Empty);
+            }
+        }
+
+        /// <summary>
+        /// Saves the pinger settings <paramref name="update"/> names, which are in force once this
+        /// returns.
+        /// </summary>
+        /// <exception cref="ChangeRefusedException">A backup or a restore is under way.</exception>
         public Task SaveAsync(PingerSettingsUpdate update, CancellationToken cancellationToken = default) =>
             UpdateAsync(changes =>
             {
@@ -145,6 +181,7 @@ namespace HostPinger.Core.Options
         /// that left the application locked, having just signed the person out of it.
         /// </para>
         /// </remarks>
+        /// <exception cref="ChangeRefusedException">A backup or a restore is under way.</exception>
         public Task SavePasswordHashAsync(string? hash, CancellationToken cancellationToken = default) =>
             UpdateAsync(changes => changes[PasswordHashKey] = hash ?? string.Empty, cancellationToken);
 
@@ -204,13 +241,18 @@ namespace HostPinger.Core.Options
         /// <summary>
         /// Writes the edited rows to the database and then to the snapshot, one save at a time.
         /// The snapshot moves second and only if the database accepted the save, so nothing ever
-        /// reads a value that was not stored.
+        /// reads a value that was not stored. Refused while a backup or a restore is under way,
+        /// at the <see cref="ChangeLockout"/>: the password is one of these rows, and a restore
+        /// must not replace one that was set after it started.
         /// </summary>
         private async Task UpdateAsync(Action<Dictionary<string, string>> edit, CancellationToken cancellationToken)
         {
             var changes = new Dictionary<string, string>();
             edit(changes);
 
+            // Before the wait for another save, so that a save waiting there is one a backup or
+            // a restore waits for, rather than one it overtakes.
+            using var pass = _lockout.EnterChange();
             await _gate.WaitAsync(cancellationToken);
             try
             {

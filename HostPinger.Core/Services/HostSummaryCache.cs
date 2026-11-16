@@ -63,6 +63,12 @@ namespace HostPinger.Core.Services
         private SqliteConnection? _connection;
         private DbContextOptions<HostPingerDbContext>? _options;
         private long _dataVersion;
+
+        // How many reads have been made, counted under the connection lock, and the number of the
+        // one last handed to the pages; see Publish.
+        private long _reads;
+        private readonly object _publishLock = new();
+        private long _published;
         private volatile bool _suspended;
         private volatile HostSummarySnapshot _current = new([], 1);
         private bool _failing;
@@ -88,7 +94,7 @@ namespace HostPinger.Core.Services
         {
             if (await ReadAsync(force: true, cancellationToken) is { } read)
             {
-                Publish(read);
+                Publish(read.Summary, read.Sequence);
             }
         }
 
@@ -206,7 +212,7 @@ namespace HostPinger.Core.Services
                 _requested = null;
             }
 
-            HostSummarySnapshot? read;
+            Read? read;
             try
             {
                 read = await ReadAsync(force: false, cancellationToken);
@@ -224,17 +230,17 @@ namespace HostPinger.Core.Services
 
             if (read is not null)
             {
-                Publish(read);
+                Publish(read.Summary, read.Sequence);
             }
 
-            requested?.TrySetResult(read ?? _current);
+            requested?.TrySetResult(read?.Summary ?? _current);
         }
 
         /// <summary>
         /// Reads the summary when <paramref name="force"/> says to, or when data_version or the retry
         /// count has moved since the last read; null when neither has, and while suspended.
         /// </summary>
-        private async Task<HostSummarySnapshot?> ReadAsync(bool force, CancellationToken cancellationToken)
+        private async Task<Read?> ReadAsync(bool force, CancellationToken cancellationToken)
         {
             await _connectionLock.WaitAsync(cancellationToken);
             try
@@ -265,7 +271,10 @@ namespace HostPinger.Core.Services
                 await using var db = new HostPingerDbContext(_options!);
                 var rows = await HostSummary.LoadAsync(db, retryAttempts, cancellationToken);
                 _dataVersion = dataVersion;
-                return new HostSummarySnapshot(rows, missesToDown);
+
+                // Numbered while the connection is this read's alone, so the numbers run in the
+                // order the reads were made; see Publish.
+                return new Read(new HostSummarySnapshot(rows, missesToDown), ++_reads);
             }
             finally
             {
@@ -307,28 +316,50 @@ namespace HostPinger.Core.Services
 
         /// <summary>
         /// Makes <paramref name="read"/> the summary in hand and tells the pages, one at a time, so a
-        /// page that fails to take it cannot keep it from the rest.
+        /// page that fails to take it cannot keep it from the rest. A read handed on after a later
+        /// one has been is dropped, and one at a time, so the pages are never told of an older
+        /// summary after a newer.
         /// </summary>
-        private void Publish(HostSummarySnapshot read)
+        /// <remarks>
+        /// The loop and a restore both read, each on its own thread, and a read is handed on after
+        /// the connection is let go of. Without the numbering, the loop's read of the file a
+        /// restore then replaced could be handed on after the restore's own read of the restored
+        /// one: the pages would draw the replaced file's hosts, with their controls just given
+        /// back, until the loop's next turn, and a change made then by one of those ids would land
+        /// on whichever host has that id in the restored file.
+        /// </remarks>
+        internal void Publish(HostSummarySnapshot read, long sequence)
         {
-            _current = read;
-            if (Updated is not { } updated)
+            lock (_publishLock)
             {
-                return;
-            }
-
-            foreach (var handler in updated.GetInvocationList().Cast<Action<HostSummarySnapshot>>())
-            {
-                try
+                if (sequence < _published)
                 {
-                    handler(read);
+                    return;
                 }
-                catch (Exception ex)
+
+                _published = sequence;
+                _current = read;
+                if (Updated is not { } updated)
                 {
-                    logger.LogWarning(ex, "A page could not take the new host summary.");
+                    return;
+                }
+
+                foreach (var handler in updated.GetInvocationList().Cast<Action<HostSummarySnapshot>>())
+                {
+                    try
+                    {
+                        handler(read);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "A page could not take the new host summary.");
+                    }
                 }
             }
         }
+
+        /// <summary>A summary as read, and which read it was, counted from the first.</summary>
+        private sealed record Read(HostSummarySnapshot Summary, long Sequence);
 
         public override void Dispose()
         {

@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using HostPinger.Core.Options;
 using HostPinger.Security;
 using Microsoft.Data.Sqlite;
@@ -497,7 +498,9 @@ namespace HostPinger.UITest
         /// than going straight to the file picker as it once did. A backup with no password of its
         /// own then goes straight in once it has passed, asking for nothing. The test reaches that
         /// by restoring such a backup over the run's password, which shows the second half first,
-        /// and brings the password back the same way for the fixtures that come after.
+        /// and brings the password back the same way for the fixtures that come after. In between,
+        /// with no password in force, the top row offers to set one, and says a restore is under
+        /// way in the same place once the next one's button is pressed.
         /// </summary>
         [Test]
         public async Task Restore_WithNoPasswordInvolvedStillWarnsAndAsksForNothing()
@@ -524,9 +527,17 @@ namespace HostPinger.UITest
                 await Button(Dialog.Locator(".modal-footer"), "Close").ClickAsync();
                 await Assertions.Expect(Overlay).ToBeHiddenAsync();
 
+                // With no password in force the top row has nothing to lock or unlock, and offers
+                // to set one instead, which keeps the place where a backup or a restore under way
+                // is said.
+                var setPassword = Page.Locator(".top-row").GetByRole(AriaRole.Link, new LocatorGetByRoleOptions { Name = "Set password", Exact = true });
+                await Assertions.Expect(setPassword).ToHaveAttributeAsync("href", "password");
+
                 await ClickUntilAsync(Button("Restore backup…"), Overlay);
                 await AssertTheStepSaysWhatARestoreReplacesAsync();
                 await Assertions.Expect(CurrentPassword).ToHaveCountAsync(0);
+                await Assertions.Expect(Page.Locator(".top-row .lockout-status")).ToHaveTextAsync("Restore in progress");
+                await Assertions.Expect(setPassword).ToHaveCountAsync(0);
 
                 SqliteConnection.ClearAllPools();
                 await ChooseTheBackupAsync(withPassword);
@@ -777,18 +788,17 @@ namespace HostPinger.UITest
         }
 
         /// <summary>
-        /// The step can stay open for minutes, and a password changed from elsewhere meanwhile locks
-        /// this browser. An answer from it then replaces nothing, and is told why, and the upload
-        /// waiting for that answer is let go of. Here the elsewhere is another tab, which is signed
-        /// in again by its own change where the page already open is not.
+        /// The step can stay open for minutes, and a password changed from elsewhere meanwhile used
+        /// to lock this browser, whose answer then had to be turned away. Now the password cannot
+        /// be changed while the restore waits: the other tab is refused, in so many words, and the
+        /// answer given afterwards restores the backup, from a browser that was unlocked
+        /// throughout.
         /// </summary>
         [Test]
-        public async Task Restore_AnsweredFromABrowserLockedMeanwhileReplacesNothing()
+        public async Task Restore_WaitingForItsPasswordCannotBeLockedFromElsewhere()
         {
-            const string Changed = "a password changed from elsewhere";
             var uploadPath = await FaithfulCopyAsync();
             var otherTab = await Page.Context.NewPageAsync();
-            var changed = false;
             try
             {
                 await UnlockedConfigurationPageAsync();
@@ -796,24 +806,23 @@ namespace HostPinger.UITest
                 SqliteConnection.ClearAllPools();
                 await GiveTheRestorePasswordAndChooseAsync(uploadPath);
                 await Assertions.Expect(BackupPassword).ToBeFocusedAsync();
+                await Assertions.Expect(Dialog.Locator(".step-left")).ToHaveTextAsync(new Regex(@"^4:\d\d$"));
 
-                await ChangePasswordAsync(otherTab, WebApp.Password, Changed);
-                changed = true;
+                await otherTab.GotoAsync($"{BaseUrl}/password");
+                await otherTab.Locator("#current-password").FillAsync(WebApp.Password);
+                await otherTab.Locator("#new-password").FillAsync("a password changed from elsewhere");
+                await otherTab.Locator("#confirm-password").FillAsync("a password changed from elsewhere");
+                await otherTab.GetByRole(AriaRole.Button, new PageGetByRoleOptions { Name = "Change password", Exact = true }).ClickAsync();
+                await Assertions.Expect(otherTab.Locator(".alert-danger"))
+                    .ToHaveTextAsync("A restore is under way. Nothing can be changed until it has finished.");
+
                 await GiveTheBackupPasswordAsync(WebApp.Password);
 
-                await Assertions.Expect(Page.GetByText("HostPinger is locked — unlock it to restore a backup."))
+                await Assertions.Expect(Dialog.GetByText("Restored — the backup's hosts, history, settings and password now apply."))
                     .ToBeVisibleAsync();
-                await Assertions.Expect(Overlay).ToBeHiddenAsync();
-                var directory = Path.GetDirectoryName(UiTestRun.DatabasePath)!;
-                Assert.That(() => Directory.EnumerateFiles(directory, "hostpinger-restore-*"), Is.Empty.After(5000, 50));
             }
             finally
             {
-                if (changed)
-                {
-                    await ChangePasswordAsync(otherTab, Changed, WebApp.Password);
-                }
-
                 File.Delete(uploadPath);
             }
         }
@@ -914,6 +923,8 @@ namespace HostPinger.UITest
                 await Button(Dialog.Locator(".modal-footer"), "Close").ClickAsync();
                 await Assertions.Expect(Overlay).ToBeHiddenAsync();
 
+                // A restore that brings a password leaves every browser locked, this one included.
+                await UnlockedConfigurationPageAsync();
                 await MaximumSize.FillAsync(original);
                 await SaveMaximumSize.ClickAsync();
                 await Assertions.Expect(Page.GetByText("Saved — applied after the next ping round.")).ToBeVisibleAsync();

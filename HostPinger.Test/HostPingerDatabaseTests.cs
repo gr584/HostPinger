@@ -294,6 +294,48 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// The stores, the backup and the pages have to share one lockout, or a backup or a restore
+        /// would keep nothing from being changed. Each takes it as something it can do without, so
+        /// nothing fails to build when it is missing: this is what says the application's services,
+        /// built the way the application builds them, are handed the same one.
+        /// </summary>
+        [Test]
+        public async Task AddHostPingerDatabase_HandsTheStoresAndTheBackupOneLockout()
+        {
+            var paths = PingerPaths.Resolve(_databasePath, _directory);
+            var services = new ServiceCollection()
+                .AddHostPingerDatabase(paths)
+                .AddLogging()
+                .AddSingleton(paths)
+                .AddSingleton<Microsoft.Extensions.Options.IOptionsMonitor<PingerOptions>>(new TestOptionsMonitor<PingerOptions>(new PingerOptions()))
+                .AddSingleton<Microsoft.Extensions.Options.IOptionsMonitor<SecurityOptions>>(new TestOptionsMonitor<SecurityOptions>(new SecurityOptions()))
+                .AddSingleton<UserSettingsStore>()
+                .AddSingleton<MaintenanceGate>()
+                .AddSingleton<HostSummaryCache>()
+                .AddSingleton<HostStore>()
+                .AddSingleton<DatabaseSizeLimit>()
+                .AddSingleton<DatabaseBackup>();
+            await using var provider = services.BuildServiceProvider();
+            await HostPingerDatabase.OpenAsync(provider);
+
+            using var hold = (await provider.GetRequiredService<ChangeLockout>().TakeAsync(LockoutActivity.Restore)).Hold!;
+
+            var host = await Assert.ThrowsAsync<ChangeRefusedException>(
+                () => provider.GetRequiredService<HostStore>().AddAsync("alpha", "alpha.example", isEnabled: true));
+            var password = await Assert.ThrowsAsync<ChangeRefusedException>(
+                () => provider.GetRequiredService<UserSettingsStore>().SavePasswordHashAsync("a-hash"));
+            var limit = await provider.GetRequiredService<DatabaseSizeLimit>().SaveAsync(1);
+            var backup = await Assert.ThrowsAsync<IOException>(() => provider.GetRequiredService<DatabaseBackup>().CreateSnapshotAsync());
+
+            Assert.Multiple(() =>
+            {
+                const string Refused = "A restore is under way. Nothing can be changed until it has finished.";
+                Assert.That(new[] { host!.Message, password!.Message, limit }, Is.All.EqualTo(Refused));
+                Assert.That(backup!.Message, Is.EqualTo("A restore is under way. Try again once it has finished."));
+            });
+        }
+
+        /// <summary>
         /// The service's own start, which is where a lock is found after a start that was killed:
         /// its warning reaches the application's logging, which nothing handed the migrations.
         /// </summary>

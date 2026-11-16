@@ -617,6 +617,80 @@ namespace HostPinger.Test
             Assert.That((await HostsAsync()).Select(h => h.Name), Is.EqualTo(new[] { "alpha" }));
         }
 
+        /// <summary>
+        /// While a backup or a restore is under way no change is made, of any kind: each is refused
+        /// in the words the page shows, before it reaches the database, and goes through again
+        /// once the hold is given back.
+        /// </summary>
+        [TestCase(Change.Add)]
+        [TestCase(Change.Update)]
+        [TestCase(Change.SetEnabled)]
+        [TestCase(Change.Delete)]
+        public async Task Changes_AreRefusedWhileARestoreIsUnderWay(Change change)
+        {
+            var id = await AddHostAsync("alpha", "alpha.example");
+            var lockout = new ChangeLockout();
+            var store = new HostStore(new TestDb.Factory(_options), _summaries, NullLogger<HostStore>.Instance, new StubClock(Now), lockout);
+
+            var hold = (await lockout.TakeAsync(LockoutActivity.Restore)).Hold!;
+            var refused = await Assert.ThrowsAsync<ChangeRefusedException>(() => MakeWith(store, change, id).WaitAsync(Patience));
+            var whileHeld = (await HostsAsync()).Select(h => (h.Name, h.Address, h.IsEnabled)).ToList();
+            hold.Dispose();
+            var making = MakeWith(store, change, id);
+            while (!_summaries.IsReadRequested)
+            {
+                await Task.Delay(10);
+            }
+
+            await _summaries.PollAsync();
+            await making.WaitAsync(Patience);
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(refused!.Message, Is.EqualTo("A restore is under way. Nothing can be changed until it has finished."));
+                Assert.That(whileHeld, Is.EqualTo(new[] { ("alpha", "alpha.example", true) }), "nothing was written");
+                Assert.That(
+                    (await HostsAsync()).Select(h => (h.Name, h.Address, h.IsEnabled)),
+                    Is.Not.EqualTo(new[] { ("alpha", "alpha.example", true) }),
+                    "and with the hold given back the change is made");
+            });
+        }
+
+        /// <summary>
+        /// A delete under way when a restore's button is pressed is waited for, to its end, before
+        /// the restore is handed its hold: it reaches one file whole, and whatever the restore then
+        /// asks is asked with nothing still being changed. The delete is held open by a write lock
+        /// taken from here.
+        /// </summary>
+        [Test]
+        public async Task ATake_WaitsForADeleteUnderWay()
+        {
+            var id = await AddHostAsync("alpha", "alpha.example", roundtripMs: 5);
+            var lockout = new ChangeLockout();
+            var store = new HostStore(new TestDb.Factory(_options), _summaries, NullLogger<HostStore>.Instance, new StubClock(Now), lockout);
+            await using var writer = new SqliteConnection($"Data Source={_databasePath};Pooling=False");
+            await writer.OpenAsync();
+            await ExecuteAsync(writer, "BEGIN IMMEDIATE;");
+
+            var deleting = store.DeleteAsync(id);
+            await Task.Delay(300);
+            var taking = lockout.TakeAsync(LockoutActivity.Restore);
+            await Task.Delay(300);
+            var handedOverEarly = taking.IsCompleted;
+            await ExecuteAsync(writer, "ROLLBACK;");
+            using var hold = (await taking.WaitAsync(Patience)).Hold;
+            var hostsOnceHandedOver = await HostsAsync();
+            await _summaries.PollAsync();
+            await deleting.WaitAsync(Patience);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(handedOverEarly, Is.False, "the hold waited for the delete");
+                Assert.That(hold, Is.Not.Null);
+                Assert.That(hostsOnceHandedOver, Is.Empty, "and the delete was done by then");
+            });
+        }
+
         private HostStore Store(DbContextOptions<HostPingerDbContext> options) =>
             new(new TestDb.Factory(options), _summaries, NullLogger<HostStore>.Instance, new StubClock(Now));
 

@@ -50,11 +50,13 @@ namespace HostPinger.Core.Services
         /// Registers the context factory every reader and writer of the database takes its contexts
         /// from, over the database <paramref name="paths"/> names, and the
         /// <see cref="DatabaseFileGate"/> its connections go through, which a restore shuts while it
-        /// swaps the file.
+        /// swaps the file, and the <see cref="ChangeLockout"/> that the stores, the backup and the
+        /// pages have to share: registered here so that none of them is handed one of its own.
         /// </summary>
         public static IServiceCollection AddHostPingerDatabase(this IServiceCollection services, PingerPaths paths) =>
             services
                 .AddSingleton<DatabaseFileGate>()
+                .AddSingleton<ChangeLockout>()
                 .AddDbContextFactory<HostPingerDbContext>(
                     (provider, options) => options
                         .UseSqlite(ConnectionString(paths.DatabasePath))

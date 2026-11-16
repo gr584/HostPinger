@@ -28,8 +28,11 @@ by the browser that made it rather than by the service, so each machine viewing 
 HostPinger can be set differently.
 
 Beside it, once a password has been set, is whether this browser is **Locked** or **Unlocked**, and
-clicking it opens the overlay that changes that — see *Locking* below. Everything described here
-can be read either way; the password only decides who can change something.
+clicking it opens the overlay that changes that — see *Locking* below. Until one has been set it
+reads **Set password** and leads to `/password`. While a backup or a restore is under way, from
+any browser, it reads **Backup in progress** or **Restore in progress** instead: nothing can be
+changed until that has ended. Everything described here can be read either way; the password only
+decides who can change something.
 
 ### Hosts — `/`
 
@@ -185,17 +188,21 @@ and saved only when it is.
   the file on disk does. It is written beside the database before the download starts, so the disk
   needs room for it there. Unlock to use it; with a password set, it asks for the current one
   first, in an overlay like the one that unlocks. The overlay shows how far the snapshot has got,
-  and the download starts once it is written; Cancel or Escape stops it partway.
+  and the download starts once it is written; Cancel or Escape stops it partway. From the button
+  until the snapshot is written, no browser can change anything; see *One at a time* below. The
+  download itself is outside that, and every browser is as it was.
 - **Restore** — uploads a backup and replaces the current database with it. The overlay says so
   before the file is chosen, and choosing it starts the restore, with no confirmation after that.
   The file is checked before anything is replaced: it must be an intact SQLite database with
   HostPinger's schema and no triggers or views, which HostPinger never creates, and one from a newer
   version is refused. Everything comes from the backup, including its password or the lack of one,
   so a backup that has one then asks for it in a step of its own, and is only restored with it:
-  whoever restores it can unlock afterwards, though the browser it was restored from may need
-  unlocking again. A wrong password can be tried again as often as it takes without sending the file
-  again, since the upload waits beside the database. Cancel or Escape leaves instead, which deletes
-  the upload and replaces nothing, and so does leaving the step alone for ten minutes. A backup that
+  whoever restores it can unlock afterwards, and has to. A restore that brings a password leaves
+  every browser locked, the one it was restored from included, until each is unlocked with that
+  password, even where it is the very password that was set before. A wrong password can be tried
+  again without sending the file again, since the upload waits beside the database. Cancel or
+  Escape leaves instead, which deletes the upload and replaces nothing, and so does leaving the
+  step for five minutes, however many answers were tried in them. A backup that
   never stored a password leaves the one configured in `appsettings.json` or the environment in
   force, if there is one, and asks for that instead; a backup without a password asks for nothing,
   goes straight in once it has passed, and unlocks the service. A backup from an older version is
@@ -206,7 +213,7 @@ and saved only when it is.
   Everything a service start does to a database is done to the backup where it lies, and its
   settings are read there too, before anything is replaced, so nothing is left to fail once it is in
   place: the swap is one rename of the backup over the database, and monitoring, and whatever the
-  pages read or write, pauses only for that moment. The restored database is put in SQLite's WAL
+  pages read, pauses only for that moment. The restored database is put in SQLite's WAL
   mode, where reading the history never holds up a ping round's write. A backup also brings the size
   limit of the install it was taken on, whose disk may have been bigger: one this disk cannot safely
   hold, or none, is lowered to the safe limit as the backup goes in, and the overlay says so, with
@@ -221,9 +228,21 @@ and saved only when it is.
   and the swap as they happen, and then what came of it. The check reads the whole backup, with
   about how far it has got for one of 40 MB or more, and takes a few seconds a gigabyte. A backup
   larger than 2 GB can take minutes for each gigabyte past the second on a machine without the
-  memory to hold the file: SQLite reads only a file's first 2 GB the fast way. One backup or restore runs at a
-  time, a restore waiting for its password included: another asked for meanwhile, from any browser,
-  is turned away with what is under way.
+  memory to hold the file: SQLite reads only a file's first 2 GB the fast way.
+- **One at a time, and nothing else meanwhile** — one backup or restore runs at a time: another
+  asked for meanwhile, from any browser, is turned away with what is under way. From the moment
+  **Download backup** or **Restore backup…** is pressed until the snapshot is written or the
+  restore has ended, no browser can change anything: hosts, settings and the password are all
+  refused, the dialogs open on the Hosts page are closed, with whatever was typed into them, and
+  the top right of every page says which of the two is under way. Monitoring carries on, and
+  everything can still be read. That is what lets a restore ask once whether its browser is
+  unlocked, and for the current password: no password can be set or changed between the asking
+  and the database being replaced, so a restore cannot take away a password set after it started.
+  Whoever would set one meanwhile is told a restore is under way, and sets it afterwards. Each
+  step that waits for somebody — the current password, the choice of the file, the backup's
+  password — says how long it has left and closes itself after five minutes, giving up the backup
+  or the restore, so an overlay left open does not hold everyone out. The work itself, a copy, an
+  upload or a migration, takes what it takes.
 - **Security** — whether a password is set, and the way to `/password` to set, change or remove
   one.
 
@@ -249,7 +268,12 @@ service, locked or not.
   on working until those twelve hours run out or the password changes, so changing the password is
   how to end every unlock at once.
 - **Changing the password locks every browser again**, including the one that changed it, which is
-  signed straight back in under the new one. Removing it unlocks everything for everyone.
+  signed straight back in under the new one. Removing it unlocks everything for everyone. So does
+  restoring a backup that brings a password, whichever password it is: every browser is locked
+  until it is unlocked with the backup's.
+- **A backup or a restore holds every browser out while it is under way**, unlocked or not; see
+  *One at a time* under Configuration. That ends no unlock: after a backup every browser is as it
+  was.
 - **Whatever could take the password over asks for it again**, even in an unlocked browser, so that
   a browser left open and walked away from is not enough: changing or removing it, downloading a
   backup, which carries its hash, and restoring one, which puts the backup's password, or none, in

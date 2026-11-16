@@ -24,9 +24,10 @@ namespace HostPinger.Security
         private const string AuthenticationType = "HostPingerUnlock";
 
         /// <summary>
-        /// Carries <see cref="PasswordHash.Stamp"/> of the password the cookie was issued under.
-        /// Comparing it against the stored password is what makes a change or a removal invalidate
-        /// the cookies that came before it.
+        /// Carries <see cref="UserSettingsStore.UnlockStamp"/> as it was when the cookie was
+        /// issued: a fingerprint of the password, and of the restore that put the database in
+        /// place. Comparing it against the one in force is what makes a change or a removal of the
+        /// password, and every restore, invalidate the cookies that came before it.
         /// </summary>
         private const string StampClaimType = "hostpinger:stamp";
 
@@ -37,18 +38,27 @@ namespace HostPinger.Security
 
         /// <summary>
         /// Whether <paramref name="user"/> may change things: always, while no password is set, and
-        /// otherwise only while holding an unlock issued under the password in force now.
+        /// otherwise only while holding an unlock issued under the password in force now, since the
+        /// last restore. A restore puts every browser back to locked, the one that restored
+        /// included, even where the backup brings the password already in force: whoever goes on
+        /// has to know the password the backup brought.
         /// </summary>
+        /// <remarks>
+        /// Says nothing of a backup or a restore under way, which keeps every browser from changing
+        /// anything whether it is unlocked or not: that is refused where the change is made, at the
+        /// <c>ChangeLockout</c>, and ends with no browser's unlock touched.
+        /// </remarks>
         public bool IsUnlocked(ClaimsPrincipal? user)
         {
-            var stored = StoredHash;
-            if (string.IsNullOrEmpty(stored))
+            // Read once: empty is what says there is no password, and the rest is compared.
+            var stamp = settings.UnlockStamp;
+            if (stamp.Length == 0)
             {
                 return true;
             }
 
             return user?.Identity?.IsAuthenticated == true
-                && user.FindFirstValue(StampClaimType) == PasswordHash.Stamp(stored);
+                && user.FindFirstValue(StampClaimType) == stamp;
         }
 
         /// <summary>
@@ -71,7 +81,7 @@ namespace HostPinger.Security
             var identity = new ClaimsIdentity(
                 [
                     new Claim(ClaimTypes.Name, UnlockedName),
-                    new Claim(StampClaimType, PasswordHash.Stamp(StoredHash)),
+                    new Claim(StampClaimType, settings.UnlockStamp),
                 ],
                 AuthenticationType);
 

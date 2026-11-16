@@ -42,11 +42,13 @@ namespace HostPinger.Core.Services
     /// that restore had just replaced.
     /// </para>
     /// <para>
-    /// What every change does wait for is the moment a restore swaps the file, at the
-    /// <see cref="DatabaseFileGate"/>. A change already under way keeps the restore waiting until
-    /// it is done, so it reaches one file whole. One that arrives meanwhile goes to the restored
-    /// file afterwards, by the id the page read from the file before it; ids are not carried
-    /// from one file to the other, so that can be another host.
+    /// No change is made while a backup or a restore is under way: each takes a pass at the
+    /// <see cref="ChangeLockout"/> for as long as it runs, and is refused there with a
+    /// <see cref="ChangeRefusedException"/> from the moment either's button is pressed until it
+    /// has ended. A change already under way then is waited for before the backup or the restore
+    /// goes on, so it reaches one file whole. One that arrived during a restore used to wait for
+    /// the swap and go to the restored file afterwards, by the id the page had read from the file
+    /// before it; ids are not carried from one file to the other, so that could be another host.
     /// </para>
     /// <para>
     /// Each change but a delete runs on the thread that asks for it, for as long as its statement
@@ -61,7 +63,8 @@ namespace HostPinger.Core.Services
         IDbContextFactory<HostPingerDbContext> dbFactory,
         HostSummaryCache summaries,
         ILogger<HostStore> logger,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        ChangeLockout? lockout = null)
     {
         /// <summary>
         /// SQLITE_CONSTRAINT_UNIQUE. The unique index on the address is the only one the hosts have
@@ -80,6 +83,9 @@ namespace HostPinger.Core.Services
 
         private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
 
+        // One of its own where none is shared, which nothing ever takes a hold on.
+        private readonly ChangeLockout _lockout = lockout ?? new ChangeLockout();
+
         /// <summary>
         /// Adds a host, its name and address stored without the blanks around them: the address is
         /// what has to be unique, and a space typed before it would otherwise make it a second one.
@@ -95,6 +101,7 @@ namespace HostPinger.Core.Services
         {
             name = Trimmed(name, MonitoredHost.MaxNameLength, nameof(name));
             address = Trimmed(address, MonitoredHost.MaxAddressLength, nameof(address));
+            using (_lockout.EnterChange())
             await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken))
             {
                 db.Hosts.Add(new MonitoredHost
@@ -144,6 +151,7 @@ namespace HostPinger.Core.Services
             name = Trimmed(name, MonitoredHost.MaxNameLength, nameof(name));
             address = Trimmed(address, MonitoredHost.MaxAddressLength, nameof(address));
             int updated;
+            using (_lockout.EnterChange())
             await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken))
             {
                 try
@@ -181,6 +189,7 @@ namespace HostPinger.Core.Services
             bool isEnabled,
             CancellationToken cancellationToken = default)
         {
+            using (_lockout.EnterChange())
             await using (var db = await dbFactory.CreateDbContextAsync(cancellationToken))
             {
                 try
@@ -214,7 +223,13 @@ namespace HostPinger.Core.Services
         /// </remarks>
         public async Task<HostSummarySnapshot> DeleteAsync(int id, CancellationToken cancellationToken = default)
         {
-            await Task.Run(() => DeleteHostAndHistoryAsync(id), CancellationToken.None);
+            // Taken here rather than on the thread pool, so that a delete refused is refused to
+            // whoever asked, and kept until the last of the history has gone.
+            using (_lockout.EnterChange())
+            {
+                await Task.Run(() => DeleteHostAndHistoryAsync(id), CancellationToken.None);
+            }
+
             return await summaries.RefreshAsync(cancellationToken);
         }
 

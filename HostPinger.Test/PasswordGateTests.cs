@@ -99,6 +99,32 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// A restore locks every browser again, the way a change of password does, even where the
+        /// backup brings the very password that was in force: whoever goes on has to know the
+        /// password the backup brought. An unlock issued after it counts, under the same password.
+        /// </summary>
+        [Test]
+        public async Task IsUnlocked_IsFalseForAnUnlockIssuedBeforeARestoreOfTheSamePassword()
+        {
+            await SetPasswordAsync(Password);
+            var issuedBefore = _gate.CreatePrincipal();
+
+            // What a restore does: the backup's rows go in force, the stamp it wrote among them.
+            _store.PutInForce(new Dictionary<string, string>
+            {
+                [UserSettingsStore.PasswordHashKey] = _store.PasswordHash!,
+                [UserSettingsStore.RestoreStampKey] = "0123456789ABCDEF",
+            });
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(_gate.Verify(Password), Is.True, "the same password");
+                Assert.That(_gate.IsUnlocked(issuedBefore), Is.False);
+                Assert.That(_gate.IsUnlocked(_gate.CreatePrincipal()), Is.True);
+            });
+        }
+
+        /// <summary>
         /// The page that changes the password signs its browser back in straight after the save.
         /// That only works because a save is in force the moment it returns: a principal stamped
         /// from a stale answer would lock the person changing the password out of their own

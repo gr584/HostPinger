@@ -1,15 +1,20 @@
 @rendermode InteractiveServer
+@using HostPinger.Core.Services
 @using HostPinger.Security
 @using Microsoft.AspNetCore.Components.Authorization
 @using Microsoft.AspNetCore.WebUtilities
 @inject PasswordGate Gate
+@inject ChangeLockout Lockout
 @inject NavigationManager Navigation
 @inject LockPrompt Prompt
 @implements IDisposable
 
 @*
-    Says whether this browser may change anything, and carries the overlay that changes it. Nothing
-    at all while no password is set: there is no state to report and nothing to unlock.
+    Says whether this browser may change anything, and carries the overlay that changes it. While a
+    backup or a restore is under way, no browser may, unlocked or not, and this says that instead:
+    it is on every page, so it is the one place that tells whoever finds their controls held back
+    why. While no password is set there is nothing to unlock, and it offers to set one, which also
+    keeps the place there for an install without a password to be told the same.
 
     Interactive, so the overlay opens, closes, takes Escape and a click away and focuses its field
     the way the host form does. The form inside it is a plain browser post rather than anything
@@ -18,12 +23,28 @@
     can. That also makes the antiforgery token the framework's business rather than ours.
 *@
 
-@if (Gate.IsPasswordSet)
+@if (_underWay is { } underWay)
+{
+    @*
+        A status rather than a button: there is nothing to do about it from here but wait. Locking
+        and unlocking can wait too, since nothing could be changed in the meantime either way.
+    *@
+    <span class="btn btn-sm btn-warning disabled lockout-status" role="status"
+          title="Nothing can be changed, from any browser, until it has finished.">
+        @(underWay == LockoutActivity.Backup ? "Backup in progress" : "Restore in progress")
+    </span>
+}
+else if (Gate.IsPasswordSet)
 {
     <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="Open"
             title="@(_isUnlocked ? "Lock this browser" : "Unlock to make changes")">
         @(_isUnlocked ? "Unlocked" : "Locked")
     </button>
+}
+else
+{
+    <a class="btn btn-sm btn-outline-secondary" href="password"
+       title="Nothing is locked: anyone who can reach HostPinger can change hosts and settings">Set password</a>
 }
 
 @if (_isOpen)
@@ -104,6 +125,9 @@
     private Task<AuthenticationState>? AuthenticationState { get; set; }
 
     private bool _isUnlocked;
+
+    // Which of a backup and a restore is under way, from any browser, and null while neither is.
+    private LockoutActivity? _underWay;
     private bool _isOpen;
     private string? _destination;
     private bool _pressedInside;
@@ -123,7 +147,21 @@
 
     private readonly CancellationTokenSource _cts = new();
 
-    protected override void OnInitialized() => Prompt.Requested += OnRequested;
+    protected override void OnInitialized()
+    {
+        Prompt.Requested += OnRequested;
+
+        // Listening before looking, so that one starting in between is not missed.
+        Lockout.Changed += OnLockoutChanged;
+        _underWay = Lockout.Active;
+    }
+
+    // Raised on whichever thread took the hold or gave it back, so handed to this page's circuit.
+    private void OnLockoutChanged() => _ = InvokeAsync(() =>
+    {
+        _underWay = Lockout.Active;
+        StateHasChanged();
+    });
 
     protected override async Task OnParametersSetAsync()
     {
@@ -346,6 +384,7 @@
     public void Dispose()
     {
         Prompt.Requested -= OnRequested;
+        Lockout.Changed -= OnLockoutChanged;
 
         // Which is what stops the countdown, if one is running: it is drawing a component that is
         // going away, and nothing here waits for it to notice on its own.

@@ -1,5 +1,5 @@
-using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.Security.Cryptography;
 using HostPinger.Core.Data;
 using HostPinger.Core.Options;
 using Microsoft.Data.Sqlite;
@@ -11,11 +11,13 @@ namespace HostPinger.Core.Services
 {
     /// <summary>
     /// Copies the database out as a backup and swaps a validated backup in as a restore. One of
-    /// the two runs at a time, and the other is turned away while it does. A restore's swap holds
-    /// the <see cref="MaintenanceGate"/>, so it never overlaps a ping round, and shuts the
-    /// <see cref="DatabaseFileGate"/>, which keeps every other connection off the file meanwhile;
-    /// a snapshot lets the rounds go on. Both work beside the live file: the hardened service
-    /// deployments leave the data directory as the only place this process can write.
+    /// the two runs at a time, and the other is turned away while it does; so is every change a
+    /// page would make, at the <see cref="ChangeLockout"/>, whose hold a backup or a restore has
+    /// from its button to its end. A restore's swap holds the <see cref="MaintenanceGate"/>, so it
+    /// never overlaps a ping round, and shuts the <see cref="DatabaseFileGate"/>, which keeps
+    /// every other connection off the file meanwhile; a snapshot lets the rounds go on. Both work
+    /// beside the live file: the hardened service deployments leave the data directory as the
+    /// only place this process can write.
     /// </summary>
     public sealed class DatabaseBackup(
         PingerPaths paths,
@@ -24,7 +26,8 @@ namespace HostPinger.Core.Services
         MaintenanceGate maintenanceGate,
         DatabaseFileGate fileGate,
         HostSummaryCache hostSummaries,
-        ILogger<DatabaseBackup> logger)
+        ILogger<DatabaseBackup> logger,
+        ChangeLockout? lockout = null)
     {
         /// <summary>
         /// Room the disk must have beyond the file being written, so a snapshot or an upload
@@ -81,20 +84,20 @@ namespace HostPinger.Core.Services
 
         private const string StayedInUse = "The database stayed in use, so nothing was replaced. Try the restore again.";
 
-        private const string SnapshotUnderWay = "A backup is being written";
+        private const string SnapshotLeftWaiting =
+            "The backup was left waiting too long, so it was let go of and nothing was written.";
 
-        private const string RestoreUnderWay = "A restore is under way";
+        private const string RestoreLeftWaiting =
+            "The restore was left waiting too long, so it was let go of and nothing was replaced.";
 
         private const string PasswordWrong = "That is not the backup's password.";
 
         private const string PasswordNotGiven =
             "The backup's password was not given in time, so the upload was let go of and nothing was replaced.";
 
-        private readonly object _turnLock = new();
-
-        // Which of the two holds the turn they share, to tell whichever asks next; null while
-        // neither does. See TryTakeTurn.
-        private string? _underWay;
+        // The one the stores and the pages share, or one of its own where none is shared, which
+        // then only keeps a backup and a restore from running at once.
+        private readonly ChangeLockout _lockout = lockout ?? new ChangeLockout();
 
         /// <summary>
         /// How long a restore waits for the file it is retiring to be let go of before it gives up,
@@ -118,14 +121,6 @@ namespace HostPinger.Core.Services
             () => new DriveInfo(Path.GetDirectoryName(paths.DatabasePath)!).AvailableFreeSpace;
 
         /// <summary>
-        /// How long a restore waits for an answer when it asks for a backup's password, before it
-        /// lets the upload go. It holds the turn and keeps the upload on the disk while it waits, so
-        /// an overlay left open must not keep every backup and restore off for good. Settable for
-        /// the tests, which would otherwise spend ten minutes watching it run out.
-        /// </summary>
-        internal TimeSpan PasswordWait { get; init; } = TimeSpan.FromMinutes(10);
-
-        /// <summary>
         /// Called with the database a restore replaces still at the path, whole and out of WAL mode,
         /// just before the backup goes over it. For the tests, which copy it there to see what
         /// became of a write that raced the restore.
@@ -142,33 +137,36 @@ namespace HostPinger.Core.Services
         internal string CreateRestoreTempPath() => TempPath(RestorePrefix);
 
         /// <summary>
-        /// Takes the one turn a snapshot and a restore share, or says which of them holds it. One at
-        /// a time, because each writes a file the size of the database beside it, having checked the
-        /// disk has room for one, and two at once would each count on the same room.
+        /// The hold a snapshot or a restore works under, started on its work, or why it has none.
+        /// A page takes the hold when the button is pressed and hands it in as
+        /// <paramref name="given"/>; without one this takes it here, or says which of the two
+        /// already has it. One at a time, because each writes a file the size of the database
+        /// beside it, having checked the disk has room for one, and two at once would each count
+        /// on the same room. A hold handed in that was left waiting until it ran out is refused
+        /// with <paramref name="leftWaiting"/>.
         /// </summary>
-        private bool TryTakeTurn(string what, [NotNullWhen(false)] out string? refusal)
+        private async Task<LockoutTake> HoldForAsync(
+            ChangeLockout.Hold? given,
+            LockoutActivity activity,
+            string leftWaiting,
+            CancellationToken cancellationToken)
         {
-            lock (_turnLock)
+            if (given is null)
             {
-                if (_underWay is { } other)
+                var take = await _lockout.TakeAsync(activity, cancellationToken);
+                if (take.Hold is null)
                 {
-                    refusal = $"{other}. Try again once it has finished.";
-                    return false;
+                    return take;
                 }
 
-                _underWay = what;
+                given = take.Hold;
             }
-
-            refusal = null;
-            return true;
-        }
-
-        private void ReleaseTurn()
-        {
-            lock (_turnLock)
+            else if (given.Activity != activity)
             {
-                _underWay = null;
+                throw new ArgumentException($"The hold was taken for a {given.Activity}, not a {activity}.", nameof(given));
             }
+
+            return given.TryStartWork() ? new LockoutTake(given, null) : new LockoutTake(null, leftWaiting);
         }
 
         /// <summary>
@@ -224,15 +222,50 @@ namespace HostPinger.Core.Services
         /// snapshot or a restore already under way, or too little room beside the database for the
         /// copy, which is checked here, in turn, rather than by the page before it.
         /// </para>
+        /// <para>
+        /// Takes the <see cref="ChangeLockout"/>'s hold for as long as the copy is written, so
+        /// nothing is changed from a page meanwhile. The hold is given back before this returns:
+        /// the file is downloaded outside it.
+        /// </para>
         /// </remarks>
         public Task<string> CreateSnapshotAsync(IProgress<double>? progress = null, CancellationToken cancellationToken = default) =>
-            Task.Run(() => CreateSnapshotOnThisThreadAsync(progress, cancellationToken), cancellationToken);
+            Task.Run(() => CreateSnapshotOnThisThreadAsync(null, progress, cancellationToken), cancellationToken);
 
-        private async Task<string> CreateSnapshotOnThisThreadAsync(IProgress<double>? progress, CancellationToken cancellationToken)
+        /// <summary>
+        /// <see cref="CreateSnapshotAsync(IProgress{double}?, CancellationToken)"/> under
+        /// <paramref name="hold"/>, which a page took when the button was pressed, so that every
+        /// browser has been kept from changing anything since then. The hold is this call's from
+        /// here on, and is given back however it ends; one left waiting until it ran out is
+        /// refused as an <see cref="IOException"/>.
+        /// </summary>
+        public Task<string> CreateSnapshotAsync(
+            ChangeLockout.Hold hold,
+            IProgress<double>? progress = null,
+            CancellationToken cancellationToken = default) =>
+            Task.Run(
+                async () =>
+                {
+                    try
+                    {
+                        return await CreateSnapshotOnThisThreadAsync(hold, progress, cancellationToken);
+                    }
+                    finally
+                    {
+                        // For the ways out before the copy took it over.
+                        hold.Dispose();
+                    }
+                },
+                CancellationToken.None);
+
+        private async Task<string> CreateSnapshotOnThisThreadAsync(
+            ChangeLockout.Hold? given,
+            IProgress<double>? progress,
+            CancellationToken cancellationToken)
         {
-            if (!TryTakeTurn(SnapshotUnderWay, out var refusal))
+            var take = await HoldForAsync(given, LockoutActivity.Backup, SnapshotLeftWaiting, cancellationToken);
+            if (take.Hold is not { } hold)
             {
-                throw new IOException(refusal);
+                throw new IOException(take.Refusal);
             }
 
             try
@@ -241,7 +274,7 @@ namespace HostPinger.Core.Services
             }
             finally
             {
-                ReleaseTurn();
+                hold.Dispose();
             }
         }
 
@@ -612,9 +645,10 @@ namespace HostPinger.Core.Services
             Task.Run(
                 async () =>
                 {
-                    if (!TryTakeTurn(RestoreUnderWay, out var refusal))
+                    var take = await HoldForAsync(null, LockoutActivity.Restore, RestoreLeftWaiting, cancellationToken);
+                    if (take.Hold is not { } hold)
                     {
-                        throw new IOException(refusal);
+                        throw new IOException(take.Refusal);
                     }
 
                     try
@@ -623,7 +657,7 @@ namespace HostPinger.Core.Services
                     }
                     finally
                     {
-                        ReleaseTurn();
+                        hold.Dispose();
                     }
                 },
                 CancellationToken.None);
@@ -632,8 +666,9 @@ namespace HostPinger.Core.Services
         /// Restores the backup <paramref name="source"/> delivers, <paramref name="length"/> bytes of
         /// it: receives it beside the database, checks it as <see cref="ValidateBackupAsync"/> does,
         /// asks for the password it puts in force, if it puts one in force, and puts it in place as
-        /// <see cref="RestoreAsync"/> does, all in the one turn, so that nothing else of this class
-        /// writes beside the database from the room check to the swap.
+        /// <see cref="RestoreAsync"/> does, all under the one hold on the
+        /// <see cref="ChangeLockout"/>, so that nothing else of this class writes beside the
+        /// database from the room check to the swap, and no page changes anything meanwhile.
         /// <paramref name="progress"/> hears which part is under way, how much of the upload has
         /// arrived while it arrives, and about how far the check has got.
         /// </summary>
@@ -642,8 +677,9 @@ namespace HostPinger.Core.Services
         /// handed the sentence saying why the last answer was refused, null the first time, and a
         /// token that says to stop waiting. A backup that puts a password in force is only restored
         /// with that password, so whoever restores it can unlock HostPinger afterwards; a wrong
-        /// answer is asked about again, as often as it takes, with the file already here. Not called
-        /// for a backup that puts no password in force, or for a file that is refused.
+        /// answer is asked about again, with the file already here, for as long as the step's
+        /// wait lasts. Not called for a backup that puts no password in force, or for a file that
+        /// is refused.
         /// </param>
         /// <param name="cancellationToken">
         /// Cancelled is how whoever cannot give the password leaves: the upload is deleted, the turn
@@ -662,16 +698,53 @@ namespace HostPinger.Core.Services
         /// page, the browser failing to read the file it chose. However it ends, the file received
         /// does not outlive this call.
         /// </remarks>
+        public Task<RestoreResult> RestoreUploadAsync(
+            Stream source,
+            long length,
+            Func<string?, CancellationToken, Task<string>> askPassword,
+            IProgress<RestoreProgress>? progress = null,
+            CancellationToken cancellationToken = default) =>
+            RestoreUploadCoreAsync(null, source, length, askPassword, progress, cancellationToken);
+
+        /// <summary>
+        /// <see cref="RestoreUploadAsync(Stream, long, Func{string?, CancellationToken, Task{string}}, IProgress{RestoreProgress}?, CancellationToken)"/>
+        /// under <paramref name="hold"/>, which a page took when the button was pressed, so that
+        /// every browser has been kept from changing anything since then: whatever the page asked
+        /// before it got here, whether the browser is unlocked and for the current password, still
+        /// holds when the database is replaced. The hold is this call's from here on, and is given
+        /// back however it ends; one left waiting until it ran out comes back as a refusal.
+        /// </summary>
         public async Task<RestoreResult> RestoreUploadAsync(
+            ChangeLockout.Hold hold,
             Stream source,
             long length,
             Func<string?, CancellationToken, Task<string>> askPassword,
             IProgress<RestoreProgress>? progress = null,
             CancellationToken cancellationToken = default)
         {
-            if (!TryTakeTurn(RestoreUnderWay, out var refusal))
+            try
             {
-                return new RestoreResult(refusal);
+                return await RestoreUploadCoreAsync(hold, source, length, askPassword, progress, cancellationToken);
+            }
+            finally
+            {
+                // For the ways out before the restore took it over.
+                hold.Dispose();
+            }
+        }
+
+        private async Task<RestoreResult> RestoreUploadCoreAsync(
+            ChangeLockout.Hold? given,
+            Stream source,
+            long length,
+            Func<string?, CancellationToken, Task<string>> askPassword,
+            IProgress<RestoreProgress>? progress,
+            CancellationToken cancellationToken)
+        {
+            var take = await HoldForAsync(given, LockoutActivity.Restore, RestoreLeftWaiting, cancellationToken);
+            if (take.Hold is not { } hold)
+            {
+                return new RestoreResult(take.Refusal);
             }
 
             try
@@ -698,7 +771,7 @@ namespace HostPinger.Core.Services
 
                     // After the file's own checks, so that nobody is asked for the password of a file
                     // that they would turn away.
-                    if (await PasswordRefusalAsync(candidatePath, askPassword, cancellationToken) is { } notGiven)
+                    if (await PasswordRefusalAsync(candidatePath, askPassword, hold, cancellationToken) is { } notGiven)
                     {
                         return new RestoreResult(notGiven);
                     }
@@ -719,7 +792,7 @@ namespace HostPinger.Core.Services
             }
             finally
             {
-                ReleaseTurn();
+                hold.Dispose();
             }
         }
 
@@ -731,10 +804,11 @@ namespace HostPinger.Core.Services
         /// </summary>
         /// <remarks>
         /// <para>
-        /// The turn stays taken and the upload stays on the disk through the wait, which is why it
-        /// is bounded, by <see cref="PasswordWait"/> for each answer: somebody still trying gets that
-        /// long again. Nothing else waits on it. The ping rounds and the pages only stop for the
-        /// swap, which is yet to come, so only another backup or restore is turned away meanwhile.
+        /// The hold stays taken and the upload stays on the disk through the wait, and every
+        /// browser is kept from changing anything meanwhile, which is why it is bounded, by the
+        /// <see cref="ChangeLockout.WaitLimit"/> for the step as a whole: a wrong answer is asked
+        /// about again, and buys no more time. The ping rounds go on; they only stop for the swap,
+        /// which is yet to come.
         /// </para>
         /// <para>
         /// A wrong password is not counted against the address it came from, as a guess at the
@@ -752,6 +826,7 @@ namespace HostPinger.Core.Services
         private async Task<string?> PasswordRefusalAsync(
             string candidatePath,
             Func<string?, CancellationToken, Task<string>> askPassword,
+            ChangeLockout.Hold hold,
             CancellationToken cancellationToken)
         {
             var hash = await ReadPasswordHashAsync(candidatePath, cancellationToken);
@@ -760,11 +835,17 @@ namespace HostPinger.Core.Services
                 return null;
             }
 
+            // Once for the step, not for each answer. The hold gives itself back when the wait
+            // runs out, which is what its token says.
+            if (!hold.TryStartWaiting())
+            {
+                return PasswordNotGiven;
+            }
+
+            using var waiting = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, hold.Ended);
             string? refused = null;
             while (true)
             {
-                using var waiting = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                waiting.CancelAfter(PasswordWait);
                 string password;
                 try
                 {
@@ -777,7 +858,14 @@ namespace HostPinger.Core.Services
 
                 if (await Task.Run(() => PasswordHash.Verify(hash, password), cancellationToken))
                 {
-                    return null;
+                    // Right, but too late if the wait ran out while it was being checked: the
+                    // hold is gone, and with it what kept everything as it was asked about.
+                    return hold.TryStartWork() ? null : PasswordNotGiven;
+                }
+
+                if (hold.Ended.IsCancellationRequested)
+                {
+                    return PasswordNotGiven;
                 }
 
                 refused = PasswordWrong;
@@ -891,6 +979,19 @@ namespace HostPinger.Core.Services
                 }
             }
 
+            // Before the hold is given back, which is when the pages get their controls back: the
+            // hosts are read from the restored file and handed to the pages first, so that no page
+            // offers a change to a row it drew from the file just replaced, whose ids mean other
+            // hosts in this one. A read that fails here is left to the summary's own loop.
+            try
+            {
+                await hostSummaries.LoadAsync(CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "The hosts could not be read straight after the restore; the pages take them at the next read that works.");
+            }
+
             if (lowered is { } limit)
             {
                 logger.LogWarning(
@@ -955,6 +1056,17 @@ namespace HostPinger.Core.Services
                     }
 
                     lowered = await FitSizeLimitAsync(db, cancellationToken);
+
+                    // A new stamp for every restore, written into the candidate so that it lasts
+                    // as long as the database does: every unlock issued before the swap stops
+                    // counting, even where the backup brings the password already in force. See
+                    // UserSettingsStore.UnlockStamp.
+                    await UserSettingsStore.StageAsync(
+                        db,
+                        UserSettingsStore.RestoreStampKey,
+                        Convert.ToHexString(RandomNumberGenerator.GetBytes(8)),
+                        cancellationToken);
+                    await db.SaveChangesAsync(cancellationToken);
                     settingsRows = await UserSettingsStore.StoredInAsync(db, cancellationToken);
                 }
 
@@ -1045,8 +1157,8 @@ namespace HostPinger.Core.Services
 
             // From here the restore is done, whatever becomes of the page that asked for it. Until
             // the settings read from the backup go in, the ones in force describe the file just
-            // replaced; the backup's password going in also invalidates unlock cookies stamped
-            // under the old one, with nothing further to do.
+            // replaced; the backup's password and the restore's stamp going in also invalidate
+            // every unlock cookie issued before, with nothing further to do.
             if (AfterSwap is { } afterSwap)
             {
                 await afterSwap();
