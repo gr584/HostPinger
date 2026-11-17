@@ -1348,7 +1348,7 @@ namespace HostPinger.Core.Services
         private static async Task<bool> HasSqliteHeaderAsync(string candidatePath, CancellationToken cancellationToken)
         {
             await using var stream = new FileStream(
-                candidatePath, FileMode.Open, FileAccess.Read, FileShare.Read, SqliteHeader.Length,
+                candidatePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, SqliteHeader.Length,
                 FileOptions.Asynchronous);
             var header = new byte[SqliteHeader.Length];
             var read = await stream.ReadAtLeastAsync(header, header.Length, throwOnEndOfStream: false, cancellationToken);
