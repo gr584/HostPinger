@@ -61,8 +61,10 @@
   </ItemGroup>
 
   <!-- Ahead of restore as well as build, so a package that is not on the list never reaches the
-       project. It also runs before the SDK adds packages of its own, such as the trimmer's when
-       trimming is on, so those are not held to the list.
+       project. The packages the SDK adds of its own, such as the Blazor script's and the trimmer's
+       when trimming is on, are not held to the list. The SDK marks them IsImplicitlyDefined, and
+       the check goes by that mark and not by running first: restore and build run it before the
+       SDK adds them, but the editor's design-time build runs it after.
 
        The two other ways a library arrives are refused here too: a DLL referenced by its path,
        and a reference to a project other than Core. Neither would pass through the list above,
@@ -71,7 +73,7 @@
        library reached through Core's own references. -->
   <Target Name="RejectUnpermittedPackageReferences" BeforeTargets="CollectPackageReferences">
     <ItemGroup>
-      <_UnpermittedPackageReference Include="@(PackageReference)" Exclude="@(PermittedPackageReference)" />
+      <_UnpermittedPackageReference Include="@(PackageReference)" Exclude="@(PermittedPackageReference)" Condition="'%(PackageReference.IsImplicitlyDefined)' != 'true'" />
       <_ReferenceByPath Include="@(Reference)" Condition="'%(Reference.HintPath)' != ''" />
       <_OtherProjectReference Include="@(ProjectReference)" Condition="'%(ProjectReference.Filename)' != 'HostPinger.Core'" />
     </ItemGroup>
