@@ -12,19 +12,11 @@ namespace HostPinger.Core.Options
         public const string DatabaseFileName = "hostpinger.db";
 
         /// <summary>
-        /// Where the database lives when nothing is configured. The default is per-OS rather than
-        /// a path in appsettings.json because the same file ships to both platforms: %ProgramData%
-        /// on Windows, which is where the installed service has always kept it, and
-        /// /var/lib/hostpinger elsewhere, which is the conventional home for service state and the
-        /// directory the container image mounts its volume on.
+        /// Where the database lives when nothing is configured: the conventional home for service
+        /// state, the directory systemd's StateDirectory= creates for the packaged unit and the one
+        /// the container image mounts its volume on.
         /// </summary>
-        /// <remarks>
-        /// CommonApplicationData is only consulted on Windows. .NET maps it to /usr/share on Unix,
-        /// which belongs to the package manager and is not writable by a service account.
-        /// </remarks>
-        public static string DefaultDataDirectory => OperatingSystem.IsWindows()
-            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "HostPinger")
-            : "/var/lib/hostpinger";
+        public const string DefaultDataDirectory = "/var/lib/hostpinger";
 
         public static PingerPaths Resolve(string? configuredDatabasePath, string contentRootPath)
         {
@@ -36,7 +28,7 @@ namespace HostPinger.Core.Options
         }
 
         /// <summary>
-        /// Expands environment variables (e.g. %ProgramData%) and anchors a relative path to the
+        /// Expands environment variables written as %NAME% and anchors a relative path to the
         /// content root.
         /// </summary>
         private static string Expand(string configuredPath, string contentRootPath) =>

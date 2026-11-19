@@ -28,26 +28,11 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// The Windows default has to keep naming the directory the installed service already uses,
-        /// or an upgrade would silently start over with an empty database.
+        /// The packaged unit's StateDirectory and the container image's volume are both here, so
+        /// the path is part of the published contract rather than an implementation detail.
         /// </summary>
         [Test]
-        [Platform("Win")]
-        public void DefaultDataDirectory_IsUnderProgramData_OnWindows()
-        {
-            Assert.That(PingerPaths.DefaultDataDirectory,
-                Is.EqualTo(Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                    "HostPinger")));
-        }
-
-        /// <summary>
-        /// The container image mounts its volume here, so the path is part of the published
-        /// contract rather than an implementation detail.
-        /// </summary>
-        [Test]
-        [Platform(Exclude = "Win")]
-        public void DefaultDataDirectory_IsUnderVarLib_OffWindows()
+        public void DefaultDataDirectory_IsUnderVarLib()
         {
             Assert.That(PingerPaths.DefaultDataDirectory, Is.EqualTo("/var/lib/hostpinger"));
         }
@@ -64,8 +49,8 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// Expansion is what lets a deployment point the database at a machine-specific location —
-        /// %ProgramData% on Windows, or a mount path passed in the environment on Linux.
+        /// Expansion is what lets a deployment point the database at a machine-specific location,
+        /// such as a mount path passed in the environment.
         /// </summary>
         [Test]
         public void Resolve_ExpandsEnvironmentVariablesInTheDatabasePath()

@@ -125,9 +125,8 @@ namespace HostPinger.Core.Services
 
         /// <summary>
         /// Closes the connection and stops reading, for a restore about to swap the file out from
-        /// under it: the connection holds the file open, which on Windows is enough to fail the swap
-        /// and anywhere else leaves this reading the file that was replaced. Pages go on drawing the
-        /// summary in hand meanwhile.
+        /// under it: the connection holds the file open, which would leave this reading the file that
+        /// was replaced. Pages go on drawing the summary in hand meanwhile.
         /// </summary>
         public async Task SuspendAsync(CancellationToken cancellationToken = default)
         {

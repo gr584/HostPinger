@@ -5,7 +5,6 @@ using HostPinger.Security;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Hosting.Systemd;
-using Microsoft.Extensions.Hosting.WindowsServices;
 
 namespace HostPinger
 {
@@ -24,17 +23,15 @@ namespace HostPinger
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
                 Args = args,
-                // A Windows service starts with System32 as the working directory, and a systemd
-                // unit inherits whatever the manager had; anchor the content root next to the
-                // executable instead so appsettings.json is found either way.
-                ContentRootPath = WindowsServiceHelpers.IsWindowsService() || SystemdHelpers.IsSystemdService()
+                // A systemd unit inherits whatever working directory the manager had; anchor the
+                // content root next to the executable instead so appsettings.json is found.
+                ContentRootPath = SystemdHelpers.IsSystemdService()
                     ? AppContext.BaseDirectory
                     : null,
             });
 
-            // Each is a no-op unless the process is actually running under that service manager,
-            // so registering both leaves a console run untouched.
-            builder.Services.AddWindowsService(options => options.ServiceName = "HostPinger");
+            // A no-op unless the process is actually running under systemd, so a console run is
+            // left untouched.
             builder.Services.AddSystemd();
 
             // Add services to the container.
@@ -94,16 +91,12 @@ namespace HostPinger
             // shared by the component asking and the overlay listening.
             builder.Services.AddScoped<LockPrompt>();
 
-            // Off Windows the key ring defaults to the user profile, which a container throws away
-            // on every restart; the Blazor circuits of any open browser then fail to reconnect, and
-            // the unlock cookie, which the same keys protect, stops being readable. Windows keeps
-            // its DPAPI-backed default, which the installed service already persists.
-            if (!OperatingSystem.IsWindows())
-            {
-                builder.Services.AddDataProtection()
-                    .PersistKeysToFileSystem(new DirectoryInfo(
-                        Path.Combine(Path.GetDirectoryName(paths.DatabasePath)!, "DataProtection-Keys")));
-            }
+            // The key ring would otherwise default to the user profile, which a container throws
+            // away on every restart; the Blazor circuits of any open browser then fail to
+            // reconnect, and the unlock cookie, which the same keys protect, stops being readable.
+            builder.Services.AddDataProtection()
+                .PersistKeysToFileSystem(new DirectoryInfo(
+                    Path.Combine(Path.GetDirectoryName(paths.DatabasePath)!, "DataProtection-Keys")));
 
             builder.Services.AddSingleton<IPingSender, PingSender>();
             builder.Services.AddSingleton<DatabasePruner>();

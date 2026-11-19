@@ -13,13 +13,9 @@ namespace HostPinger.Core.Services
     /// and loaded.
     /// </summary>
     /// <remarks>
-    /// It used to run in Program before the host started, which on Windows was before the service
-    /// had told the service manager it was running. The manager waits about thirty seconds for
-    /// that, and an upgrade's migrations over a large history take longer, so it gave up on the
-    /// service and an MSI upgrade failed and rolled back. The host's Windows lifetime reports the
-    /// service running before any StartingAsync, so the migrations now run inside a service the
-    /// manager already counts as started. Under systemd nothing changes: READY=1 still waits for
-    /// the whole start, migrations included.
+    /// Under systemd, READY=1 waits for the whole start, migrations included. An upgrade's
+    /// migrations over a large history can take minutes, which is why the packaged unit sets
+    /// TimeoutStartSec=infinity.
     /// </remarks>
     public sealed class DatabaseStartup(IServiceProvider services, PingerPaths paths) : IHostedLifecycleService
     {

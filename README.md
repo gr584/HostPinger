@@ -17,8 +17,7 @@ Pings a configured list of hosts on a schedule, records every attempt in a local
 and serves a web UI over the history it builds up: what is reachable now, how fast it is
 answering, and how long it was last unreachable.
 
-It runs as a background service on both Windows and Linux from a single codebase, packaged as an
-MSI for Windows and, on Linux, as an RPM for Fedora and a deb for Debian.
+It runs as a background service on Linux, packaged as an RPM for Fedora and a deb for Debian.
 
 ## The web UI
 
@@ -321,14 +320,11 @@ service, locked or not.
   sudo systemctl start hostpinger
   ```
 
-  On Windows the same three steps are `Stop-Service HostPinger`, the installed `HostPinger.exe`
-  with the same switch, and `Start-Service HostPinger`, from an elevated prompt. Stopping first
-  matters: the running service answers from memory and only reads the removal on its next start.
-  The command finds the database the way the service does, so a deployment that moved it — the
-  sysconfig file on Linux, the service's `Environment` value on Windows — must pass the same
-  `Pinger__DatabasePath` in the command's environment. The removal is recorded the way the
-  Password page records one, so a password configured in the environment or `appsettings.json`
-  is overridden rather than uncovered.
+  Stopping first matters: the running service answers from memory and only reads the removal on
+  its next start. The command finds the database the way the service does, so a deployment that
+  moved it in the environment file must pass the same `Pinger__DatabasePath` in the command's
+  environment. The removal is recorded the way the Password page records one, so a password
+  configured in the environment or `appsettings.json` is overridden rather than uncovered.
 - **It travels in the clear over plain HTTP**, which is how the service is normally reached. On a
   network where that matters, put something that terminates TLS in front of it. The password stops
   a passer-by changing the monitoring; it is not a defence against someone watching the wire.
@@ -368,10 +364,9 @@ service, locked or not.
   migrated automatically at startup, so an upgrade needs no separate step. A release that adds or
   rebuilds an index builds it over the history already recorded, before the service starts
   answering — on a database near its size limit that is the one kind of upgrade that takes
-  noticeable time, a minute or two, and longer on a slow machine. The Linux service waits for it
-  however long it takes, the Windows service reports itself started before it begins so the
-  service manager does not give up on it, and a start interrupted anyway — a reboot, a stop —
-  leaves nothing to repair: the next start begins that migration again.
+  noticeable time, a minute or two, and longer on a slow machine. The service waits for it
+  however long it takes, and a start interrupted anyway — a reboot, a stop — leaves nothing to
+  repair: the next start begins that migration again.
 - The file runs in SQLite's WAL mode, where reading the history never holds up a ping round's
   write; an install upgraded from an older version is switched at its first start, once any
   migration is done. The most recent writes then sit in `hostpinger.db-wal` beside the file until
@@ -395,12 +390,11 @@ service, locked or not.
 
 ## Running as a service
 
-- The same build runs as a Windows service named `HostPinger` and as the systemd unit
-  `hostpinger`, and starts with the machine either way.
+- It runs as the systemd unit `hostpinger`, and starts with the machine.
 - The database — settings included — and the data protection keys live under
-  `%ProgramData%\HostPinger` on Windows and `/var/lib/hostpinger` on Linux. Both survive an
-  upgrade or an uninstall. The keys are what let an unlocked browser stay unlocked across a
-  restart of the service, as well as reconnecting a page that was open when it went down.
+  `/var/lib/hostpinger`. Both survive an upgrade or an uninstall. The keys are what let an
+  unlocked browser stay unlocked across a restart of the service, as well as reconnecting a page
+  that was open when it went down.
 - `/health` answers for liveness probes. It deliberately touches nothing, so a pruning pass
   holding the database busy is not read as an unhealthy service.
 - Timestamps are rendered on the server, so the time zone the service runs in is what everyone
@@ -615,47 +609,6 @@ sudo ufw allow 8080/tcp
 The package depends on `aspnetcore-runtime-10.0` from Microsoft's repository, so the runtime is
 patched by its publisher rather than bundled here.
 
-## Installing on Windows
-
-Build the MSI, which publishes the application and packages it in one step:
-
-```powershell
-dotnet build HostPinger.WindowsInstaller\HostPinger.WindowsInstaller.wixproj -c Release
-```
-
-The target machine needs the [ASP.NET Core Runtime 10.0 (x64)](https://dotnet.microsoft.com/download/dotnet/10.0),
-for the same reason the RPM depends on `aspnetcore-runtime-10.0`: the application is published
-framework-dependent, so the runtime is serviced by the machine rather than frozen into the
-installer. The MSI checks for it and stops with a message naming it rather than failing later on,
-when it would otherwise show up only as the service refusing to start.
-
-Installing it registers a `HostPinger` service that starts automatically and runs as LocalSystem.
-Its database and settings live under `%ProgramData%\HostPinger`.
-
-The UI is then on port 5000, on every interface, as the Linux package puts it on 8080. The
-installer sets that through the service's environment rather than leaving Kestrel on its own
-default, which would be localhost only — see [Environment configuration](#environment-configuration)
-for changing it.
-
-The installer also opens the port in Windows Firewall, in the domain and private profiles, for this
-executable only. It leaves the public profile alone: anyone who reaches the UI can read it, and
-change it too unless a password is set — see [Locking](#locking) — and that
-password travels over plain HTTP, so an untrusted network is not somewhere to answer on. Where that
-is wanted anyway:
-
-```powershell
-Set-NetFirewallRule -DisplayName 'HostPinger web UI' -Profile Domain,Private,Public
-```
-
-Adding the rule is the one part of the install allowed to fail quietly, since a machine behind a
-third-party firewall, or with the Windows Firewall service disabled, is not a reason to fail the
-whole install. If the UI answers locally but not from another machine, that is the thing to check:
-
-```powershell
-Get-NetFirewallRule -DisplayName 'HostPinger web UI' | Format-Table DisplayName, Profile, Enabled
-New-NetFirewallRule -DisplayName 'HostPinger web UI' -Direction Inbound -Protocol TCP -LocalPort 5000 -Action Allow -Profile Domain,Private
-```
-
 ## Environment configuration
 
 Ping interval, the two timeouts and the database size limit belong to the running service and are
@@ -663,29 +616,18 @@ edited on the Configuration page, as described above. Everything else is environ
 
 | Variable | Purpose |
 | --- | --- |
-| `ASPNETCORE_HTTP_PORTS` | Listening port, on every interface. 8080 on Linux, 5000 on Windows. |
-| `TZ` | Time zone for displayed timestamps. They are rendered server-side, so this decides what users see. Linux only — Windows takes the system time zone. |
+| `ASPNETCORE_HTTP_PORTS` | Listening port, on every interface. 8080 in the shipped environment file. |
+| `TZ` | Time zone for displayed timestamps. They are rendered server-side, so this decides what users see. |
 | `Security__AllowedHostNames` | Further names the web UI answers to, separated by semicolons. See [Names the service answers to](#names-the-service-answers-to). |
-| `Pinger__DatabasePath` | Database location. Defaults to `/var/lib/hostpinger/hostpinger.db` on Linux and `%ProgramData%\HostPinger\hostpinger.db` on Windows. |
-| `DOTNET_EnableDiagnostics` | `0` in the shipped Linux environment file, which keeps the runtime from opening a debugger transport and a diagnostics socket a service does not need. See below. |
+| `Pinger__DatabasePath` | Database location. Defaults to `/var/lib/hostpinger/hostpinger.db`. |
+| `DOTNET_EnableDiagnostics` | `0` in the shipped environment file, which keeps the runtime from opening a debugger transport and a diagnostics socket a service does not need. See below. |
 
-On Linux they live in `/etc/sysconfig/hostpinger` on Fedora and `/etc/default/hostpinger` on
-Debian — one file, under the name each distribution expects — and take effect on `systemctl
-restart hostpinger`. On Windows they live in the service's `Environment` value, which the service control
-manager passes to the process, and take effect on `Restart-Service HostPinger`. Setting it replaces
-the whole set, so include the port the installer put there:
+They live in `/etc/sysconfig/hostpinger` on Fedora and `/etc/default/hostpinger` on Debian — one
+file, under the name each distribution expects — and take effect on `systemctl restart hostpinger`.
+Both packages leave the file alone on upgrade.
 
-```powershell
-Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Services\HostPinger -Name Environment `
-  -Value @('ASPNETCORE_HTTP_PORTS=5000', 'Pinger__DatabasePath=D:\HostPinger\hostpinger.db')
-```
-
-Unlike that file, which both Linux packages leave alone on upgrade, reinstalling or upgrading the
-MSI writes that value back to the default.
-
-Changing the port on either platform leaves the firewall behind: neither Linux package opens one,
-and the rule the MSI adds names port 5000. `Set-NetFirewallRule -DisplayName 'HostPinger web UI' -LocalPort
-<new>` moves it, until the next upgrade puts 5000 back.
+Neither package opens the port in a firewall, so a changed port is one to open by hand wherever a
+firewall is running.
 
 ### Names the service answers to
 
@@ -908,9 +850,9 @@ SDK that Fedora packages, rather than on a generic runner with the SDK from Micr
 different feature bands and do not accept identical source. Building on the target distribution is
 what catches that.
 
-The four build jobs (test, rpm, deb and msi) run independently so that a push reports every kind
-of failure at once. Pushing a `v*` tag additionally runs a release job, which requires all four to
-have passed and attaches the RPM, the deb and the MSI to a GitHub release — a tag carrying a
+The three build jobs (test, rpm and deb) run independently so that a push reports every kind
+of failure at once. Pushing a `v*` tag additionally runs a release job, which requires all three to
+have passed and attaches the RPM and the deb to a GitHub release — a tag carrying a
 prerelease suffix is marked as such rather than becoming the current release — after which the repo
 job publishes the dnf and apt repositories to GitHub Pages. The benchmark job runs on pushes and
 pull requests but not on tags, and gates nothing.
@@ -992,7 +934,6 @@ machine, so read differences of a few tens of percent between runs as noise.
 | `HostPinger.Test/` | NUnit tests over the library and the service logic. |
 | `HostPinger.UITest/` | NUnit tests over the web UI, driving a browser through Playwright. |
 | `HostPinger.Benchmarks/` | BenchmarkDotNet benchmarks of the database calls the pages make, over a seeded production-shaped database. |
-| `HostPinger.WindowsInstaller/` | WiX project producing the MSI. |
 | `HostPinger.LinuxInstaller/` | Systemd unit and environment file, the RPM spec and SELinux policy module, the Debian packaging under `debian/`, and a build script for each package. |
 
-Verified against Fedora 44, Debian 13 and Windows 11.
+Verified against Fedora 44 and Debian 13.

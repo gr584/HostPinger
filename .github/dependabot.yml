@@ -22,10 +22,8 @@ updates:
   # ship nowhere, but they are the only project referencing BenchmarkDotNet, which would otherwise
   # never be bumped.
   #
-  # HostPinger.WindowsInstaller is deliberately absent. Dependabot recognises .csproj, .vbproj,
-  # .fsproj and .proj, but not .wixproj, and naming a directory it finds no manifest in fails the
-  # update run. WixToolset.Firewall.wixext is therefore bumped by hand -- as is the vendored
-  # Bootstrap under HostPinger/wwwroot/lib, which is checked in rather than restored.
+  # The vendored Bootstrap under HostPinger/wwwroot/lib is bumped by hand: it is checked in rather
+  # than restored.
   - package-ecosystem: nuget
     directories:
       - /

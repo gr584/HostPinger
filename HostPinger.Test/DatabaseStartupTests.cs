@@ -10,9 +10,8 @@ using Microsoft.Extensions.Options;
 namespace HostPinger.Test
 {
     /// <summary>
-    /// Opening the database as a step of the host's start rather than ahead of it, which is what
-    /// lets a Windows service tell the service manager it is running before an upgrade's
-    /// migrations begin. What has to hold either way is that nothing else starts first.
+    /// Opening the database as a step of the host's start rather than ahead of it. What has to
+    /// hold is that nothing else starts first.
     /// </summary>
     public class DatabaseStartupTests
     {

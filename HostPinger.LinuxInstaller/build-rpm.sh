@@ -60,7 +60,7 @@ dotnet publish "$project" \
     -p:Version="$VERSION"
 
 # The development settings file is an artefact of running from a checkout and has no meaning on an
-# installed machine — the Windows installer excludes it for the same reason.
+# installed machine.
 rm -f "$publish_dir/appsettings.Development.json"
 
 # The static archive beside libe_sqlite3.so is for linking against, never loaded at runtime; it is

@@ -12,14 +12,14 @@
 
   <ItemGroup>
     <!-- Data/ is the local development database and settings overlay. Without this it matches the
-         Web SDK's default **/*.json content glob and ships in publish output — and so in the MSI. -->
+         Web SDK's default **/*.json content glob and ships in publish output — and so in the packages. -->
     <Content Remove="Data\**" />
   </ItemGroup>
 
   <ItemGroup>
     <!-- The About page renders the marked section of the README rather than restating it, so the
          file has to travel with the assembly instead of staying in the checkout. Compiling it in
-         rather than copying it beside the executable means it reaches the RPM and the MSI without
+         rather than copying it beside the executable means it reaches the RPM and the deb without
          either packaging step knowing about it. -->
     <EmbeddedResource Include="..\README.md" LogicalName="README.md" Visible="false" />
   </ItemGroup>
@@ -30,10 +30,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Both are no-ops off their own platform, so the same build hosts itself correctly as a
-         Windows service and as a systemd unit. -->
+    <!-- A no-op unless systemd started the process, so a console run is left as it is. -->
     <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" />
-    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
   </ItemGroup>
 
   <ItemGroup>
@@ -57,7 +55,6 @@
     <PermittedPackageReference Include="Markdig" />
     <PermittedPackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" />
     <PermittedPackageReference Include="Microsoft.Extensions.Hosting.Systemd" />
-    <PermittedPackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
   </ItemGroup>
 
   <!-- Ahead of restore as well as build, so a package that is not on the list never reaches the

@@ -33,9 +33,6 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      # Running the tests on Linux is not redundant with a developer's Windows run: the path
-      # defaults are per-OS, so the assertions covering /var/lib/hostpinger are skipped on Windows
-      # and only ever execute here.
       - run: dotnet test HostPinger.Test/HostPinger.Test.csproj -c Release --blame-hang-timeout 5m
 
       # The runner image ships Chrome, which is what these drive. On a machine without one they
@@ -349,137 +346,6 @@ jobs:
           path: HostPinger.LinuxInstaller/build-deb/*.deb
           if-no-files-found: error
 
-  msi:
-    name: msi (windows)
-    runs-on: windows-latest
-    # See the rpm job. The MSI hides the fault rather than showing it: ProductVersion has to be
-    # numeric, so the no-branch label is dropped on the way in and a wrong version arrives looking
-    # like a perfectly ordinary one.
-    env:
-      GITHUB_REF: ${{ github.ref_type == 'tag' && 'refs/heads/main' || github.ref }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
-        with:
-          dotnet-version: '10.0.x'
-
-      # The WiX project publishes the application itself before packaging it, so this one command
-      # covers the whole Windows path.
-      - name: Build the MSI
-        run: dotnet build HostPinger.WindowsInstaller/HostPinger.WindowsInstaller.wixproj -c Release
-
-      # The counterpart to the RPM job's metadata check. It guards the two halves of being
-      # framework-dependent — the payload carries no runtime, and the installer refuses a machine
-      # that has none, which a stray --self-contained would undo without failing the build — and
-      # then the two halves of the UI being reachable at all, the bound port and the firewall rule.
-      - name: Verify package metadata
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          # Only a self-contained publish brings the runtime's own assemblies along.
-          if (Test-Path 'HostPinger.WindowsInstaller/obj/publish/win-x64/System.Private.CoreLib.dll') {
-            Write-Output '::error::the publish is self-contained; it carries its own copy of the runtime'
-            exit 1
-          }
-
-          $msi = (Get-ChildItem HostPinger.WindowsInstaller/bin -Recurse -Filter *.msi)[0].FullName
-          Write-Output "checking $msi"
-
-          # The installer database has no command line tool on the runner; this is the COM API that
-          # msiexec itself uses. Late-bound because the interfaces carry no usable type library.
-          $installer = New-Object -ComObject WindowsInstaller.Installer
-          $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($msi, 0))
-          $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @('SELECT Condition FROM LaunchCondition'))
-          $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
-
-          $conditions = @()
-          while ($record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)) {
-            $conditions += [string]$record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, @(1))
-          }
-          $conditions | ForEach-Object { Write-Output "launch condition: $_" }
-
-          if (-not ($conditions -match 'ASPNETCORERUNTIME')) {
-            Write-Output '::error::the MSI no longer requires the ASP.NET Core runtime to be installed'
-            exit 1
-          }
-
-          # Reaching the UI from another machine takes two rows in two different tables, and losing
-          # either one produces the same silent result: a service that answers only itself, which
-          # nothing about the install or the build would report. Adding the firewall rule is even
-          # authored to fail quietly on the target machine, so a check here is what is left.
-          function Get-Rows($query) {
-            $v = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @($query))
-            # Discarded rather than left to fall out of the function, where it would join the rows.
-            [void]$v.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $v, $null)
-            $rows = @()
-            while ($r = $v.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $v, $null)) {
-              $count = $r.GetType().InvokeMember('FieldCount', 'GetProperty', $null, $r, $null)
-              $fields = @()
-              for ($i = 1; $i -le $count; $i++) {
-                $fields += [string]$r.GetType().InvokeMember('StringData', 'GetProperty', $null, $r, @($i))
-              }
-              $rows += ,$fields
-            }
-            $rows
-          }
-
-          # The counterpart to the RPM job's version check, and the more necessary of the two.
-          # ProductVersion has to be numeric, so a SemVer prerelease label is dropped on the way in
-          # and a version derived from the wrong place arrives here looking entirely ordinary --
-          # v1.2.0 shipped an MSI reading 1.2.1.0, which nothing about the file gave away.
-          if ($env:GITHUB_REF_TYPE -eq 'tag') {
-            $expected = $env:GITHUB_REF_NAME -replace '^v', ''
-            # Filtered here rather than in the query. A single-row result comes back from Get-Rows
-            # unwrapped -- PowerShell flattens the outer array -- so [0] is the first field rather
-            # than the first row, and indexing it again walks into the string a character at a
-            # time. Selecting the whole table keeps it a list of rows, which is why the checks
-            # below have never had to think about it.
-            $actual = Get-Rows 'SELECT Property, Value FROM Property' |
-              Where-Object { $_[0] -eq 'ProductVersion' } | ForEach-Object { $_[1] }
-            Write-Output "product version: $actual"
-            # Authored as three parts and padded to four by the installer, so compare the prefix.
-            if ($actual -ne $expected -and $actual -ne "$expected.0") {
-              Write-Output "::error::building $env:GITHUB_REF_NAME produced version $actual, expected $expected"
-              exit 1
-            }
-          }
-
-          $environment = Get-Rows 'SELECT Name, Value FROM Registry' |
-            Where-Object { $_[0] -eq 'Environment' } | ForEach-Object { $_[1] }
-          $environment | ForEach-Object { Write-Output "service environment: $_" }
-
-          if (-not ($environment -match 'ASPNETCORE_HTTP_PORTS=5000')) {
-            Write-Output '::error::the MSI no longer sets the port on the service, so it would bind localhost only'
-            exit 1
-          }
-
-          # Port and protocol as numbers: 6 is TCP. Profile 1 is domain and 2 is private; the public
-          # profile is deliberately not among them, and finding it here means someone widened the
-          # rule to networks the UI — readable by anyone, and guarded at most by an optional
-          # password sent in the clear — has no business answering on.
-          #
-          # The table name carries the extension's major version, so moving off WiX 6 renames it and
-          # fails this step until the name is updated — which is the point at which to check that
-          # the rule still means what it did.
-          $rules = Get-Rows 'SELECT Name, Port, Protocol, Profile FROM Wix5FirewallException'
-          $rules | ForEach-Object { Write-Output "firewall rule: $($_ -join ' ')" }
-
-          $profiles = $rules | Where-Object { $_[1] -eq '5000' -and $_[2] -eq '6' } | ForEach-Object { $_[3] }
-          if (($profiles | Sort-Object) -join ',' -ne '1,2') {
-            Write-Output '::error::the MSI no longer opens TCP 5000 in exactly the domain and private profiles'
-            exit 1
-          }
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: msi
-          path: HostPinger.WindowsInstaller/bin/**/*.msi
-          if-no-files-found: error
-
   notes:
     name: notes
     # The text the release job puts above GitHub's own release notes. GitHub builds those from
@@ -559,12 +425,12 @@ jobs:
 
   release:
     name: release
-    # The gate sits here rather than between the build jobs. Those four catch disjoint failures —
+    # The gate sits here rather than between the build jobs. Those three catch disjoint failures —
     # the packaging jobs are the only builds on the target distributions' own SDKs — so making them
     # wait on one another would delay signal without changing whether the run is red. What
-    # actually warrants a gate is publishing, and this job cannot start unless all four passed. It
+    # actually warrants a gate is publishing, and this job cannot start unless all three passed. It
     # waits on the notes job as well, for the text it puts above GitHub's notes.
-    needs: [test, rpm, deb, msi, notes]
+    needs: [test, rpm, deb, notes]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -641,7 +507,7 @@ jobs:
 
           # Found rather than globbed: upload-artifact decides how deeply it nests each artifact
           # based on the common prefix of what matched, which differs between the jobs.
-          mapfile -t files < <(find artifacts -type f \( -name '*.rpm' -o -name '*.deb' -o -name '*.msi' \))
+          mapfile -t files < <(find artifacts -type f \( -name '*.rpm' -o -name '*.deb' \))
           printf 'attaching: %s\n' "${files[@]}"
 
           # The notes job's text goes above what --generate-notes produces. It is passed in a file
@@ -683,7 +549,7 @@ jobs:
     #     xargs -I{} gh api -X DELETE repos/$REPO/actions/artifacts/{}
     #   gh api -X POST repos/$REPO/actions/runs/$RUN/rerun-failed-jobs
     #
-    # Only those: the rpm, deb and msi artifacts have nothing to do with the deployment. And the
+    # Only those: the rpm and deb artifacts have nothing to do with the deployment. And the
     # run rather than this job by id — a job id from an earlier attempt is stale, and the API
     # answers that it cannot be rerun.
     needs: [release]
