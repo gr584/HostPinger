@@ -4,6 +4,9 @@
     <!-- GitVersion already puts the commit sha in InformationalVersion; without this the SDK
          appends it a second time. -->
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <!-- GitVersion 7 sends sampled usage data to PostHog on every run unless told not to, which
+         would make every build here, a developer's or CI's, report to a third party. -->
+    <GitVersion_CommandLineArguments>--telemetry-opt-out</GitVersion_CommandLineArguments>
   </PropertyGroup>
 
   <ItemGroup>

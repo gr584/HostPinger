@@ -3,4 +3,5 @@
 # supplies a floor until the first tag exists, and is set to 1.0.0 because that is the version
 # the installer already shipped.
 workflow: GitHubFlow/v1
-next-version: 1.0.0
+calculation:
+  next-version: 1.0.0
