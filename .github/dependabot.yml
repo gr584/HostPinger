@@ -34,11 +34,20 @@ updates:
       - /HostPinger.Benchmarks
     schedule:
       interval: weekly
+    # HostPinger stays on .NET's long-term-support releases. A major of these packages is the
+    # next runtime's band, so taking one means moving the target framework, the runtime the deb
+    # and rpm depend on, and production's runtime with it; on its own it either fails restore or
+    # mixes an 11.0 library into a 10.0 app (#42, #43). Majors are taken by hand, all together,
+    # when the project moves to the next LTS.
+    ignore:
+      - dependency-name: Microsoft.EntityFrameworkCore.*
+        update-types: [version-update:semver-major]
+      - dependency-name: Microsoft.Extensions.*
+        update-types: [version-update:semver-major]
     groups:
       # The EF Core and Microsoft.Extensions packages are serviced as one band alongside the
       # runtime they target, so a servicing release would otherwise arrive as half a dozen
-      # separate PRs that all have to be merged together anyway. Majors stay on their own,
-      # since those are the ones worth reading.
+      # separate PRs that all have to be merged together anyway.
       dotnet:
         patterns:
           - Microsoft.EntityFrameworkCore.*
