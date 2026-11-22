@@ -18,7 +18,11 @@ namespace HostPinger.Benchmarks.Benchmarks
     /// times bringing it forward again. While nothing has been added since the last release there is
     /// nothing to undo or apply, and this measures only the check that says so. The working copy is
     /// in WAL mode by then, where a real first start migrates in rollback-journal mode and switches
-    /// afterwards; that changes the figure somewhat, not whether it is seconds or minutes.
+    /// afterwards; that changes the figure somewhat, not whether it is seconds or minutes. So does
+    /// the shape of the attempts' times the Down steps leave: StorePingTimesAsUnixMilliseconds's
+    /// writes them as text to the millisecond, at most three digits of fraction, where a real
+    /// database from that release holds the provider's seven. Converting the shorter text back is a
+    /// little quicker, so the figure is a little under what the upgrade takes.
     /// </remarks>
     [BenchmarkCategory("Upgrade")]
     [PageBenchmark(
@@ -29,8 +33,9 @@ namespace HostPinger.Benchmarks.Benchmarks
     public class UpgradeBenchmarks : DatabaseBenchmark
     {
         /// <summary>
-        /// The last migration the latest release shipped: 1.13.0's. Moved on when a release is
-        /// tagged, so that this goes on timing the upgrade the next release will make.
+        /// The last migration the latest release shipped: 1.14.0's, which was 1.13.0's too. Moved on
+        /// when a release is tagged, so that this goes on timing the upgrade the next release will
+        /// make.
         /// </summary>
         internal const string LastReleasedMigration = "20261016020813_AddRoundtripToPartialPingIndexes";
 

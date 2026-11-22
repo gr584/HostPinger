@@ -19,6 +19,9 @@ namespace HostPinger.Test
         /// <summary>The last migration 1.12.0 shipped, with both index rebuilds still to come.</summary>
         private const string LastIn1_12 = "20260829041132_AddUserSettings";
 
+        /// <summary>The last migration with the attempts' times stored as text.</summary>
+        private const string LastWithTextTimes = "20261016020813_AddRoundtripToPartialPingIndexes";
+
         private static readonly TimeSpan Patience = TimeSpan.FromSeconds(30);
 
         /// <summary>The password of the backups the uploads restore.</summary>
@@ -171,6 +174,23 @@ namespace HostPinger.Test
             Assert.That(await _backup.ValidateBackupAsync(newerPath), Is.EqualTo("This backup was made by a newer version of HostPinger."));
         }
 
+        /// <summary>
+        /// A schema level above this build's is a newer build's file, refused by the check, before a
+        /// restore asks for its password, as a migration it does not know is.
+        /// </summary>
+        [Test]
+        public async Task ValidateBackup_RejectsANewerSchemaLevel()
+        {
+            var newerPath = Path.Combine(_directory, "newer-level.db");
+            await using (var db = new HostPingerDbContext(OptionsFor(newerPath)))
+            {
+                await db.Database.MigrateAsync();
+                await db.Database.ExecuteSqlRawAsync($"PRAGMA user_version = {HostPingerDatabase.SchemaLevel + 1};");
+            }
+
+            Assert.That(await _backup.ValidateBackupAsync(newerPath), Is.EqualTo("This backup was made by a newer version of HostPinger."));
+        }
+
         [Test]
         public async Task ValidateBackup_AcceptsOlderDatabase()
         {
@@ -301,9 +321,9 @@ namespace HostPinger.Test
         [Test]
         public async Task Restore_MeasuresTheSafeLimitAgainstTheRoomItLeaves()
         {
-            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 80_000);
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 150_000);
             var backupPath = await BackupWithAsync("backup.example", "backup-hash");
-            await SeedHostWithAttemptsAsync(OptionsFor(backupPath), "busy.example", attempts: 80_000);
+            await SeedHostWithAttemptsAsync(OptionsFor(backupPath), "busy.example", attempts: 150_000);
             await StageSizeLimitAsync(OptionsFor(backupPath), "500000");
             SqliteConnection.ClearAllPools();
             var replacedBytes = DatabaseSizeLimit.FootprintBytes(_dbPath);
@@ -1163,8 +1183,9 @@ namespace HostPinger.Test
 
         /// <summary>
         /// An older backup is migrated before it is restored, and a migration can fail on it —
-        /// here the last one, which drops an index the file no longer has. That is found out
-        /// before the swap, so the database it was meant to replace never leaves.
+        /// here the last one, which converts each attempt's time to a number and refuses one it
+        /// cannot read rather than storing it wrong. That is found out before the swap, so the
+        /// database it was meant to replace never leaves.
         /// </summary>
         [Test]
         public async Task Restore_RefusesABackupThatCannotBeMigrated_ReplacingNothing()
@@ -1176,17 +1197,17 @@ namespace HostPinger.Test
             var backupPath = Path.Combine(_directory, "uploaded.db");
             await using (var db = new HostPingerDbContext(OptionsFor(backupPath)))
             {
-                await db.Database.MigrateAsync();
-                await db.Database.ExecuteSqlRawAsync(
-                    "DELETE FROM __EFMigrationsHistory WHERE MigrationId = (SELECT MAX(MigrationId) FROM __EFMigrationsHistory);");
-                await db.Database.ExecuteSqlRawAsync("DROP INDEX IX_PingAttempts_Answered;");
+                await db.GetService<IMigrator>().MigrateAsync(LastWithTextTimes);
             }
+
+            await SeedHostWithAttemptsAsync(OptionsFor(backupPath), "older.example", attempts: 0);
+            await ExecuteAsync(backupPath, "INSERT INTO PingAttempts (HostId, TimestampUtc, RoundtripMs) VALUES (1, 'not a time', 5);");
 
             Assert.That(await _backup.ValidateBackupAsync(backupPath), Is.Null, "an older backup is accepted");
 
             var failure = await Assert.ThrowsAsync<IOException>(() => _backup.RestoreAsync(backupPath));
 
-            Assert.That(failure!.Message, Does.Contain("no such index: IX_PingAttempts_Answered"));
+            Assert.That(failure!.Message, Does.Contain("NOT NULL constraint failed: ef_temp_PingAttempts.TimestampUtc"));
             Assert.That(failure.Message, Does.EndWith(" Nothing was replaced."));
             await AssertNothingWasReplacedAsync(failure, failure.Message);
         }
@@ -1854,7 +1875,9 @@ namespace HostPinger.Test
                 await db.GetService<IMigrator>().MigrateAsync("20260811051236_AddResolverErrors");
             }
 
-            await SeedHostWithAttemptsAsync(OptionsFor(backupPath), "older.example", attempts: 1);
+            // An attempt as the older build wrote it, its time as text: today's model would write a number.
+            await SeedHostWithAttemptsAsync(OptionsFor(backupPath), "older.example", attempts: 0);
+            await ExecuteAsync(backupPath, "INSERT INTO PingAttempts (HostId, TimestampUtc, RoundtripMs) VALUES (1, '2026-01-01 00:00:00', 5);");
             SqliteConnection.ClearAllPools();
             Assert.That(await ScalarAsync(backupPath, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'UserSettings';"), Is.Zero,
                 "the backup is older than the settings table");
@@ -2506,6 +2529,16 @@ namespace HostPinger.Test
             await using var connection = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
             await connection.OpenAsync();
             return await ScalarAsync(connection, sql);
+        }
+
+        /// <summary>Runs <paramref name="sql"/> against the file at <paramref name="path"/>, outside EF.</summary>
+        private static async Task ExecuteAsync(string path, string sql)
+        {
+            await using var connection = new SqliteConnection($"Data Source={path};Pooling=False");
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            await command.ExecuteNonQueryAsync();
         }
 
         private static async Task<object?> ScalarAsync(SqliteConnection connection, string sql)

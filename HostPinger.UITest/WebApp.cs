@@ -209,8 +209,9 @@ namespace HostPinger.UITest
 
                 try
                 {
+                    // Up as soon as it answers; ready once it has opened the database.
                     using var response = await client.GetAsync($"{BaseUrl}/health");
-                    if (response.IsSuccessStatusCode)
+                    if (response.IsSuccessStatusCode && (await response.Content.ReadAsStringAsync()).Contains("Healthy"))
                     {
                         return;
                     }

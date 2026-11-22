@@ -100,16 +100,26 @@ namespace HostPinger.Core.Charting
         /// Total on purpose, like <see cref="Data.HostSort.Parse"/> — a hand-typed or truncated
         /// query string leaves the reader looking at a chart rather than at an error page — so
         /// anything that is neither two readable instants in order nor a width the chart will draw
-        /// comes back null, and the caller opens on whatever it would have opened on anyway.
+        /// comes back null, and the caller opens on whatever it would have opened on anyway. So does
+        /// a period ending after <see cref="LatestEnd"/>, which no read could take.
         /// </summary>
         /// <param name="start">The <c>from</c> parameter.</param>
         /// <param name="end">The <c>to</c> parameter.</param>
         /// <param name="window">The <c>window</c> parameter.</param>
+        /// <summary>
+        /// The latest a period can end: the start of DateTime's last whole millisecond. The times
+        /// are stored to the millisecond, and a read rounds a range's start up to one
+        /// (<see cref="Data.StoredTime.Ceiling"/>); inside DateTime's last millisecond, which is not
+        /// a whole one, that would be past <see cref="DateTime.MaxValue"/>, and the read would throw.
+        /// </summary>
+        public static readonly DateTime LatestEnd = Data.StoredTime.Truncate(DateTime.MaxValue);
+
         public static GraphOpening? Parse(string? start, string? end, string? window)
         {
             if (TryParseInstant(start, out var startUtc)
                 && TryParseInstant(end, out var endUtc)
-                && endUtc > startUtc)
+                && endUtc > startUtc
+                && endUtc <= LatestEnd)
             {
                 return new Period(startUtc, endUtc);
             }

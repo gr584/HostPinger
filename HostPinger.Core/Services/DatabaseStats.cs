@@ -24,7 +24,15 @@ namespace HostPinger.Core.Services
         /// </summary>
         public const long MinimumAttemptsForEstimate = 200;
 
+        /// <summary>The file's size, which is what the size limit is held to.</summary>
         public required long SizeBytes { get; init; }
+
+        /// <summary>
+        /// What the file's pages in use come to: <see cref="SizeBytes"/> less the free pages
+        /// inside it, which hold no data. An upgrade that rebuilds a table can leave many of them,
+        /// until later writes reuse them or pruning gives them back to the disk.
+        /// </summary>
+        public required long UsedBytes { get; init; }
 
         /// <summary>
         /// The limit in force. Never zero or less once the service has started (see
@@ -43,10 +51,15 @@ namespace HostPinger.Core.Services
             ? 0
             : EnabledHostCount * TimeSpan.FromDays(1).TotalSeconds / IntervalSeconds;
 
-        /// <summary>Average bytes each stored attempt accounts for, or null while unknown.</summary>
-        public double? BytesPerAttempt => AttemptCount < MinimumAttemptsForEstimate || SizeBytes <= BaselineBytes
+        /// <summary>
+        /// Average bytes each stored attempt accounts for, or null while unknown. Measured on the
+        /// pages in use rather than on the whole file, whose free pages hold no attempts: counted,
+        /// they would make each attempt look larger than it is, and the history the limit holds
+        /// shorter, by as much as the file has free.
+        /// </summary>
+        public double? BytesPerAttempt => AttemptCount < MinimumAttemptsForEstimate || UsedBytes <= BaselineBytes
             ? null
-            : (double)(SizeBytes - BaselineBytes) / AttemptCount;
+            : (double)(UsedBytes - BaselineBytes) / AttemptCount;
 
         /// <summary>Projected growth of the file per day, or null while it cannot be estimated.</summary>
         public double? GrowthBytesPerDay => AttemptsPerDay <= 0 ? null : BytesPerAttempt * AttemptsPerDay;
@@ -66,6 +79,10 @@ namespace HostPinger.Core.Services
         public double? CapacityDaysIn(long sizeBytes) => sizeBytes <= 0 || GrowthBytesPerDay is not > 0
             ? null
             : sizeBytes / GrowthBytesPerDay;
+
+        /// <summary>What <see cref="UsedBytes"/> is read with: the pages in use, the free ones left out.</summary>
+        internal const string UsedBytesSql =
+            "SELECT (page_count - freelist_count) * page_size FROM pragma_page_count(), pragma_freelist_count(), pragma_page_size();";
 
         /// <summary>
         /// How many attempts there are, read off the span of their ids: the last id less the first,
@@ -95,6 +112,7 @@ namespace HostPinger.Core.Services
             return new DatabaseStats
             {
                 SizeBytes = await DatabasePruner.GetDatabaseSizeBytesAsync(db, cancellationToken),
+                UsedBytes = await ScalarAsync(db, UsedBytesSql, cancellationToken),
                 MaxSizeBytes = options.MaxDatabaseSizeBytes,
                 AttemptCount = await CountAttemptsAsync(db, cancellationToken),
                 EnabledHostCount = await db.Hosts.CountAsync(h => h.IsEnabled, cancellationToken),
@@ -103,14 +121,17 @@ namespace HostPinger.Core.Services
         }
 
         /// <summary>How many attempts are stored, as <see cref="AttemptIdSpanSql"/> reads it.</summary>
-        internal static async Task<long> CountAttemptsAsync(
+        internal static Task<long> CountAttemptsAsync(
             HostPingerDbContext db,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default) =>
+            ScalarAsync(db, AttemptIdSpanSql, cancellationToken);
+
+        private static async Task<long> ScalarAsync(HostPingerDbContext db, string sql, CancellationToken cancellationToken)
         {
             var connection = db.Database.GetDbConnection();
             await db.Database.OpenConnectionAsync(cancellationToken);
             await using var command = connection.CreateCommand();
-            command.CommandText = AttemptIdSpanSql;
+            command.CommandText = sql;
             return Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken));
         }
     }

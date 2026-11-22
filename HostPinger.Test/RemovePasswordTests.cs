@@ -16,6 +16,9 @@ namespace HostPinger.Test
     /// </summary>
     public class RemovePasswordTests
     {
+        /// <summary>The last migration with the attempts' times stored as text, 1.13.0's and 1.14.0's.</summary>
+        private const string LastWithTextTimes = "20261016020813_AddRoundtripToPartialPingIndexes";
+
         private string _directory = null!;
         private string _databasePath = null!;
 
@@ -32,6 +35,49 @@ namespace HostPinger.Test
         {
             SqliteConnection.ClearAllPools();
             Directory.Delete(_directory, recursive: true);
+        }
+
+        /// <summary>
+        /// A database that needs upgrading, on a disk without the room the upgrade needs, is left as it
+        /// is, and the command says why rather than filling the disk partway through: the rule the
+        /// service waits on.
+        /// </summary>
+        [Test]
+        public async Task RemovePasswordAsync_RefusesAnUpgradeTheDiskHasNoRoomFor()
+        {
+            await using (var db = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath)))
+            {
+                await db.GetService<IMigrator>().MigrateAsync(LastWithTextTimes);
+            }
+
+            var refused = await Assert.ThrowsAsync<MigrationRoomException>(
+                () => UserSettingsStore.RemovePasswordAsync(_databasePath, () => 1024 * 1024));
+
+            await using var check = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath));
+            Assert.Multiple(async () =>
+            {
+                Assert.That(refused!.NeededBytes, Is.GreaterThan(refused.FreeBytes));
+                Assert.That(await check.Database.GetPendingMigrationsAsync(), Is.Not.Empty, "upgraded without the room");
+            });
+        }
+
+        /// <summary>
+        /// With the room, the same database is upgraded and its password removed, as it always was;
+        /// and a database with nothing to upgrade needs none.
+        /// </summary>
+        [Test]
+        public async Task RemovePasswordAsync_UpgradesWhenTheDiskHasTheRoomAndNeedsNoneOtherwise()
+        {
+            await using (var db = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath)))
+            {
+                await db.GetService<IMigrator>().MigrateAsync(LastWithTextTimes);
+            }
+
+            await UserSettingsStore.RemovePasswordAsync(_databasePath, () => long.MaxValue);
+            await UserSettingsStore.RemovePasswordAsync(_databasePath, () => 0);
+
+            await using var check = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath));
+            Assert.That(await check.Database.GetPendingMigrationsAsync(), Is.Empty);
         }
 
         /// <summary>A password set on the Password page is gone once the service reads its settings again.</summary>

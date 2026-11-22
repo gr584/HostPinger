@@ -111,9 +111,9 @@ namespace HostPinger
             // needs half of.
             builder.Services.AddSingleton<DatabaseSizeLimit>();
 
-            // Migrations, then the settings, then the host summary, then the temp-file sweep, before
-            // the web server or any ping round starts; see DatabaseStartup for why it is a hosted
-            // service rather than a step ahead of the host.
+            // The temp-file sweep, the wait for room an upgrade needs, the migrations, the settings
+            // and the host summary, in the background while the web server answers with what it is
+            // waiting for; the ping rounds wait for it. See DatabaseStartup.
             builder.Services.AddHostedService<DatabaseStartup>();
 
             // Registered ahead of the monitor so its verdict reaches the log before the first round
@@ -178,7 +178,41 @@ namespace HostPinger
 
             // Liveness probe for container orchestration. It deliberately touches nothing: a
             // pruning pass holding the database busy is not a reason to restart the container.
-            app.MapGet("/health", () => Results.Ok("Healthy"));
+            // Until the start has opened the database, the pages draw only what it is waiting for
+            // (MainLayout), and nothing that would act on the database is taken: a form's post, the
+            // backup download, and any interactive circuit, whose pages read the database and are
+            // not drawn inside the layout's check. Refused by path as well as by method, since a
+            // circuit's WebSocket can open with a GET. Answered as unavailable for now, which is
+            // what it is.
+            var opening = app.Services.GetRequiredService<DatabaseOpening>();
+            app.Use(async (context, next) =>
+            {
+                if (!opening.IsOpen
+                    && ((!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method))
+                        || context.Request.Path.StartsWithSegments("/database-backup")
+                        || context.Request.Path.StartsWithSegments("/_blazor")))
+                {
+                    context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                    context.Response.Headers.RetryAfter = "60";
+                    // With a body, so that the status code pages leave it as it is.
+                    await context.Response.WriteAsync("HostPinger is opening its database. Try again once it is open.");
+                    return;
+                }
+
+                await next(context);
+            });
+
+            // Answers throughout, the start included: a liveness probe that failed while a long
+            // upgrade ran would have the service restarted into the same upgrade. What it says is
+            // the stage the start has got to, Healthy once the database is open, for anything that
+            // waits for the service to be ready and needs to tell waiting from refused.
+            app.MapGet("/health", () => Results.Ok(opening.Stage switch
+            {
+                DatabaseOpeningStage.Open => "Healthy",
+                DatabaseOpeningStage.WaitingForRoom => "WaitingForRoom",
+                DatabaseOpeningStage.Refused => "Refused",
+                _ => "Opening",
+            }));
 
             // The backup download. A plain GET rather than anything on the circuit, because a
             // gigabyte belongs on the HTTP pipe, not the SignalR one. The page writes the snapshot
@@ -233,7 +267,18 @@ namespace HostPinger
         /// </summary>
         private static void RemovePassword(PingerPaths paths)
         {
-            var clearedLock = UserSettingsStore.RemovePasswordAsync(paths.DatabasePath).GetAwaiter().GetResult();
+            bool clearedLock;
+            try
+            {
+                clearedLock = UserSettingsStore.RemovePasswordAsync(paths.DatabasePath).GetAwaiter().GetResult();
+            }
+            catch (Exception ex) when (ex is NewerDatabaseException or MigrationRoomException)
+            {
+                // Refusals with nothing written, which say what to do in a sentence: no stack trace.
+                Console.Error.WriteLine(ex.Message);
+                Environment.ExitCode = 1;
+                return;
+            }
 
             if (clearedLock)
             {

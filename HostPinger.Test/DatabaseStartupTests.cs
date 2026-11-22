@@ -3,18 +3,28 @@ using HostPinger.Core.Options;
 using HostPinger.Core.Services;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
 namespace HostPinger.Test
 {
     /// <summary>
-    /// Opening the database as a step of the host's start rather than ahead of it. What has to
-    /// hold is that nothing else starts first.
+    /// Opening the database as the host starts, alongside the rest of the host rather than ahead of
+    /// it. What has to hold is that nothing that uses the database goes on before it is open, that
+    /// a migration waits for the room it needs, and that a database from a newer build is refused.
     /// </summary>
     public class DatabaseStartupTests
     {
+        /// <summary>The last migration with the attempts' times stored as text, 1.13.0's and 1.14.0's.</summary>
+        private const string LastWithTextTimes = "20261016020813_AddRoundtripToPartialPingIndexes";
+
+        private static readonly TimeSpan Patience = TimeSpan.FromSeconds(30);
+
         private string _directory = null!;
         private string _databasePath = null!;
 
@@ -34,114 +44,176 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// A service registered ahead of it finds the database migrated and an earlier run's temp
-        /// file gone when it starts, as the web server and the ping rounds do: the host runs every
-        /// StartingAsync before any StartAsync, whatever order the services were added in.
+        /// Once the start says the database is open, it is migrated, an earlier run's temp file is
+        /// gone, and its schema level is known for the banner.
         /// </summary>
         [Test]
-        public async Task Host_OpensTheDatabaseBeforeItStartsAnyService()
+        public async Task Host_OpensTheDatabaseInTheBackground()
         {
-            var paths = PingerPaths.Resolve(_databasePath, _directory);
             var leftover = Path.Combine(_directory, "hostpinger-backup-left-by-a-crash.tmp");
             await File.WriteAllTextAsync(leftover, "a download that died with the process");
-            var probe = new StartProbe(_databasePath, leftover);
 
-            using var host = new HostBuilder()
-                .ConfigureServices(services => services
-                    .AddSingleton(paths)
-                    .AddHostPingerDatabase(paths)
-                    .AddSingleton<IOptionsMonitor<PingerOptions>>(new TestOptionsMonitor<PingerOptions>(new PingerOptions()))
-                    .AddSingleton<IOptionsMonitor<SecurityOptions>>(new TestOptionsMonitor<SecurityOptions>(new SecurityOptions()))
-                    .AddSingleton<UserSettingsStore>()
-                    .AddSingleton<HostSummaryCache>()
-                    .AddSingleton<DatabaseSizeLimit>()
-                    .AddSingleton(probe)
-                    .AddHostedService(services => services.GetRequiredService<StartProbe>())
-                    .AddHostedService<DatabaseStartup>())
-                .Build();
-
+            using var host = BuildHost(new PingerOptions());
             await host.StartAsync();
+            var opening = host.Services.GetRequiredService<DatabaseOpening>();
+            await opening.Opened.WaitAsync(Patience);
             await host.StopAsync();
 
-            Assert.Multiple(() =>
+            await using var db = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath));
+            Assert.Multiple(async () =>
             {
-                Assert.That(probe.Started, Is.True);
-                Assert.That(probe.PendingMigrations, Is.Empty, "migrated before the first service started");
-                Assert.That(probe.LeftoverStillThere, Is.False, "swept before the first service started");
+                Assert.That(await db.Database.GetPendingMigrationsAsync(), Is.Empty);
+                Assert.That(File.Exists(leftover), Is.False);
+                Assert.That(opening.SchemaLevel, Is.EqualTo(HostPingerDatabase.SchemaLevel));
+                Assert.That(opening.RollbackUnsupported, Is.True);
+                Assert.That(opening.UpgradeStartedUtc, Is.Null, "a new database is created, not upgraded");
             });
         }
 
         /// <summary>
-        /// A size limit of zero, which used to turn pruning off, is given a real one before any
-        /// service starts, so the first ping round already prunes against it, and it is stored, so
-        /// it stays that way after the next start too.
+        /// A size limit of zero, which used to turn pruning off, is given a real one before the
+        /// database counts as open, so the first ping round already prunes against it, and it is
+        /// stored, so it stays that way after the next start too.
         /// </summary>
         [Test]
-        public async Task Host_GivesALimitOfZeroARealOneBeforeItStartsAnyService()
+        public async Task Host_GivesALimitOfZeroARealOneBeforeTheDatabaseIsOpen()
         {
-            var paths = PingerPaths.Resolve(_databasePath, _directory);
-            int? limitAtFirstStart = null;
-
-            using var host = new HostBuilder()
-                .ConfigureServices(services => services
-                    .AddSingleton(paths)
-                    .AddHostPingerDatabase(paths)
-                    .AddSingleton<IOptionsMonitor<PingerOptions>>(
-                        new TestOptionsMonitor<PingerOptions>(new PingerOptions { MaxDatabaseSizeMb = 0 }))
-                    .AddSingleton<IOptionsMonitor<SecurityOptions>>(new TestOptionsMonitor<SecurityOptions>(new SecurityOptions()))
-                    .AddSingleton<UserSettingsStore>()
-                    .AddSingleton<HostSummaryCache>()
-                    .AddSingleton<DatabaseSizeLimit>()
-                    .AddHostedService(services => new LimitProbe(
-                        services.GetRequiredService<UserSettingsStore>(), limit => limitAtFirstStart = limit))
-                    .AddHostedService<DatabaseStartup>())
-                .Build();
-
+            using var host = BuildHost(new PingerOptions { MaxDatabaseSizeMb = 0 });
             await host.StartAsync();
+            await host.Services.GetRequiredService<DatabaseOpening>().Opened.WaitAsync(Patience);
+            var limitWhenOpen = host.Services.GetRequiredService<UserSettingsStore>().CurrentPinger.MaxDatabaseSizeMb;
             await host.StopAsync();
 
             await using var db = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath));
             var stored = await db.UserSettings.SingleAsync(s => s.Key == "Pinger:MaxDatabaseSizeMb");
             Assert.Multiple(() =>
             {
-                Assert.That(limitAtFirstStart, Is.Positive);
-                Assert.That(stored.Value, Is.EqualTo(limitAtFirstStart.ToString()));
+                Assert.That(limitWhenOpen, Is.Positive);
+                Assert.That(stored.Value, Is.EqualTo(limitWhenOpen.ToString()));
             });
         }
 
-        /// <summary>Hands on the size limit in force when it starts, registered ahead of DatabaseStartup.</summary>
-        private sealed class LimitProbe(UserSettingsStore settings, Action<int> found) : IHostedService
+        /// <summary>
+        /// An upgrade waits, without touching the file, while the disk has less free than the
+        /// migration needs, says how much it needs and has, and goes ahead at the next measurement
+        /// after there is room.
+        /// </summary>
+        [Test]
+        public async Task Host_WaitsForTheRoomAnUpgradeNeedsAndUpgradesOnceThereIs()
         {
-            public Task StartAsync(CancellationToken cancellationToken)
+            await using (var db = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath)))
             {
-                found(settings.CurrentPinger.MaxDatabaseSizeMb);
-                return Task.CompletedTask;
+                await db.GetService<IMigrator>().MigrateAsync(LastWithTextTimes);
             }
 
-            public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+            var fileBytes = new FileInfo(_databasePath).Length;
+            var free = 1024L * 1024;
+
+            using var host = BuildHost(new PingerOptions(), () => Interlocked.Read(ref free));
+            await host.StartAsync();
+            var opening = host.Services.GetRequiredService<DatabaseOpening>();
+            await WaitForAsync(() => opening.Stage == DatabaseOpeningStage.WaitingForRoom);
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(opening.RoomNeededBytes, Is.EqualTo(fileBytes / 2 + DatabaseBackup.FreeSpaceMarginBytes));
+                Assert.That(opening.RoomFreeBytes, Is.EqualTo(1024L * 1024));
+                Assert.That(opening.Opened.IsCompleted, Is.False);
+                Assert.That(opening.IsUpgrading, Is.False, "upgrading without the room");
+                Assert.That(await PendingMigrationsAsync(), Is.Not.Empty, "migrated without the room");
+            });
+
+            Interlocked.Exchange(ref free, long.MaxValue);
+            await opening.Opened.WaitAsync(Patience);
+            await host.StopAsync();
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(await PendingMigrationsAsync(), Is.Empty);
+                Assert.That(opening.UpgradeStartedUtc, Is.Not.Null, "an older database is upgraded");
+                Assert.That(opening.UpgradeJournalBytes, Is.Not.Null, "the journal files were never measured");
+                Assert.That(opening.IsUpgrading, Is.False, "still upgrading once open");
+            });
         }
 
         /// <summary>
-        /// Records what a service starting first would find. Registered ahead of DatabaseStartup,
-        /// so that only the host's ordering of StartingAsync before StartAsync can make it pass.
+        /// A database a newer build upgraded is refused, and the host stays up to say why rather than
+        /// failing into a restart that would refuse it again.
         /// </summary>
-        private sealed class StartProbe(string databasePath, string leftover) : IHostedService
+        [Test]
+        public async Task Host_RefusesANewerDatabaseAndStaysUpToSaySo()
         {
-            public bool Started { get; private set; }
-
-            public List<string> PendingMigrations { get; private set; } = ["not read"];
-
-            public bool LeftoverStillThere { get; private set; } = true;
-
-            public async Task StartAsync(CancellationToken cancellationToken)
+            await using (var db = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath)))
             {
-                Started = true;
-                LeftoverStillThere = File.Exists(leftover);
-                await using var db = new HostPingerDbContext(HostPingerDatabase.Options(databasePath));
-                PendingMigrations = (await db.Database.GetPendingMigrationsAsync(cancellationToken)).ToList();
+                await db.Database.MigrateAsync();
             }
 
-            public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+            await using (var connection = new SqliteConnection($"Data Source={_databasePath};Pooling=False"))
+            {
+                await connection.OpenAsync();
+                await using var command = connection.CreateCommand();
+                command.CommandText = $"PRAGMA user_version = {HostPingerDatabase.SchemaLevel + 1};";
+                await command.ExecuteNonQueryAsync();
+            }
+
+            using var host = BuildHost(new PingerOptions());
+            await host.StartAsync();
+            var opening = host.Services.GetRequiredService<DatabaseOpening>();
+            await WaitForAsync(() => opening.Stage == DatabaseOpeningStage.Refused);
+            var stopping = host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping.IsCancellationRequested;
+            await host.StopAsync();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(opening.Refusal, Does.Contain("newer version"));
+                Assert.That(opening.Opened.IsCompleted, Is.False);
+                Assert.That(stopping, Is.False, "the host stopped");
+            });
+        }
+
+        private IHost BuildHost(PingerOptions options, Func<long>? freeBytes = null)
+        {
+            var paths = PingerPaths.Resolve(_databasePath, _directory);
+            return new HostBuilder()
+                .ConfigureServices(services => services
+                    .AddSingleton(paths)
+                    .AddHostPingerDatabase(paths)
+                    .AddSingleton<IOptionsMonitor<PingerOptions>>(new TestOptionsMonitor<PingerOptions>(options))
+                    .AddSingleton<IOptionsMonitor<SecurityOptions>>(new TestOptionsMonitor<SecurityOptions>(new SecurityOptions()))
+                    .AddSingleton<UserSettingsStore>()
+                    .AddSingleton<HostSummaryCache>()
+                    .AddSingleton(provider => new DatabaseSizeLimit(
+                        paths, provider.GetRequiredService<UserSettingsStore>(), NullLogger<DatabaseSizeLimit>.Instance)
+                    {
+                        MeasureFreeBytes = freeBytes ?? (() => long.MaxValue),
+                    })
+                    .AddHostedService(provider => new DatabaseStartup(
+                        provider,
+                        paths,
+                        provider.GetRequiredService<DatabaseOpening>(),
+                        provider.GetRequiredService<DatabaseSizeLimit>(),
+                        provider.GetRequiredService<IHostApplicationLifetime>(),
+                        NullLogger<DatabaseStartup>.Instance)
+                    {
+                        RoomRecheckInterval = TimeSpan.FromMilliseconds(50),
+                    }))
+                .Build();
+        }
+
+        private async Task<List<string>> PendingMigrationsAsync()
+        {
+            await using var db = new HostPingerDbContext(HostPingerDatabase.Options(_databasePath));
+            return (await db.Database.GetPendingMigrationsAsync()).ToList();
+        }
+
+        private static async Task WaitForAsync(Func<bool> condition)
+        {
+            var deadline = DateTime.UtcNow + Patience;
+            while (!condition())
+            {
+                Assert.That(DateTime.UtcNow, Is.LessThan(deadline), "gave up waiting");
+                await Task.Delay(25);
+            }
         }
     }
 }

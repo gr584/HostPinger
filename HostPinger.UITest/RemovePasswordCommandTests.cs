@@ -84,6 +84,36 @@ namespace HostPinger.UITest
             });
         }
 
+        /// <summary>
+        /// A database a newer build upgraded is refused with the sentence that says why, and a failing
+        /// exit, rather than a stack trace; nothing is written to it.
+        /// </summary>
+        [Test]
+        public async Task RemovePassword_RefusesANewerDatabaseInASentence()
+        {
+            var databasePath = Path.Combine(_directory, PingerPaths.DatabaseFileName);
+            await using (var db = new HostPingerDbContext(Options(databasePath)))
+            {
+                await db.Database.MigrateAsync();
+                db.UserSettings.Add(new UserSetting { Key = UserSettingsStore.PasswordHashKey, Value = "a-forgotten-hash" });
+                await db.SaveChangesAsync();
+                await db.Database.ExecuteSqlRawAsync("PRAGMA user_version = 99;");
+            }
+
+            var (exitCode, output) = await RunAsync(databasePath, "--remove-password");
+
+            Assert.Multiple(async () =>
+            {
+                Assert.That(exitCode, Is.EqualTo(1), output);
+                Assert.That(output, Does.Contain("upgraded by a newer version of HostPinger"));
+                Assert.That(output, Does.Not.Contain("Unhandled exception"));
+                await using var db = new HostPingerDbContext(Options(databasePath));
+                Assert.That(
+                    await db.UserSettings.Where(s => s.Key == UserSettingsStore.PasswordHashKey).Select(s => s.Value).SingleAsync(),
+                    Is.EqualTo("a-forgotten-hash"));
+            });
+        }
+
         private static DbContextOptions<HostPingerDbContext> Options(string databasePath) =>
             new DbContextOptionsBuilder<HostPingerDbContext>().UseSqlite($"Data Source={databasePath}").Options;
 

@@ -15,7 +15,7 @@ namespace HostPinger.Core.Migrations
         protected override void BuildModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
-            modelBuilder.HasAnnotation("ProductVersion", "10.0.12");
+            modelBuilder.HasAnnotation("ProductVersion", "10.0.15");
 
             modelBuilder.Entity("HostPinger.Core.Data.MonitoredHost", b =>
                 {
@@ -59,8 +59,8 @@ namespace HostPinger.Core.Migrations
                     b.Property<int?>("RoundtripMs")
                         .HasColumnType("INTEGER");
 
-                    b.Property<DateTime>("TimestampUtc")
-                        .HasColumnType("TEXT");
+                    b.Property<long>("TimestampUtc")
+                        .HasColumnType("INTEGER");
 
                     b.HasKey("Id");
 

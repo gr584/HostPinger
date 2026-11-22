@@ -38,11 +38,6 @@ namespace HostPinger.Test
         }
 
         /// <summary>
-        /// The data is shaped to exercise every rule at once: buckets that average several pings,
-        /// a stretch nothing was recorded over, and a stretch that was recorded and never answered.
-        /// Those last two look identical in a row count and must not look identical on a chart.
-        /// </summary>
-        /// <summary>
         /// A range that ends where it starts, or before, and a chart with no room for a point, are
         /// mistakes in the caller rather than empty charts, and are said to be.
         /// </summary>
@@ -64,6 +59,23 @@ namespace HostPinger.Test
                     async () => await ChartSeries.LoadAsync(db, hostId, BaseTime, BaseTime.AddSeconds(10), 0),
                     Throws.InstanceOf<ArgumentOutOfRangeException>());
             });
+        }
+
+        /// <summary>
+        /// The narrowest range that ends at the latest a graph's period can end draws as an empty
+        /// chart: its start, rounded up to the millisecond for the query, is still a time there is.
+        /// Inside DateTime's last millisecond it would not be, which is why a period cannot end there
+        /// (<see cref="GraphOpening.LatestEnd"/>).
+        /// </summary>
+        [Test]
+        public async Task LoadAsync_ReadsARangeEndingAtTheLatestAPeriodCanEnd()
+        {
+            await using var db = new HostPingerDbContext(_options);
+            var hostId = await SeedAsync(db);
+
+            var read = await ChartSeries.LoadAsync(db, hostId, GraphOpening.LatestEnd.AddTicks(-1), GraphOpening.LatestEnd, 20);
+
+            Assert.That(read.Samples, Is.Empty);
         }
 
         [Test]
@@ -311,10 +323,79 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// The times are stored to the millisecond and a bucket's edges fall inside one more often
+        /// than not, so an attempt in the millisecond an edge cuts through came before the edge and
+        /// belongs to the bucket before it, as the in-memory downsampler has it. With the edge
+        /// rounded down to the millisecond it would be counted in the bucket after instead.
+        /// </summary>
+        [Test]
+        public async Task LoadAsync_PutsAnAttemptJustBeforeABucketsEdgeInTheBucketBefore()
+        {
+            const int bucketCount = 7;
+            var rangeEnd = BaseTime.AddSeconds(1000);
+            await using var db = new HostPingerDbContext(_options);
+            var hostId = await SeedAsync(db);
+
+            var bucketDuration = ChartMath.BucketDuration(BaseTime, rangeEnd, bucketCount);
+            var edges = Enumerable.Range(1, bucketCount)
+                .Select(i => ChartMath.BucketStart(BaseTime, bucketDuration) + (bucketDuration * i))
+                .Where(edge => edge < rangeEnd && StoredTime.Truncate(edge) < edge)
+                .ToList();
+            Assume.That(edges, Is.Not.Empty, "edges inside a millisecond to test against");
+            db.PingAttempts.AddRange(edges.Select(edge => new PingAttempt
+            {
+                HostId = hostId,
+                TimestampUtc = StoredTime.Truncate(edge),
+                RoundtripMs = 1_000,
+            }));
+            await db.SaveChangesAsync();
+
+            var reduced = (await ChartSeries.LoadAsync(db, hostId, BaseTime, rangeEnd, bucketCount)).Samples;
+            var expected = ChartMath.Downsample(await AllSamplesAsync(db, hostId, BaseTime, rangeEnd, bucketCount), BaseTime, rangeEnd, bucketCount);
+
+            Assert.That(reduced, Is.EqualTo(expected));
+        }
+
+        /// <summary>
+        /// The same at the start of the range: an attempt in the millisecond the first bucket's
+        /// start cuts through came before the range and is not one of the attempts handed back.
+        /// </summary>
+        [Test]
+        public async Task LoadAsync_LeavesOutAnAttemptJustBeforeTheFirstBucket()
+        {
+            const int bucketCount = 600;
+            var rangeEnd = BaseTime.AddSeconds(100).AddTicks(3);
+            var queryStart = ChartMath.BucketStart(BaseTime, ChartMath.BucketDuration(BaseTime, rangeEnd, bucketCount));
+            Assume.That(StoredTime.Truncate(queryStart), Is.LessThan(queryStart), "a start inside a millisecond to test against");
+
+            await using var db = new HostPingerDbContext(_options);
+            var host = new MonitoredHost { Name = "chart", Address = "chart.example", CreatedUtc = BaseTime };
+            db.Hosts.Add(host);
+            await db.SaveChangesAsync();
+            db.PingAttempts.Add(new PingAttempt { HostId = host.Id, TimestampUtc = StoredTime.Truncate(queryStart), RoundtripMs = 1 });
+            db.PingAttempts.AddRange(Enumerable.Range(1, 10).Select(i => new PingAttempt
+            {
+                HostId = host.Id,
+                TimestampUtc = BaseTime.AddSeconds(i),
+                RoundtripMs = i,
+            }));
+            await db.SaveChangesAsync();
+
+            var read = await ChartSeries.LoadAsync(db, host.Id, BaseTime, rangeEnd, bucketCount);
+
+            Assert.That(read.Samples.Select(s => s.TimestampUtc), Is.EqualTo(Enumerable.Range(1, 10).Select(i => BaseTime.AddSeconds(i))));
+        }
+
+        /// <summary>
         /// One attempt a second for 1000 seconds, less a stretch with nothing recorded in it and a
         /// stretch that went unanswered — or for fewer seconds, for a test that goes on recording
         /// after reading.
         /// </summary>
+        /// <remarks>
+        /// The data is shaped to exercise every rule at once: buckets that average several pings,
+        /// a stretch nothing was recorded over, and a stretch that was recorded and never answered.
+        /// Those last two look identical in a row count and must not look identical on a chart.
+        /// </remarks>
         private static async Task<int> SeedAsync(HostPingerDbContext db, int seconds = 1000)
         {
             var host = new MonitoredHost { Name = "chart", Address = "chart.example", CreatedUtc = BaseTime };
@@ -350,6 +431,25 @@ namespace HostPinger.Test
                     && a.TimestampUtc >= BaseTime.AddSeconds(fromSecond)
                     && a.TimestampUtc < BaseTime.AddSeconds(toSecond))
                 .ExecuteDeleteAsync();
+
+        /// <summary>
+        /// What <see cref="RawSamplesAsync"/> reads, with the range taken in memory, to the 100 ns,
+        /// rather than by a query whose bounds go in as stored milliseconds.
+        /// </summary>
+        private static async Task<IReadOnlyList<ChartSample>> AllSamplesAsync(
+            HostPingerDbContext db,
+            int hostId,
+            DateTime rangeStart,
+            DateTime rangeEnd,
+            int bucketCount)
+        {
+            var queryStart = ChartMath.BucketStart(rangeStart, ChartMath.BucketDuration(rangeStart, rangeEnd, bucketCount));
+            var all = await db.PingAttempts.AsNoTracking()
+                .Where(a => a.HostId == hostId)
+                .Select(a => new ChartSample(a.TimestampUtc, a.RoundtripMs))
+                .ToListAsync();
+            return all.Where(s => s.TimestampUtc >= queryStart && s.TimestampUtc <= rangeEnd).OrderBy(s => s.TimestampUtc).ToList();
+        }
 
         /// <summary>
         /// Every recorded attempt the chart would have read before the reduction moved into the

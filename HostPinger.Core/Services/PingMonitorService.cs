@@ -33,6 +33,9 @@ namespace HostPinger.Core.Services
         private readonly ILogger<PingMonitorService> _logger;
         private readonly TimeProvider _timeProvider;
 
+        // Null for the tests that hand the service a database already open.
+        private readonly DatabaseOpening? _opening;
+
         /// <summary>
         /// Whether the last round held the database at its size, so that the log says when that
         /// starts and when it ends rather than on every round in between.
@@ -56,8 +59,10 @@ namespace HostPinger.Core.Services
             DatabaseSizeLimit sizeLimit,
             MaintenanceGate maintenanceGate,
             ILogger<PingMonitorService> logger,
-            TimeProvider? timeProvider = null)
+            TimeProvider? timeProvider = null,
+            DatabaseOpening? opening = null)
         {
+            _opening = opening;
             _dbFactory = dbFactory;
             _pingSender = pingSender;
             _settings = settings;
@@ -70,6 +75,12 @@ namespace HostPinger.Core.Services
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            // No round before the start has opened the database: it may still be migrating it.
+            if (_opening is not null)
+            {
+                await _opening.Opened.WaitAsync(stoppingToken);
+            }
+
             var period = GetInterval();
             using var timer = new PeriodicTimer(period, _timeProvider);
             try

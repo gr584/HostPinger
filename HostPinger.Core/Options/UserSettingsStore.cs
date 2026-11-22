@@ -207,9 +207,38 @@ namespace HostPinger.Core.Options
         /// Whether the migrations first had to clear a lock that a migration stopped partway through
         /// left behind, for the command to tell whoever ran it, having no log of its own.
         /// </returns>
-        public static async Task<bool> RemovePasswordAsync(string databasePath, CancellationToken cancellationToken = default)
+        /// <exception cref="MigrationRoomException">
+        /// A migration is pending and the disk has less free than it needs, the rule the service waits
+        /// on (<see cref="DatabaseStartup"/>); nothing is written.
+        /// </exception>
+        /// <exception cref="NewerDatabaseException">The database is from a newer build; nothing is written.</exception>
+        public static Task<bool> RemovePasswordAsync(string databasePath, CancellationToken cancellationToken = default) =>
+            RemovePasswordAsync(
+                databasePath,
+                () => new DriveInfo(Path.GetDirectoryName(Path.GetFullPath(databasePath))!).AvailableFreeSpace,
+                cancellationToken);
+
+        /// <summary>
+        /// <see cref="RemovePasswordAsync(string, CancellationToken)"/> with what the disk has free
+        /// measured by <paramref name="measureFreeBytes"/>, which the tests stand in for.
+        /// </summary>
+        internal static async Task<bool> RemovePasswordAsync(
+            string databasePath,
+            Func<long> measureFreeBytes,
+            CancellationToken cancellationToken = default)
         {
             await using var db = new HostPingerDbContext(HostPingerDatabase.Options(databasePath));
+            var migrationBytes = await HostPingerDatabase.MigrationRoomBytesAsync(db, databasePath, cancellationToken);
+            if (migrationBytes > 0)
+            {
+                var needed = migrationBytes + DatabaseBackup.FreeSpaceMarginBytes;
+                var free = measureFreeBytes();
+                if (free < needed)
+                {
+                    throw new MigrationRoomException(needed, free);
+                }
+            }
+
             var clearedLock = await HostPingerDatabase.InitializeAsync(db, cancellationToken);
             await StageAsync(db, PasswordHashKey, string.Empty, cancellationToken);
             await db.SaveChangesAsync(cancellationToken);

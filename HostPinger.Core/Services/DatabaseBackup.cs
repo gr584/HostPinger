@@ -48,6 +48,8 @@ namespace HostPinger.Core.Services
 
         private const string DefinesCodeRefusal = "This file defines triggers or views, which a HostPinger database never has.";
 
+        private const string NewerBackupRefusal = "This backup was made by a newer version of HostPinger.";
+
         private const string DefinesCodeQuery = "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('trigger', 'view');";
 
         private const string DataBytesQuery =
@@ -487,6 +489,14 @@ namespace HostPinger.Core.Services
                     return DefinesCodeRefusal;
                 }
 
+                // A level this build does not read is a newer build's file, like a migration it does
+                // not know, and is refused here, before the password is asked for, rather than by the
+                // migration of the candidate later on; see HostPingerDatabase.SchemaLevel.
+                if (Convert.ToInt64(await ScalarAsync(connection, "PRAGMA user_version;", cancellationToken)) > HostPingerDatabase.SchemaLevel)
+                {
+                    return NewerBackupRefusal;
+                }
+
                 applied = [];
                 await using var command = connection.CreateCommand();
                 command.CommandText = "SELECT MigrationId FROM __EFMigrationsHistory;";
@@ -519,15 +529,18 @@ namespace HostPinger.Core.Services
             var known = db.Database.GetMigrations().ToList();
             if (!applied.TrueForAll(known.Contains))
             {
-                return "This backup was made by a newer version of HostPinger.";
+                return NewerBackupRefusal;
             }
 
             // An older backup is migrated beside the database before it goes into place, and the
-            // migrations since 1.12.0 rebuild the history's indexes: on a production-sized file the
-            // journal for that reached about a third of the file. Refused here rather than left to
-            // fill the disk partway through, with half the file's size as the room it needs.
+            // migrations since 1.12.0 rebuild the history's indexes, and the one storing the
+            // attempts' times as numbers its table: on a production-sized file the journal for the
+            // indexes reached about a third of the file, and the table's rebuild, which writes the
+            // whole history again into the room its old indexes leave, about half. The file itself
+            // does not grow. Refused here rather than left to fill the disk partway through, with
+            // half the file's size as the room it needs.
             if (known.Except(applied).Any()
-                && RoomRefusal(new FileInfo(candidatePath).Length / 2, "This backup is from an older version, and migrating it") is { } noRoom)
+                && RoomRefusal(HostPingerDatabase.MigrationRoomBytes(new FileInfo(candidatePath).Length), "This backup is from an older version, and migrating it") is { } noRoom)
             {
                 return noRoom;
             }
@@ -996,10 +1009,9 @@ namespace HostPinger.Core.Services
             {
                 logger.LogWarning(
                     "The restored backup's size limit, {From} MB, is more than this disk can safely hold, so it is {To} MB now. "
-                    + "{Over} bytes of its history are over that, and the ping rounds prune them from the oldest.",
+                    + "Whatever of its history is over that, the ping rounds prune from the oldest.",
                     limit.FromMb,
-                    limit.ToMb,
-                    limit.OverBytes);
+                    limit.ToMb);
             }
 
             return lowered;
@@ -1419,8 +1431,9 @@ namespace HostPinger.Core.Services
     /// <param name="FromMb">The limit the backup put in force: zero or less for none.</param>
     /// <param name="ToMb">The limit in force now, the safe limit for this disk with the backup in place.</param>
     /// <param name="OverBytes">
-    /// How much of the restored file is over the new limit: the oldest history, which the ping
-    /// rounds prune a slice a round.
+    /// How much the restored file is over the new limit. The file can hold free pages, which a
+    /// prune's vacuum gives back before any history goes, so this is the most that could be pruned,
+    /// not what will be.
     /// </param>
     public sealed record SizeLimitLowered(int FromMb, int ToMb, long OverBytes);
 }

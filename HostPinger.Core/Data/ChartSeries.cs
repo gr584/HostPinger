@@ -213,11 +213,15 @@ namespace HostPinger.Core.Data
             DateTime queryStartUtc,
             DateTime rangeEndUtc,
             int bucketCount,
-            CancellationToken cancellationToken) =>
-            await db.PingAttempts.AsNoTracking()
-                .Where(a => a.HostId == hostId && a.TimestampUtc >= queryStartUtc && a.TimestampUtc <= rangeEndUtc)
+            CancellationToken cancellationToken)
+        {
+            // Rounded up, as a lower bound has to be; see StoredTime.
+            var fromUtc = StoredTime.Ceiling(queryStartUtc);
+            return await db.PingAttempts.AsNoTracking()
+                .Where(a => a.HostId == hostId && a.TimestampUtc >= fromUtc && a.TimestampUtc <= rangeEndUtc)
                 .Take(bucketCount + 1)
                 .CountAsync(cancellationToken) <= bucketCount;
+        }
 
         /// <summary>
         /// The attempts themselves, for a range with few enough of them to draw as they were
@@ -235,8 +239,9 @@ namespace HostPinger.Core.Data
             TimeSpan bucketDuration,
             CancellationToken cancellationToken)
         {
+            var fromUtc = StoredTime.Ceiling(queryStartUtc);
             var samples = await db.PingAttempts.AsNoTracking()
-                .Where(a => a.HostId == hostId && a.TimestampUtc >= queryStartUtc && a.TimestampUtc <= rangeEndUtc)
+                .Where(a => a.HostId == hostId && a.TimestampUtc >= fromUtc && a.TimestampUtc <= rangeEndUtc)
                 .OrderBy(a => a.TimestampUtc)
                 .Select(a => new ChartSample(a.TimestampUtc, a.RoundtripMs))
                 .ToListAsync(cancellationToken);
@@ -274,17 +279,21 @@ namespace HostPinger.Core.Data
             {
                 await using var command = connection.CreateCommand();
                 command.CommandText = BucketSql;
+                // The bounds go in as the stored milliseconds, since this is plain SQL and nothing
+                // converts a DateTime handed to it the way EF converts one in a query. Both are
+                // rounded up: a bucket's edges fall inside a millisecond more often than not, and
+                // "at or after" and "before" are exact only that way; see StoredTime.
                 var host = Parameter(command, "@hostId", hostId);
-                var from = Parameter(command, "@from", queryStartUtc);
-                var to = Parameter(command, "@to", queryStartUtc);
+                var from = Parameter(command, "@from", 0L);
+                var to = Parameter(command, "@to", 0L);
 
                 var samples = new List<ChartSample>(bucketCount + 1);
                 for (var bucket = firstBucket; bucket <= lastBucket; bucket++)
                 {
-                    from.Value = new DateTime(bucket * bucketTicks, DateTimeKind.Utc);
-                    to.Value = new DateTime(
+                    from.Value = StoredTime.CeilingMilliseconds(new DateTime(bucket * bucketTicks, DateTimeKind.Utc));
+                    to.Value = StoredTime.CeilingMilliseconds(new DateTime(
                         Math.Min((bucket + 1) * bucketTicks, endExclusiveTicks),
-                        DateTimeKind.Utc);
+                        DateTimeKind.Utc));
 
                     await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                     if (!await reader.ReadAsync(cancellationToken))

@@ -174,6 +174,18 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// A period may end as late as <see cref="GraphOpening.LatestEnd"/>, the last whole
+        /// millisecond there is, and no later.
+        /// </summary>
+        [Test]
+        public void Parse_TakesAPeriodEndingAtTheLatestEnd()
+        {
+            var parsed = GraphOpening.Parse("9999-12-31T23:59:59.998Z", "9999-12-31T23:59:59.999Z", null);
+
+            Assert.That(parsed, Is.EqualTo(new GraphOpening.Period(GraphOpening.LatestEnd.AddMilliseconds(-1), GraphOpening.LatestEnd)));
+        }
+
+        /// <summary>
         /// An address carrying both says two things at once, and the one with instants in it is the
         /// more particular of them.
         /// </summary>
@@ -195,6 +207,8 @@ namespace HostPinger.Test
         [TestCase("yesterday", "2026-07-31T12:30:00Z", null, TestName = "Parse_IgnoresAnOpeningItCannotUse(not a time)")]
         [TestCase("2026-07-31T12:30:00Z", "2026-07-31T11:50:00Z", null, TestName = "Parse_IgnoresAnOpeningItCannotUse(backwards)")]
         [TestCase("2026-07-31T12:30:00Z", "2026-07-31T12:30:00Z", null, TestName = "Parse_IgnoresAnOpeningItCannotUse(no width)")]
+        [TestCase("9999-12-31T23:59:59.9995Z", "9999-12-31T23:59:59.9999999Z", null, TestName = "Parse_IgnoresAnOpeningItCannotUse(inside the last millisecond there is)")]
+        [TestCase("2026-07-31T11:50:00Z", "9999-12-31T23:59:59.9999999Z", null, TestName = "Parse_IgnoresAnOpeningItCannotUse(ending inside the last millisecond there is)")]
         [TestCase(null, null, "an hour", TestName = "Parse_IgnoresAnOpeningItCannotUse(not a width)")]
         [TestCase(null, null, "0", TestName = "Parse_IgnoresAnOpeningItCannotUse(no time at all)")]
         [TestCase(null, null, "-5400", TestName = "Parse_IgnoresAnOpeningItCannotUse(backwards width)")]

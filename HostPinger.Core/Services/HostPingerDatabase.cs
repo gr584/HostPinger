@@ -22,6 +22,25 @@ namespace HostPinger.Core.Services
     public static class HostPingerDatabase
     {
         /// <summary>
+        /// The highest schema level this build reads. The level is SQLite's user_version, and only a
+        /// migration that leaves the database unreadable to the builds before it raises it, in the
+        /// same transaction as its change. A migration that only adds something leaves it, since an
+        /// older build still runs on what it leaves.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// 1: StorePingTimesAsUnixMilliseconds, after which 1.14.0 and earlier cannot read the
+        /// attempts' times.
+        /// </para>
+        /// <para>
+        /// The builds before the level existed do not check it, so they fail however they happen to.
+        /// From this one on, a build handed a database above its level refuses it before writing
+        /// anything (<see cref="NewerDatabaseException"/>).
+        /// </para>
+        /// </remarks>
+        public const long SchemaLevel = 1;
+
+        /// <summary>
         /// The connection string for the database at <paramref name="databasePath"/>. Built rather
         /// than written out, so that a path with a semicolon or a quote in it names that file
         /// instead of breaking the string apart.
@@ -57,6 +76,7 @@ namespace HostPinger.Core.Services
             services
                 .AddSingleton<DatabaseFileGate>()
                 .AddSingleton<ChangeLockout>()
+                .AddSingleton<DatabaseOpening>()
                 .AddDbContextFactory<HostPingerDbContext>(
                     (provider, options) => options
                         .UseSqlite(ConnectionString(paths.DatabasePath))
@@ -73,6 +93,49 @@ namespace HostPinger.Core.Services
                 services.GetRequiredService<UserSettingsStore>(),
                 services.GetRequiredService<HostSummaryCache>(),
                 cancellationToken);
+
+        /// <summary>
+        /// The room a migration of the database at <paramref name="databasePath"/> needs free on its
+        /// disk, the margin left out: none when no migration is pending, and otherwise half the
+        /// file. The rebuild of the attempts' table, the largest migration there has been, writes
+        /// its new table and indexes into the journal before it commits, about half of the file;
+        /// see StorePingTimesAsUnixMilliseconds. Read without migrating anything or taking the
+        /// migration lock.
+        /// </summary>
+        internal static async Task<long> MigrationRoomBytesAsync(
+            HostPingerDbContext db,
+            string databasePath,
+            CancellationToken cancellationToken = default)
+        {
+            var file = new FileInfo(databasePath);
+            if (!file.Exists || file.Length == 0
+                || !(await db.Database.GetPendingMigrationsAsync(cancellationToken)).Any())
+            {
+                return 0;
+            }
+
+            return MigrationRoomBytes(file.Length);
+        }
+
+        /// <summary>
+        /// The room migrating a database file of <paramref name="fileBytes"/> needs while it runs,
+        /// the margin left out; see <see cref="MigrationRoomBytesAsync"/>.
+        /// </summary>
+        internal static long MigrationRoomBytes(long fileBytes) => fileBytes / 2;
+
+        /// <summary>The database's schema level, on a context of its own; see <see cref="SchemaLevel"/>.</summary>
+        internal static async Task<long> ReadSchemaLevelOnItsOwnAsync(HostPingerDbContext db, CancellationToken cancellationToken = default)
+        {
+            await db.Database.OpenConnectionAsync(cancellationToken);
+            try
+            {
+                return await ReadSchemaLevelAsync(db, cancellationToken);
+            }
+            finally
+            {
+                await db.Database.CloseConnectionAsync();
+            }
+        }
 
         /// <summary>
         /// Brings the database up to date, then loads the settings from it, then the host summary.
@@ -109,11 +172,21 @@ namespace HostPinger.Core.Services
         /// context's own logging: the one trace left of a start, restore or --remove-password that
         /// was stopped while it migrated.
         /// </returns>
+        /// <exception cref="NewerDatabaseException">
+        /// The database is at a schema level above <see cref="SchemaLevel"/>, which this build cannot
+        /// read. Thrown before anything is written to it.
+        /// </exception>
         internal static async Task<bool> InitializeAsync(HostPingerDbContext db, CancellationToken cancellationToken = default)
         {
             await db.Database.OpenConnectionAsync(cancellationToken);
             try
             {
+                var level = await ReadSchemaLevelAsync(db, cancellationToken);
+                if (level > SchemaLevel)
+                {
+                    throw new NewerDatabaseException(level, SchemaLevel);
+                }
+
                 await EnableIncrementalVacuumAsync(db, cancellationToken);
                 var cleared = await ClearMigrationLockAsync(db, cancellationToken);
                 await db.Database.MigrateAsync(cancellationToken);
@@ -138,11 +211,12 @@ namespace HostPinger.Core.Services
         /// forever — the service never starts, and neither --remove-password nor a restore gets past
         /// it — until somebody deletes it by hand.
         /// <para>
-        /// Deleting it unasked is safe because nothing else migrates this database while this runs.
-        /// The service migrates before it serves anything, and a restore migrates inside the
-        /// service with the maintenance gate held. The one other process that migrates is
-        /// --remove-password, which is meant to be run with the service stopped. Run against a
-        /// service still migrating regardless, the delete is a write like any other: it waits
+        /// Deleting it unasked is safe because two migrators cannot get in each other's way, whatever
+        /// the row says. A restore migrates its candidate, a file of its own, and the service
+        /// migrates the database once per start, though its pages answer meanwhile. The one other
+        /// process that migrates it is --remove-password, which is meant to be run with the service
+        /// stopped. Run against a service migrating regardless, the delete is a write like any
+        /// other: it waits
         /// behind the migration under way, which holds the file's write lock until it commits, and
         /// gives up with "database is locked" once the busy timeout runs out. Should it slip in
         /// between two migrations instead, each one commits together with its history row, so a
@@ -231,11 +305,21 @@ namespace HostPinger.Core.Services
             }
         }
 
-        private static async Task<long> GetAutoVacuumModeAsync(HostPingerDbContext db, CancellationToken cancellationToken)
+        private static Task<long> GetAutoVacuumModeAsync(HostPingerDbContext db, CancellationToken cancellationToken) =>
+            PragmaAsync(db, "PRAGMA auto_vacuum;", cancellationToken);
+
+        /// <summary>
+        /// The database's schema level, kept in SQLite's user_version, on a connection already open;
+        /// see <see cref="SchemaLevel"/>.
+        /// </summary>
+        internal static Task<long> ReadSchemaLevelAsync(HostPingerDbContext db, CancellationToken cancellationToken = default) =>
+            PragmaAsync(db, "PRAGMA user_version;", cancellationToken);
+
+        private static async Task<long> PragmaAsync(HostPingerDbContext db, string sql, CancellationToken cancellationToken)
         {
             var connection = db.Database.GetDbConnection();
             await using var command = connection.CreateCommand();
-            command.CommandText = "PRAGMA auto_vacuum;";
+            command.CommandText = sql;
             var result = await command.ExecuteScalarAsync(cancellationToken);
             return Convert.ToInt64(result);
         }

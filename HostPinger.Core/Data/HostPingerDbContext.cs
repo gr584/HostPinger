@@ -27,6 +27,16 @@ namespace HostPinger.Core.Data
 
             modelBuilder.Entity<PingAttempt>(attempt =>
             {
+                // Stored as Unix milliseconds, an integer SQLite keeps in six bytes, rather than as
+                // the 27-character text the provider writes by default. The time is in the table
+                // and in all three indexes below, so the text was most of what the history weighs.
+                // Milliseconds sort as the times do, so every comparison and every index seek is
+                // what it was, and SQLite's own date functions still read them. See StoredTime for
+                // what the millisecond costs a query's bounds. Read back as UTC, which is what was
+                // stored.
+                attempt.Property(a => a.TimestampUtc)
+                    .HasConversion(v => StoredTime.ToMilliseconds(v), v => StoredTime.FromMilliseconds(v));
+
                 attempt.HasIndex(a => new { a.HostId, a.TimestampUtc });
 
                 // Unanswered pings only. Locating a host's last downtime means finding its most

@@ -32,7 +32,10 @@ namespace HostPinger.Benchmarks.Seeding
     {
         public const string DataDirectoryVariable = "HOSTPINGER_BENCHMARK_DATA";
 
-        /// <summary>The format EF Core's SQLite provider stores a DateTime in; see DevDatabaseFillTests.</summary>
+        /// <summary>
+        /// The format EF Core's SQLite provider stores a DateTime in, which is how resolver errors'
+        /// times are kept. Attempts' times are Unix milliseconds; see StoredTime.
+        /// </summary>
         private const string SqliteDateTimeFormat = "yyyy-MM-dd HH:mm:ss.FFFFFFF";
 
         /// <summary>Rounds per transaction: about four hundred thousand rows.</summary>
@@ -175,7 +178,7 @@ namespace HostPinger.Benchmarks.Seeding
             insertAttempt.CommandText =
                 "INSERT INTO PingAttempts (HostId, TimestampUtc, RoundtripMs) VALUES ($hostId, $timestampUtc, $roundtripMs);";
             var attemptHost = insertAttempt.Parameters.Add("$hostId", SqliteType.Integer);
-            var attemptTime = insertAttempt.Parameters.Add("$timestampUtc", SqliteType.Text);
+            var attemptTime = insertAttempt.Parameters.Add("$timestampUtc", SqliteType.Integer);
             var attemptRoundtrip = insertAttempt.Parameters.Add("$roundtripMs", SqliteType.Integer);
 
             using var insertError = connection.CreateCommand();
@@ -202,8 +205,9 @@ namespace HostPinger.Benchmarks.Seeding
                 var batchEnd = Math.Min(batchStart + RoundsPerTransaction, SyntheticHistory.RoundCount);
                 for (var round = batchStart; round < batchEnd; round++)
                 {
-                    var timestamp = SyntheticHistory.RoundTimeUtc(round).ToString(SqliteDateTimeFormat, CultureInfo.InvariantCulture);
-                    attemptTime.Value = timestamp;
+                    var roundTimeUtc = SyntheticHistory.RoundTimeUtc(round);
+                    var timestamp = roundTimeUtc.ToString(SqliteDateTimeFormat, CultureInfo.InvariantCulture);
+                    attemptTime.Value = StoredTime.ToMilliseconds(roundTimeUtc);
                     for (var i = 0; i < hosts.Count; i++)
                     {
                         switch (plans[i][round])
@@ -238,8 +242,10 @@ namespace HostPinger.Benchmarks.Seeding
         /// <summary>
         /// Reads the seeded file back the way the application would and holds it to the plan: every
         /// row went in, and the Hosts summary finds each host where its history leaves it, the two
-        /// long outages still running. The rows were written as raw text, so this is also what
-        /// proves the timestamps sort and compare the way EF's own do. It is held to production, too,
+        /// long outages still running. The rows were written by hand rather than through EF, the
+        /// attempts' times as Unix milliseconds and the resolver errors' as the provider's text, so
+        /// this is also what proves the timestamps sort and compare the way EF's own do. It is held
+        /// to production, too,
         /// in the two ways the benchmarks would quietly stop meaning anything: the summary's walk, and
         /// the file staying under the size limit, past which every round the benchmarks land would
         /// prune the history they are reading.

@@ -458,7 +458,9 @@ namespace HostPinger.Test
         [Test]
         public async Task RunRound_GrowsTheFileWhenThereIsNoHistoryToMakeRoomWith()
         {
-            const int hosts = 200;
+            // Enough attempts to outgrow the empty table's and indexes' first pages, which hold a
+            // couple of hundred each.
+            const int hosts = 1000;
             await SeedHistoryAsync(hosts, rounds: 0);
             var sizeBefore = await SizeAsync();
 
@@ -925,6 +927,44 @@ namespace HostPinger.Test
             }
         }
 
+        /// <summary>
+        /// No round runs while the start is still opening the database, which may be migrating it:
+        /// the first one waits for it to be open, and runs then.
+        /// </summary>
+        [Test]
+        public async Task ExecuteAsync_RunsNoRoundBeforeTheDatabaseIsOpen()
+        {
+            await using (var db = new HostPingerDbContext(_options))
+            {
+                db.Hosts.Add(new MonitoredHost { Name = "a", Address = "a.example" });
+                await db.SaveChangesAsync();
+            }
+
+            var opening = new DatabaseOpening();
+            var sender = new FakePingSender { Results = { ["a.example"] = PingResult.Answered(1) } };
+            var service = CreateService(sender, new PingerOptions { IntervalSeconds = 1 }, opening: opening);
+
+            await service.StartAsync(CancellationToken.None);
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1.5));
+                Assert.That(sender.CallCount, Is.Zero, "a round ran before the database was open");
+
+                opening.Open(HostPingerDatabase.SchemaLevel);
+                var deadline = DateTime.UtcNow.AddSeconds(30);
+                while (sender.CallCount == 0 && DateTime.UtcNow < deadline)
+                {
+                    await Task.Delay(25);
+                }
+
+                Assert.That(sender.CallCount, Is.Positive, "no round ran once the database was open");
+            }
+            finally
+            {
+                await service.StopAsync(CancellationToken.None);
+            }
+        }
+
         private PingMonitorService CreateService(
             IPingSender sender,
             PingerOptions? options = null,
@@ -934,7 +974,8 @@ namespace HostPinger.Test
             IDbContextFactory<HostPingerDbContext>? dbFactory = null,
             TimeSpan? pruneBudget = null,
             Func<long>? freeBytes = null,
-            DatabasePruner? pruner = null)
+            DatabasePruner? pruner = null,
+            DatabaseOpening? opening = null)
         {
             // The settings arrive as configured defaults under a store with no rows, which is the
             // state of a fresh install.
@@ -956,7 +997,8 @@ namespace HostPinger.Test
                 pruner ?? new DatabasePruner(),
                 sizeLimit,
                 maintenanceGate ?? new MaintenanceGate(),
-                logger ?? NullLogger<PingMonitorService>.Instance)
+                logger ?? NullLogger<PingMonitorService>.Instance,
+                opening: opening)
             {
                 PruneBudgetFor = pruneBudget is { } budget ? _ => budget : PingMonitorService.PruneBudget,
             };

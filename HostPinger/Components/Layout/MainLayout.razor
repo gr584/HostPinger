@@ -1,4 +1,6 @@
 ﻿@inherits LayoutComponentBase
+@using HostPinger.Core.Services
+@inject DatabaseOpening Opening
 
 <div class="page">
     <div class="sidebar">
@@ -7,12 +9,28 @@
 
     <main>
         <div class="top-row px-4">
-            <LockStatus />
+            @if (Opening.IsOpen)
+            {
+                <LockStatus />
+            }
             <ThemeToggle />
         </div>
 
         <article class="content px-4">
-            @Body
+            <DatabaseNotice />
+            @if (Opening.IsOpen)
+            {
+                @Body
+            }
+            else
+            {
+                @* Until the start has opened the database, no page is drawn: each reads it, or what is
+                   loaded from it, the lock included. Loaded again every few seconds, to show the page
+                   once it is open, and more often during an upgrade, to move its progress on. *@
+                <HeadContent>
+                    <meta http-equiv="refresh" content="@(Opening.IsUpgrading ? 3 : 10)" />
+                </HeadContent>
+            }
         </article>
     </main>
 </div>

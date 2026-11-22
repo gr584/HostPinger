@@ -30,6 +30,7 @@ namespace HostPinger.Test
             var stats = new DatabaseStats
             {
                 SizeBytes = DatabaseStats.BaselineBytes + 20_000,
+                UsedBytes = DatabaseStats.BaselineBytes + 20_000,
                 MaxSizeBytes = 100 * 1024 * 1024,
                 AttemptCount = 200,
                 EnabledHostCount = 2,
@@ -46,6 +47,32 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// The free pages inside the file hold no attempts, so they are left out of each attempt's
+        /// share: an upgrade that halved what the history takes left half the file free, and
+        /// counted, those pages would have the page go on saying the limit holds what it held
+        /// before.
+        /// </summary>
+        [Test]
+        public void BytesPerAttempt_LeavesOutTheFreePages()
+        {
+            var stats = new DatabaseStats
+            {
+                SizeBytes = DatabaseStats.BaselineBytes + 40_000,
+                UsedBytes = DatabaseStats.BaselineBytes + 20_000,
+                MaxSizeBytes = 100 * 1024 * 1024,
+                AttemptCount = 200,
+                EnabledHostCount = 2,
+                IntervalSeconds = 30,
+            };
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(stats.BytesPerAttempt, Is.EqualTo(100));
+                Assert.That(stats.CapacityDays, Is.EqualTo(100 * 1024 * 1024 / 576_000.0).Within(0.001));
+            });
+        }
+
+        /// <summary>
         /// The capacity of a size other than the limit, which the page shows of a file held at its
         /// size while the disk is nearly full: the history the file holds now.
         /// </summary>
@@ -55,6 +82,7 @@ namespace HostPinger.Test
             var stats = new DatabaseStats
             {
                 SizeBytes = DatabaseStats.BaselineBytes + 20_000,
+                UsedBytes = DatabaseStats.BaselineBytes + 20_000,
                 MaxSizeBytes = 100 * 1024 * 1024,
                 AttemptCount = 200,
                 EnabledHostCount = 2,
@@ -75,6 +103,7 @@ namespace HostPinger.Test
             var stats = new DatabaseStats
             {
                 SizeBytes = DatabaseStats.BaselineBytes + 20_000,
+                UsedBytes = DatabaseStats.BaselineBytes + 20_000,
                 MaxSizeBytes = 100 * 1024 * 1024,
                 AttemptCount = DatabaseStats.MinimumAttemptsForEstimate - 1,
                 EnabledHostCount = 2,
@@ -95,6 +124,7 @@ namespace HostPinger.Test
             var stats = new DatabaseStats
             {
                 SizeBytes = DatabaseStats.BaselineBytes + 20_000,
+                UsedBytes = DatabaseStats.BaselineBytes + 20_000,
                 MaxSizeBytes = 100 * 1024 * 1024,
                 AttemptCount = 200,
                 EnabledHostCount = 0,
@@ -115,6 +145,7 @@ namespace HostPinger.Test
             var stats = new DatabaseStats
             {
                 SizeBytes = DatabaseStats.BaselineBytes + 20_000,
+                UsedBytes = DatabaseStats.BaselineBytes + 20_000,
                 MaxSizeBytes = 0,
                 AttemptCount = 200,
                 EnabledHostCount = 2,
@@ -155,10 +186,45 @@ namespace HostPinger.Test
             Assert.Multiple(() =>
             {
                 Assert.That(stats.SizeBytes, Is.GreaterThan(0));
+                Assert.That(stats.UsedBytes, Is.GreaterThan(0).And.LessThanOrEqualTo(stats.SizeBytes));
                 Assert.That(stats.AttemptCount, Is.EqualTo(50));
                 Assert.That(stats.EnabledHostCount, Is.EqualTo(1), "paused hosts do not add to the write rate");
                 Assert.That(stats.IntervalSeconds, Is.EqualTo(15));
                 Assert.That(stats.MaxSizeBytes, Is.EqualTo(10L * 1024 * 1024));
+            });
+        }
+
+        /// <summary>
+        /// What deleted attempts leave free inside the file counts towards its size and not towards
+        /// what is in use.
+        /// </summary>
+        [Test]
+        public async Task Collect_LeavesTheFreePagesOutOfWhatIsInUse()
+        {
+            await using (var db = new HostPingerDbContext(_options))
+            {
+                var host = new MonitoredHost { Name = "on", Address = "on.example" };
+                db.Hosts.Add(host);
+                await db.SaveChangesAsync();
+                db.PingAttempts.AddRange(Enumerable.Range(0, 5_000).Select(i => new PingAttempt
+                {
+                    HostId = host.Id,
+                    TimestampUtc = DateTime.UtcNow.AddSeconds(-i),
+                    RoundtripMs = i,
+                }));
+                await db.SaveChangesAsync();
+            }
+
+            await using var read = new HostPingerDbContext(_options);
+            var full = await DatabaseStats.CollectAsync(read, new PingerOptions());
+            await read.PingAttempts.Where(a => a.Id > 100).ExecuteDeleteAsync();
+            var emptied = await DatabaseStats.CollectAsync(read, new PingerOptions());
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(full.UsedBytes, Is.EqualTo(full.SizeBytes), "nothing free yet");
+                Assert.That(emptied.SizeBytes, Is.EqualTo(full.SizeBytes), "the pages stay in the file");
+                Assert.That(emptied.UsedBytes, Is.LessThan(full.UsedBytes / 4));
             });
         }
 

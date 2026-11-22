@@ -45,7 +45,8 @@ namespace HostPinger.Core.Services
     public sealed class HostSummaryCache(
         IDbContextFactory<HostPingerDbContext> dbFactory,
         UserSettingsStore settings,
-        ILogger<HostSummaryCache> logger) : BackgroundService
+        ILogger<HostSummaryCache> logger,
+        DatabaseOpening? opening = null) : BackgroundService
     {
         /// <summary>How often the loop asks whether the database has changed.</summary>
         private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(1);
@@ -154,6 +155,20 @@ namespace HostPinger.Core.Services
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
+            // Nothing to poll before the start has opened the database, and loaded the summary
+            // this goes on from. Null for the tests that hand it a database already open.
+            if (opening is not null)
+            {
+                try
+                {
+                    await opening.Opened.WaitAsync(stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    return;
+                }
+            }
+
             while (!stoppingToken.IsCancellationRequested)
             {
                 try

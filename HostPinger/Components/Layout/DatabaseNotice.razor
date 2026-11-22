@@ -1,0 +1,64 @@
+@using HostPinger.Core.Services
+@inject DatabaseOpening Opening
+
+@* Over every page, from what the start has filled in as it opened the database; nothing here reads it. *@
+@switch (Opening.Stage)
+{
+    case DatabaseOpeningStage.WaitingForRoom:
+        <div class="alert alert-danger py-2 mt-3 mb-0 database-notice" role="status">
+            HostPinger is waiting to upgrade its database, which needs about @Mb(Opening.RoomNeededBytes) MB free on
+            its disk. The disk has @Mb(Opening.RoomFreeBytes) MB. The upgrade starts once there is room, which is
+            checked every minute. Nothing is recorded until then.
+        </div>
+        break;
+    case DatabaseOpeningStage.Opening when Opening.IsUpgrading:
+        <div class="alert alert-info py-2 mt-3 mb-0 database-notice" role="status">
+            <div class="d-flex justify-content-between">
+                <span>HostPinger is upgrading its database. Nothing is recorded until it is done.</span>
+                <span class="ms-3 text-nowrap">@UpgradeSummary</span>
+            </div>
+            @* Moving without a measure: SQLite says nothing of how much of an upgrade is left. *@
+            <div class="progress mt-2" role="progressbar" aria-label="Upgrading the database">
+                <div class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%"></div>
+            </div>
+        </div>
+        break;
+    case DatabaseOpeningStage.Opening:
+        <div class="alert alert-info py-2 mt-3 mb-0 database-notice" role="status">
+            HostPinger is opening its database. An upgrade over a long history can take a few minutes, and nothing
+            is recorded until it is done.
+        </div>
+        break;
+    case DatabaseOpeningStage.Refused:
+        <div class="alert alert-danger py-2 mt-3 mb-0 database-notice" role="status">
+            @Opening.Refusal
+        </div>
+        break;
+    case DatabaseOpeningStage.Open when Opening.RollbackUnsupported:
+        <div class="alert alert-warning py-2 mt-3 mb-0 database-notice" role="status">
+            This database has been upgraded to a format HostPinger 1.14.0 and earlier cannot read, so going back to
+            an earlier version is not supported. To go back regardless, stop the service and put a backup file made
+            before the upgrade in place of the database file, then install the earlier version; that loses the
+            history recorded since. A restore from this page would upgrade the backup again.
+        </div>
+        break;
+}
+
+@code {
+    private static long Mb(long bytes) => bytes >> 20;
+
+    /// <summary>How long it has taken so far, and what its journal files come to now.</summary>
+    private string UpgradeSummary
+    {
+        get
+        {
+            var elapsed = Opening.UpgradeStartedUtc is { } started ? DateTime.UtcNow - started : TimeSpan.Zero;
+            var taken = elapsed.TotalMinutes >= 1
+                ? $"{(int)elapsed.TotalMinutes} min {elapsed.Seconds} s"
+                : $"{Math.Max(0, elapsed.Seconds)} s";
+            return Opening.UpgradeJournalBytes is { } written
+                ? $"{taken} so far · {Mb(written):N0} MB written"
+                : $"{taken} so far";
+        }
+    }
+}

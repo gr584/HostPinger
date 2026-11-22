@@ -362,11 +362,25 @@ service, locked or not.
 
 - One SQLite file holds the hosts, every ping attempt and every failed lookup. Its schema is
   migrated automatically at startup, so an upgrade needs no separate step. A release that adds or
-  rebuilds an index builds it over the history already recorded, before the service starts
-  answering — on a database near its size limit that is the one kind of upgrade that takes
-  noticeable time, a minute or two, and longer on a slow machine. The service waits for it
-  however long it takes, and a start interrupted anyway — a reboot, a stop — leaves nothing to
-  repair: the next start begins that migration again.
+  rebuilds an index, or rebuilds the table of ping attempts itself, does it over the history
+  already recorded — on a database near its size limit that is the one kind of upgrade that takes
+  noticeable time, a minute or two, and longer on a slow machine. The pages answer meanwhile, with
+  a banner saying the database is being opened in place of the page, and no pings are recorded
+  until it is done. An upgrade needs about half the database's size free on its disk while it
+  runs; with less, it waits, the banner says how much it needs, and the disk is measured again
+  every minute until there is room. A start interrupted anyway — a reboot, a stop — leaves nothing
+  to repair: the next start begins that migration again.
+- Once upgraded, a database can't be opened by an earlier version than the one that upgraded it,
+  when the upgrade changed how it is stored. Going back means stopping the service, putting a
+  backup file made before the upgrade in place of the database file, and installing the earlier
+  version, which loses the history recorded since; a restore from the Configuration page would
+  upgrade the backup again. The banner over every page says so for as long as it applies. A
+  version that finds its database upgraded by a newer one refuses it and says so, rather than
+  failing; 1.14.0 and earlier don't check, and fail at startup.
+- Each attempt's time is stored as milliseconds since 1970 (Unix time), six bytes, rather than as
+  text, which roughly halves what the history takes: the same size limit holds about twice as many
+  days. SQLite's own date functions read it, as in
+  `SELECT datetime(TimestampUtc / 1000, 'unixepoch') FROM PingAttempts`.
 - The file runs in SQLite's WAL mode, where reading the history never holds up a ping round's
   write; an install upgraded from an older version is switched at its first start, once any
   migration is done. The most recent writes then sit in `hostpinger.db-wal` beside the file until
@@ -396,7 +410,12 @@ service, locked or not.
   unlocked browser stay unlocked across a restart of the service, as well as reconnecting a page
   that was open when it went down.
 - `/health` answers for liveness probes. It deliberately touches nothing, so a pruning pass
-  holding the database busy is not read as an unhealthy service.
+  holding the database busy is not read as an unhealthy service. It answers while the service is
+  still opening its database too, so that a long upgrade is not read as an unhealthy service
+  either, saying how far the start has got in place of `Healthy`: `Opening`, `WaitingForRoom`
+  (an upgrade waiting for disk space) or `Refused` (a database from a newer version). systemd
+  likewise sees the service as started once its web server answers, before the database is open;
+  the service stays up while it waits or refuses, to say so on its pages.
 - Timestamps are rendered on the server, so the time zone the service runs in is what everyone
   viewing the UI sees.
 

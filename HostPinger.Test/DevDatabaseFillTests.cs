@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Globalization;
 using HostPinger.Core.Data;
 using HostPinger.Core.Options;
 using HostPinger.Core.Services;
@@ -72,16 +71,6 @@ namespace HostPinger.Test
         /// the rest of the run.
         /// </summary>
         private const int CalibrationRows = 200_000;
-
-        /// <summary>
-        /// The format EF Core's SQLite provider stores a <see cref="DateTime"/> in. These rows go
-        /// in through ADO.NET rather than through EF, so this has to match it exactly: the column
-        /// is text, every query orders and ranges over it as text, and a row written to a
-        /// different width would sort into the wrong place. The upper-case F is the part that is
-        /// easy to get wrong — trailing zeros are dropped, so a whole second is stored with no
-        /// fractional part at all.
-        /// </summary>
-        private const string SqliteDateTimeFormat = "yyyy-MM-dd HH:mm:ss.FFFFFFF";
 
         [Test]
         public async Task FillDevelopmentDatabaseWithFakeHistory()
@@ -281,7 +270,9 @@ namespace HostPinger.Test
             command.CommandText =
                 "INSERT INTO PingAttempts (HostId, TimestampUtc, RoundtripMs) VALUES ($hostId, $timestampUtc, $roundtripMs);";
             var hostId = command.Parameters.Add("$hostId", SqliteType.Integer);
-            var timestampUtc = command.Parameters.Add("$timestampUtc", SqliteType.Text);
+            // Unix milliseconds, as the context maps the column (see StoredTime): these rows go in
+            // through ADO.NET rather than through EF, so nothing converts a DateTime for them.
+            var timestampUtc = command.Parameters.Add("$timestampUtc", SqliteType.Integer);
             var roundtripMs = command.Parameters.Add("$roundtripMs", SqliteType.Integer);
             hostId.Value = plan.HostId;
 
@@ -293,7 +284,7 @@ namespace HostPinger.Test
                 var end = Math.Min(offset + InsertBatchRows, plan.Rows);
                 for (var row = offset; row < end; row++)
                 {
-                    timestampUtc.Value = plan.TimestampOf(row).ToString(SqliteDateTimeFormat, CultureInfo.InvariantCulture);
+                    timestampUtc.Value = StoredTime.ToMilliseconds(plan.TimestampOf(row));
                     roundtripMs.Value = plan.IsDown(row) ? DBNull.Value : UpRoundtripMs;
                     await command.ExecuteNonQueryAsync();
                 }

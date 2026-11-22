@@ -1615,7 +1615,7 @@
             ? $"Its size limit, {limit.FromMb:N0} MB, is more than this disk can safely hold, so it is {limit.ToMb:N0} MB now"
             : $"It had no size limit, so it is {limit.ToMb:N0} MB now, the most this disk can safely hold";
         var pruned = limit.OverBytes > 0
-            ? $"; the oldest {FormatBytes(limit.OverBytes)} of its history is pruned over the next ping rounds."
+            ? "; where its history is more than that, the oldest of it is pruned over the next ping rounds."
             : ".";
         return $"{Restored} {brought}{pruned}";
     }
@@ -1635,7 +1635,7 @@
     private string GrowthText => _room is { IsDiskNearlyFull: true }
         ? "held at this size while the disk is nearly full"
         : _stats?.GrowthBytesPerDay is double growth
-            ? $"growing by ~{FormatBytes(growth)} per day"
+            ? $"history growing by ~{FormatBytes(growth)} per day"
             : "not enough data to estimate growth yet";
 
     private string CapacityText
