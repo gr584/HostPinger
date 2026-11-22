@@ -73,7 +73,17 @@ namespace HostPinger.UITest
         /// </summary>
         public string DatabasePath { get; }
 
-        public static async Task<WebApp> StartAsync()
+        /// <summary>The run's instance, after stopping whatever earlier runs left.</summary>
+        public static Task<WebApp> StartAsync() => StartAsync(new WebAppStart(), sweepEarlierRuns: true);
+
+        /// <summary>
+        /// A further instance for one test, started <paramref name="how"/> says, alongside the run's.
+        /// It leaves the earlier runs' leftovers alone, since sweeping them would take the run's own
+        /// instance's directory with them.
+        /// </summary>
+        public static Task<WebApp> StartAsync(WebAppStart how) => StartAsync(how, sweepEarlierRuns: false);
+
+        private static async Task<WebApp> StartAsync(WebAppStart how, bool sweepEarlierRuns)
         {
             var directory = Assembly.GetExecutingAssembly()
                 .GetCustomAttributes<AssemblyMetadataAttribute>()
@@ -87,11 +97,21 @@ namespace HostPinger.UITest
                     + "than this project alone.", assemblyPath);
             }
 
-            StopWhatEarlierRunsLeft();
+            if (sweepEarlierRuns)
+            {
+                StopWhatEarlierRunsLeft();
+            }
             var dataDirectory = Path.Combine(Path.GetTempPath(), $"{DataDirectoryPrefix}{Guid.NewGuid():N}");
             Directory.CreateDirectory(dataDirectory);
             var databasePath = Path.Combine(dataDirectory, PingerPaths.DatabaseFileName);
-            SeedSettings(databasePath);
+            if (how.PrepareDatabase is { } prepare)
+            {
+                prepare(databasePath);
+            }
+            else
+            {
+                SeedSettings(databasePath);
+            }
             var baseUrl = $"http://127.0.0.1:{FreePort()}";
             var start = new ProcessStartInfo("dotnet")
             {
@@ -115,6 +135,10 @@ namespace HostPinger.UITest
 
             // As a deployment reached by a full name sets it; HostNameFilterTests asks under these.
             start.Environment["Security__AllowedHostNames"] = ListedHostNames;
+            foreach (var (name, value) in how.Environment)
+            {
+                start.Environment[name] = value;
+            }
 
             var process = Process.Start(start)
                 ?? throw new InvalidOperationException("Could not start the application.");
@@ -130,7 +154,7 @@ namespace HostPinger.UITest
             var app = new WebApp(process, output, dataDirectory, databasePath, baseUrl);
             try
             {
-                await app.WaitUntilAnsweringAsync(output);
+                await app.WaitUntilAnsweringAsync(output, how.ReadyAt);
                 await app.CheckItServesTheFrameworkScriptAsync();
             }
             catch
@@ -147,7 +171,11 @@ namespace HostPinger.UITest
         /// starts against one that is set without having to go through the pages that set it.
         /// Migrating here is a no-op for the application's own startup, which finds it done.
         /// </summary>
-        private static void SeedSettings(string databasePath)
+        /// <summary>
+        /// The run's database, at the latest schema, with the test password and a ping interval of a
+        /// day. Public for a test preparing a database of its own on top of it.
+        /// </summary>
+        public static void SeedSettings(string databasePath)
         {
             var options = new DbContextOptionsBuilder<HostPingerDbContext>()
                 .UseSqlite($"Data Source={databasePath}")
@@ -195,7 +223,7 @@ namespace HostPinger.UITest
             return ((IPEndPoint)listener.LocalEndpoint).Port;
         }
 
-        private async Task WaitUntilAnsweringAsync(List<string> output)
+        private async Task WaitUntilAnsweringAsync(List<string> output, string readyAt)
         {
             using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
             var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(60);
@@ -209,9 +237,10 @@ namespace HostPinger.UITest
 
                 try
                 {
-                    // Up as soon as it answers; ready once it has opened the database.
+                    // Up as soon as it answers; ready once its start has reached the stage asked
+                    // for, which is the database open unless a test says otherwise.
                     using var response = await client.GetAsync($"{BaseUrl}/health");
-                    if (response.IsSuccessStatusCode && (await response.Content.ReadAsStringAsync()).Contains("Healthy"))
+                    if (response.IsSuccessStatusCode && (await response.Content.ReadAsStringAsync()).Contains(readyAt))
                     {
                         return;
                     }

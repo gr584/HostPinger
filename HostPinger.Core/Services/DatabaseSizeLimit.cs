@@ -1,5 +1,6 @@
 using HostPinger.Core.Options;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Hosting;
 
 namespace HostPinger.Core.Services
 {
@@ -26,16 +27,42 @@ namespace HostPinger.Core.Services
     /// nothing (see <see cref="DatabaseRoom.IsDiskNearlyFull"/>).
     /// </para>
     /// </remarks>
-    public sealed class DatabaseSizeLimit(PingerPaths paths, UserSettingsStore settings, ILogger<DatabaseSizeLimit> logger)
+    public sealed class DatabaseSizeLimit(
+        PingerPaths paths,
+        UserSettingsStore settings,
+        ILogger<DatabaseSizeLimit> logger,
+        IHostEnvironment? environment = null)
     {
         private const long BytesPerMb = 1024 * 1024;
+
+        /// <summary>
+        /// In the Development environment only, a number of bytes that what the disk has free is
+        /// taken to be at most. For the browser tests, which cannot fill a disk to see the start wait
+        /// for the room an upgrade needs. It can only make the disk look fuller than it is, never
+        /// emptier, so nothing it does can fill a disk.
+        /// </summary>
+        public const string DevelopmentFreeBytesVariable = "HOSTPINGER_DEVELOPMENT_FREE_BYTES";
 
         /// <summary>
         /// What the disk beside the database has free. Settable for the tests, which cannot fill a
         /// disk to see a limit refused.
         /// </summary>
-        internal Func<long> MeasureFreeBytes { get; init; } =
-            () => new DriveInfo(Path.GetDirectoryName(paths.DatabasePath)!).AvailableFreeSpace;
+        internal Func<long> MeasureFreeBytes { get; init; } = FreeBytesMeasure(paths, logger, environment);
+
+        private static Func<long> FreeBytesMeasure(PingerPaths paths, ILogger logger, IHostEnvironment? environment)
+        {
+            long Measure() => new DriveInfo(Path.GetDirectoryName(paths.DatabasePath)!).AvailableFreeSpace;
+
+            if (environment?.IsDevelopment() == true
+                && long.TryParse(Environment.GetEnvironmentVariable(DevelopmentFreeBytesVariable), out var cap))
+            {
+                logger.LogWarning(
+                    "{Variable} is set: the disk is taken to have at most {Cap} bytes free.", DevelopmentFreeBytesVariable, cap);
+                return () => Math.Min(cap, Measure());
+            }
+
+            return Measure;
+        }
 
         /// <summary>The largest limit that is safe for the database on its disk as it is now, in MB.</summary>
         public int SafeLimitMb() => MeasureRoom().SafeLimitMb;
