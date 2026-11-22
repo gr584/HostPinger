@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
 using HostPinger.Core.Data;
@@ -790,7 +791,7 @@ namespace HostPinger.Core.Services
                     }
 
                     progress?.Report(new RestoreProgress(RestoreStep.Replacing, null));
-                    var lowered = await Task.Run(() => RestoreOnThisThreadAsync(candidatePath, cancellationToken), CancellationToken.None);
+                    var lowered = await Task.Run(() => RestoreOnThisThreadAsync(candidatePath, cancellationToken, progress), CancellationToken.None);
                     return new RestoreResult(Refusal: null, lowered);
                 }
                 finally
@@ -960,9 +961,12 @@ namespace HostPinger.Core.Services
             }
         }
 
-        private async Task<SizeLimitLowered?> RestoreOnThisThreadAsync(string candidatePath, CancellationToken cancellationToken)
+        private async Task<SizeLimitLowered?> RestoreOnThisThreadAsync(
+            string candidatePath,
+            CancellationToken cancellationToken,
+            IProgress<RestoreProgress>? progress = null)
         {
-            var (lowered, settingsRows) = await PrepareCandidateAsync(candidatePath, cancellationToken);
+            var (lowered, settingsRows) = await PrepareCandidateAsync(candidatePath, progress, cancellationToken);
 
             using (await maintenanceGate.AcquireAsync(cancellationToken))
             {
@@ -1031,6 +1035,7 @@ namespace HostPinger.Core.Services
         /// </summary>
         private async Task<(SizeLimitLowered? Lowered, Dictionary<string, string> SettingsRows)> PrepareCandidateAsync(
             string candidatePath,
+            IProgress<RestoreProgress>? progress,
             CancellationToken cancellationToken)
         {
             SizeLimitLowered? lowered;
@@ -1061,7 +1066,7 @@ namespace HostPinger.Core.Services
                         await db.Database.CloseConnectionAsync();
                     }
 
-                    await HostPingerDatabase.InitializeAsync(db, cancellationToken);
+                    await UpgradeCandidateAsync(db, candidatePath, progress, cancellationToken);
                     if (await FindMissingSchemaAsync(db, cancellationToken) is { } missing)
                     {
                         throw new InvalidDataException($"The backup has no {missing}.");
@@ -1131,6 +1136,45 @@ namespace HostPinger.Core.Services
         /// candidate was brought up to date, checked and read where it lay, so nothing after the
         /// move can find it wanting, and there is nothing to put back.
         /// </summary>
+        /// <summary>
+        /// Brings the candidate up to date. A backup from an older version is migrated here, which
+        /// rebuilds the attempts' table for one from 1.14.0 or earlier, and takes as long as the start
+        /// would. While it runs, <paramref name="progress"/> hears the time it has taken and what its
+        /// journal files have written, as the start's banner shows, and the swap once it is done.
+        /// </summary>
+        private static async Task UpgradeCandidateAsync(
+            HostPingerDbContext db,
+            string candidatePath,
+            IProgress<RestoreProgress>? progress,
+            CancellationToken cancellationToken)
+        {
+            if (progress is null || await HostPingerDatabase.MigrationRoomBytesAsync(db, candidatePath, cancellationToken) == 0)
+            {
+                await HostPingerDatabase.InitializeAsync(db, cancellationToken);
+                return;
+            }
+
+            var started = Stopwatch.GetTimestamp();
+            using var sampling = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var sampler = JournalFiles.SampleAsync(
+                candidatePath,
+                JournalFiles.SampleInterval,
+                written => progress.Report(new RestoreProgress(
+                    RestoreStep.Upgrading, null, written, Stopwatch.GetElapsedTime(started))),
+                sampling.Token);
+            try
+            {
+                await HostPingerDatabase.InitializeAsync(db, cancellationToken);
+            }
+            finally
+            {
+                await sampling.CancelAsync();
+                await sampler;
+            }
+
+            progress.Report(new RestoreProgress(RestoreStep.Replacing, null));
+        }
+
         private async Task ReplaceAsync(
             string candidatePath,
             Dictionary<string, string> settingsRows,
@@ -1403,7 +1447,13 @@ namespace HostPinger.Core.Services
         /// <summary>The file received being checked, as <see cref="DatabaseBackup.ValidateBackupAsync"/> checks it.</summary>
         Checking,
 
-        /// <summary>The file being migrated if it needs it, and swapped in.</summary>
+        /// <summary>
+        /// A backup from an older version being migrated beside the database, before the swap; see
+        /// <see cref="RestoreProgress.JournalBytes"/>.
+        /// </summary>
+        Upgrading,
+
+        /// <summary>The file being made ready and swapped in.</summary>
         Replacing,
     }
 
@@ -1412,9 +1462,18 @@ namespace HostPinger.Core.Services
     /// <param name="Fraction">
     /// How much of the upload has arrived, while it is arriving, and about how far the check has
     /// got, once it has a measure: an estimate that stays short of 1. Null for a check that has
-    /// none yet and for the swap, which SQLite gives no measure of.
+    /// none yet, and for the upgrade and the swap, which SQLite gives no measure of.
     /// </param>
-    public readonly record struct RestoreProgress(RestoreStep Step, double? Fraction);
+    /// <param name="JournalBytes">
+    /// While <see cref="RestoreStep.Upgrading"/>: what the candidate's journal files come to, what
+    /// the migration has written and not yet committed. A measure of work done, not of what is left.
+    /// </param>
+    /// <param name="Elapsed">While <see cref="RestoreStep.Upgrading"/>: how long the migration has taken so far.</param>
+    public readonly record struct RestoreProgress(
+        RestoreStep Step,
+        double? Fraction,
+        long? JournalBytes = null,
+        TimeSpan? Elapsed = null);
 
     /// <summary>What came of a restore from an upload.</summary>
     /// <param name="Refusal">

@@ -48,7 +48,7 @@ namespace HostPinger.Core.Services
         internal TimeSpan RoomRecheckInterval { get; init; } = DefaultRoomRecheckInterval;
 
         /// <summary>How often a migration's journal is measured for <see cref="DatabaseOpening.UpgradeJournalBytes"/>.</summary>
-        internal TimeSpan UpgradeSampleInterval { get; init; } = TimeSpan.FromMilliseconds(500);
+        internal TimeSpan UpgradeSampleInterval { get; init; } = JournalFiles.SampleInterval;
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
@@ -65,7 +65,9 @@ namespace HostPinger.Core.Services
                 // Migrations, then the settings, then the host summary; see OpenAsync for the order.
                 using (var sampling = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken))
                 {
-                    var sampler = migrationBytes > 0 ? SampleUpgradeAsync(sampling.Token) : Task.CompletedTask;
+                    var sampler = migrationBytes > 0
+                        ? JournalFiles.SampleAsync(paths.DatabasePath, UpgradeSampleInterval, opening.ReportUpgrade, sampling.Token)
+                        : Task.CompletedTask;
                     try
                     {
                         await HostPingerDatabase.OpenAsync(services, stoppingToken);
@@ -99,41 +101,6 @@ namespace HostPinger.Core.Services
                 logger.LogCritical(ex, "The database could not be opened.");
                 Environment.ExitCode = 1;
                 lifetime.StopApplication();
-            }
-        }
-
-        /// <summary>
-        /// Measures the migration's journal every <see cref="UpgradeSampleInterval"/> until
-        /// <paramref name="cancellationToken"/> says it is over, for the banner.
-        /// </summary>
-        private async Task SampleUpgradeAsync(CancellationToken cancellationToken)
-        {
-            try
-            {
-                while (true)
-                {
-                    opening.ReportUpgrade(JournalBytes());
-                    await Task.Delay(UpgradeSampleInterval, cancellationToken);
-                }
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-            }
-        }
-
-        private long JournalBytes() => SizeOf(paths.DatabasePath + "-wal") + SizeOf(paths.DatabasePath + "-journal");
-
-        private static long SizeOf(string path)
-        {
-            try
-            {
-                var file = new FileInfo(path);
-                return file.Exists ? file.Length : 0;
-            }
-            catch (IOException)
-            {
-                // Gone between the look and the measure, as a journal is at a commit.
-                return 0;
             }
         }
 

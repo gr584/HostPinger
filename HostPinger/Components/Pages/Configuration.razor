@@ -351,6 +351,10 @@
                                     {
                                         <span>@percent%</span>
                                     }
+                                    else if (_progressDetail is { } detail)
+                                    {
+                                        <span class="ms-3 text-nowrap restore-upgrade-detail">@detail</span>
+                                    }
                                 </div>
                                 <div class="progress" role="progressbar" aria-label="@_progressLabel"
                                      aria-valuemin="0" aria-valuemax="100" aria-valuenow="@ProgressPercent">
@@ -486,6 +490,7 @@
     // What a long step in the overlay is doing, and how far it has got as a fraction: null for a
     // step that gives no measure of that.
     private string? _progressLabel;
+    private string? _progressDetail;
     private double? _progress;
 
     // The snapshot being written for a download, cancelled when its overlay is, or when the page goes.
@@ -1311,6 +1316,7 @@
     {
         _progressLabel = label;
         _progress = progress;
+        _progressDetail = null;
         StateHasChanged();
     }
 
@@ -1326,6 +1332,15 @@
     }
 
     private int? ProgressPercent => _progress is { } fraction ? (int)(fraction * 100) : null;
+
+    /// <summary>How long an upgrade has taken so far, and what it has written.</summary>
+    private static string UpgradeDetail(TimeSpan elapsed, long writtenBytes)
+    {
+        var taken = elapsed.TotalMinutes >= 1
+            ? $"{(int)elapsed.TotalMinutes} min {elapsed.Seconds} s"
+            : $"{Math.Max(0, elapsed.Seconds)} s";
+        return $"{taken} so far · {writtenBytes >> 20:N0} MB written";
+    }
 
     /// <summary>
     /// Follows a restore through its steps: the upload by how far it has got, the check by about
@@ -1343,8 +1358,23 @@
         {
             RestoreStep.Receiving => "Uploading the backup…",
             RestoreStep.Checking => "Checking the backup…",
+            RestoreStep.Upgrading => "Upgrading the backup, which is from an older version…",
             _ => "Putting the backup in place…",
         };
+
+        // No measure of how much is left, which SQLite does not give: the time so far and what the
+        // migration has written instead, as the start's banner shows them.
+        if (progress.Step == RestoreStep.Upgrading)
+        {
+            if (label != _progressLabel)
+            {
+                ShowStep(label, null);
+            }
+
+            _progressDetail = UpgradeDetail(progress.Elapsed ?? TimeSpan.Zero, progress.JournalBytes ?? 0);
+            StateHasChanged();
+            return;
+        }
 
         if (label == _progressLabel && progress.Fraction is { } fraction)
         {

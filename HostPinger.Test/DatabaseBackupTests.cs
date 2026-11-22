@@ -1404,6 +1404,44 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// A backup from an older version is upgraded before the swap, which can take minutes, and
+        /// the restore says so while it does: the time it has taken and what its journal has
+        /// written, with no measure of what is left, which SQLite does not give. Then the swap.
+        /// </summary>
+        [Test]
+        public async Task RestoreUpload_SaysItIsUpgradingAnOlderBackupAndHowLongItHasTaken()
+        {
+            await SeedHostWithAttemptsAsync(_options, "current.example", attempts: 1);
+            var backupPath = Path.Combine(_directory, "uploaded.db");
+            await using (var db = new HostPingerDbContext(OptionsFor(backupPath)))
+            {
+                await db.GetService<IMigrator>().MigrateAsync(LastWithTextTimes);
+            }
+
+            await SeedHostWithAttemptsAsync(OptionsFor(backupPath), "older.example", attempts: 0);
+            await ExecuteAsync(backupPath, "INSERT INTO PingAttempts (HostId, TimestampUtc, RoundtripMs) VALUES (1, '2026-10-01 00:00:00.1234567', 5);");
+            await StagePasswordAsync(OptionsFor(backupPath), BackupHash);
+            SqliteConnection.ClearAllPools();
+            var upload = new UploadStream(await File.ReadAllBytesAsync(backupPath));
+            var reports = new List<RestoreProgress>();
+
+            var refusal = (await _backup.RestoreUploadAsync(upload, upload.Size, Answering(BackupPassword), new Recorder<RestoreProgress>(reports.Add))).Refusal;
+
+            var upgrading = reports.Where(r => r.Step == RestoreStep.Upgrading).ToList();
+            Assert.Multiple(async () =>
+            {
+                Assert.That(refusal, Is.Null);
+                Assert.That(await AddressesAsync(_dbPath), Is.EqualTo(new[] { "older.example" }));
+                Assert.That(upgrading, Is.Not.Empty, "said nothing of the upgrade");
+                Assert.That(upgrading.Select(r => r.Fraction), Has.All.Null, "a measure SQLite does not give");
+                Assert.That(upgrading.Select(r => r.JournalBytes), Has.All.Not.Null);
+                Assert.That(upgrading.Select(r => r.Elapsed), Has.All.Not.Null);
+                Assert.That(upgrading.Select(r => r.Elapsed ?? TimeSpan.Zero), Is.Ordered);
+                Assert.That(reports[^1].Step, Is.EqualTo(RestoreStep.Replacing), "the swap comes after the upgrade");
+            });
+        }
+
+        /// <summary>
         /// The page hands the browser's upload over as it is read, and the backup does the rest in
         /// one turn: receives the file beside the database, checks it and puts it in place, saying
         /// which it is on, the upload by how far it has got. Nothing of the upload is left.
