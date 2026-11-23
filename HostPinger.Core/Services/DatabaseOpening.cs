@@ -32,6 +32,7 @@ namespace HostPinger.Core.Services
     public sealed class DatabaseOpening
     {
         private readonly TaskCompletionSource _opened = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _loaded = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public DatabaseOpeningStage Stage { get; private set; } = DatabaseOpeningStage.Opening;
 
@@ -40,6 +41,17 @@ namespace HostPinger.Core.Services
 
         /// <summary>Completes once the database is open. Never completes for a refused one.</summary>
         public Task Opened => _opened.Task;
+
+        /// <summary>
+        /// Completes once the database is migrated and the settings and the host summary are loaded
+        /// from it: <see cref="HostPingerDatabase.OpenAsync(IServiceProvider, CancellationToken)"/>
+        /// says so as it returns, whoever calls it. What the host summary's polling waits for, which
+        /// needs nothing else. <see cref="Opened"/> comes after it, once the start has settled the
+        /// size limit too, which the ping rounds need.
+        /// </summary>
+        public Task Loaded => _loaded.Task;
+
+        internal void MarkLoaded() => _loaded.TrySetResult();
 
         /// <summary>While waiting for room: what the migration needs free on the disk, margin included.</summary>
         public long RoomNeededBytes { get; private set; }
@@ -105,6 +117,7 @@ namespace HostPinger.Core.Services
             IsUpgrading = false;
             SchemaLevel = schemaLevel;
             Stage = DatabaseOpeningStage.Open;
+            _loaded.TrySetResult();
             _opened.TrySetResult();
         }
     }

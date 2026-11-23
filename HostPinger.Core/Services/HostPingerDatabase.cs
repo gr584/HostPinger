@@ -87,12 +87,18 @@ namespace HostPinger.Core.Services
         /// <see cref="AddHostPingerDatabase"/> and the application registered; see the overload
         /// taking them, which is where the order is kept.
         /// </summary>
-        public static Task OpenAsync(IServiceProvider services, CancellationToken cancellationToken = default) =>
-            OpenAsync(
+        public static async Task OpenAsync(IServiceProvider services, CancellationToken cancellationToken = default)
+        {
+            await OpenAsync(
                 services.GetRequiredService<IDbContextFactory<HostPingerDbContext>>(),
                 services.GetRequiredService<UserSettingsStore>(),
                 services.GetRequiredService<HostSummaryCache>(),
                 cancellationToken);
+
+            // Said here rather than by DatabaseStartup, so that whatever opens the database this
+            // way, the benchmarks included, has a host summary that polls: its loop waits for this.
+            services.GetService<DatabaseOpening>()?.MarkLoaded();
+        }
 
         /// <summary>
         /// The room a migration of the database at <paramref name="databasePath"/> needs free on its

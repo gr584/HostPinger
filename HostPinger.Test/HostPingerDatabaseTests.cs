@@ -481,6 +481,42 @@ namespace HostPinger.Test
         }
 
         /// <summary>
+        /// Opened this way, without DatabaseStartup, as the benchmarks open it, the host summary still
+        /// polls, so a refresh, which its loop answers and every host change waits for, comes back.
+        /// It used to wait for the start to say the database was open, which only DatabaseStartup
+        /// says, and a host delete in the benchmarks waited on it until the job was cancelled.
+        /// </summary>
+        [Test]
+        public async Task OpenAsync_FromTheApplicationsServices_LeavesTheSummaryAnsweringRefreshes()
+        {
+            var paths = PingerPaths.Resolve(_databasePath, _directory);
+            var services = new ServiceCollection()
+                .AddHostPingerDatabase(paths)
+                .AddLogging()
+                .AddSingleton<Microsoft.Extensions.Options.IOptionsMonitor<PingerOptions>>(new TestOptionsMonitor<PingerOptions>(new PingerOptions()))
+                .AddSingleton<Microsoft.Extensions.Options.IOptionsMonitor<SecurityOptions>>(new TestOptionsMonitor<SecurityOptions>(new SecurityOptions()))
+                .AddSingleton<UserSettingsStore>()
+                .AddSingleton<HostSummaryCache>();
+            await using var provider = services.BuildServiceProvider();
+            await HostPingerDatabase.OpenAsync(provider);
+
+            var summaries = provider.GetRequiredService<HostSummaryCache>();
+            await summaries.StartAsync(CancellationToken.None);
+            try
+            {
+                Assert.That(
+                    async () => await summaries.RefreshAsync().WaitAsync(TimeSpan.FromSeconds(10)),
+                    Throws.Nothing,
+                    "the summary's loop never started");
+                Assert.That(provider.GetRequiredService<DatabaseOpening>().IsOpen, Is.False, "only the start says it is open");
+            }
+            finally
+            {
+                await summaries.StopAsync(CancellationToken.None);
+            }
+        }
+
+        /// <summary>
         /// The stores, the backup and the pages have to share one lockout, or a backup or a restore
         /// would keep nothing from being changed. Each takes it as something it can do without, so
         /// nothing fails to build when it is missing: this is what says the application's services,

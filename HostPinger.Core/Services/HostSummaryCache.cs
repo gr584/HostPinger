@@ -155,13 +155,14 @@ namespace HostPinger.Core.Services
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            // Nothing to poll before the start has opened the database, and loaded the summary
-            // this goes on from. Null for the tests that hand it a database already open.
+            // Nothing to poll before the database is migrated and the summary this goes on from is
+            // loaded (DatabaseOpening.Loaded), which whatever opens the database says. Null for the
+            // tests that hand it a database already open.
             if (opening is not null)
             {
                 try
                 {
-                    await opening.Opened.WaitAsync(stoppingToken);
+                    await opening.Loaded.WaitAsync(stoppingToken);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
