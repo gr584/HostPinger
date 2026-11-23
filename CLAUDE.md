@@ -63,11 +63,3 @@ benchmarks and refactoring get none.
 Why: work lands on main without pull requests, so GitHub's generated release notes have nothing to
 list. The release's notes are these trailers, collected by the notes job in `build.yml`, and a
 commit without one is left out of them. README's Development section has the rest.
-
-## Subagent effort
-
-Workflow agents and subagents run at `medium` effort.
-Set `effort` on every `agent()` call in a workflow script and on every Agent tool call.
-A prompt that asks for a different level for a particular task overrides this.
-Always plan yourself, don't use agents for planning.
-Always verify agent work yourself.
