@@ -864,7 +864,7 @@ to notice:
   `WebProjectTests` holds the compiled assembly's references to the same list, the shared
   frameworks and Core, which also catches a library reached through Core's own references.
 
-CI builds and tests on every push. The RPM job runs inside a `fedora:44` container using the .NET
+CI builds and tests on every push. The RPM job runs inside a `fedora:45` container using the .NET
 SDK that Fedora packages, rather than on a generic runner with the SDK from Microsoft: the two are
 different feature bands and do not accept identical source. Building on the target distribution is
 what catches that.

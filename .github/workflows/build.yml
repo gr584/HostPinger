@@ -108,7 +108,7 @@ jobs:
     # band while a developer machine typically has 10.0.3xx, and the two disagree about source
     # they will accept — a Razor component that compiles on one has already failed on the other.
     # Building on ubuntu-latest with actions/setup-dotnet would not catch that class of break.
-    container: fedora:44
+    container: fedora:45
     steps:
       # Before the checkout: without git in the container, actions/checkout falls back to
       # downloading a tarball, which arrives with no .git directory and leaves GitVersion unable
