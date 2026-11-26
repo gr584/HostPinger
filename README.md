@@ -522,7 +522,10 @@ sudo firewall-cmd --permanent --add-port=8080/tcp && sudo firewall-cmd --reload
 | `/usr/share/selinux/packages/targeted/hostpinger.pp.bz2` | The policy module, from `hostpinger-selinux`. Loaded into the policy store on install. |
 
 The package requires `aspnetcore-runtime-10.0` from the Fedora repositories, so the runtime is
-patched with the distribution rather than bundled.
+patched with the distribution rather than bundled. An update to that runtime restarts the service
+at the end of the dnf transaction that installs it. The running service would otherwise keep the
+old runtime in memory, unpatched, until something else restarted it. A service you have stopped
+stays stopped.
 
 ## Installing on Debian
 
@@ -554,6 +557,13 @@ Installing enables and starts the service, as a Debian package is expected to, s
 ```bash
 sudo apt upgrade hostpinger
 ```
+
+An update to Microsoft's ASP.NET Core or .NET runtime restarts the service too, at the end of the
+apt run that installs it. The running service would otherwise keep the old runtime in memory,
+unpatched, until something else restarted it. A service you have stopped stays stopped. Debian
+does not install Microsoft's updates by itself unless you have set that up: unattended-upgrades
+takes only Debian's own archives by default, so either run `apt upgrade` or add
+`"origin=microsoft-debian-trixie-prod trixie";` to its `Unattended-Upgrade::Origins-Pattern`.
 
 apt does not verify signatures on packages — a deb carries none — it verifies the repository's
 signed `InRelease`, against the key pinned in the sources file above. It is the same key the

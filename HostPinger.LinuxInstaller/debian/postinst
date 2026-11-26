@@ -21,6 +21,16 @@ case "$1" in
                     --comment "HostPinger service" hostpinger
         fi
         ;;
+    # The runtime was updated under the service (debian/triggers). try-restart leaves a stopped
+    # service stopped. A restart that fails is reported but does not fail the trigger: dpkg would
+    # otherwise leave this package half-configured and stop every later apt run on it, and
+    # Restart=on-failure keeps trying the service anyway. The generated scriptlets below act only
+    # on configure and the abort cases, so nothing else runs for a trigger.
+    triggered)
+        if [ -d /run/systemd/system ]; then
+            deb-systemd-invoke try-restart hostpinger.service >/dev/null || true
+        fi
+        ;;
 esac
 
 #DEBHELPER#

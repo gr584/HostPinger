@@ -1,0 +1,10 @@
+# The service runs on the shared runtime from Microsoft's aspnetcore-runtime-10.0 and
+# dotnet-runtime-10.0, which keep each patch in a folder named for its version. An update deletes
+# the old folder and adds the next, and the running process keeps the runtime it started with:
+# unpatched in memory, and with any framework assembly it has yet to load gone from disk. These
+# interests make dpkg run postinst with "triggered" once at the end of any run that changed either
+# folder, and that case restarts the service.
+#
+# noawait because nothing about the runtime package depends on the restart having happened.
+interest-noawait /usr/share/dotnet/shared/Microsoft.AspNetCore.App
+interest-noawait /usr/share/dotnet/shared/Microsoft.NETCore.App

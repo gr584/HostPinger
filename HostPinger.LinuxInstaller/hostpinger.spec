@@ -123,6 +123,29 @@ exit 0
 %postun
 %systemd_postun_with_restart %{name}.service
 
+# The service runs on Fedora's shared ASP.NET Core and .NET runtimes, which keep each patch in a
+# folder named for its version. An update deletes the old folder and adds the next, and the running
+# process keeps the runtime it started with: unpatched in memory, and with any framework assembly
+# it has yet to load gone from disk. This runs once at the end of a transaction that installed
+# files in either folder, and restarts the service.
+#
+# rpm also runs it at the end of a transaction that installs or upgrades this package, because the
+# runtime's files are already there. A fresh install leaves the service stopped, and try-restart
+# leaves a stopped service stopped. An upgrade has the service restarted by systemd's own triggers,
+# and a second restart straight after could stop the start in the middle of its migrations. So the
+# restart happens only while the process still maps a runtime file that has been deleted, which is
+# the condition this is here for. Once systemd's restart has run the new process maps none. If that
+# restart is still in progress, systemd merges try-restart into it rather than queueing another.
+#
+# A restart that fails does not fail the transaction; Restart=on-failure keeps trying the service.
+%transfiletriggerin -- %{_libdir}/dotnet/shared/Microsoft.AspNetCore.App %{_libdir}/dotnet/shared/Microsoft.NETCore.App
+if [ -d /run/systemd/system ]; then
+    pid=$(systemctl show -P MainPID %{name}.service 2>/dev/null || :)
+    if [ "${pid:-0}" -gt 0 ] && grep -q ' %{_libdir}/dotnet/shared/.* (deleted)$' "/proc/$pid/maps" 2>/dev/null; then
+        systemctl try-restart %{name}.service || :
+    fi
+fi
+
 %pre selinux
 # Takes a copy of the file contexts as they stand before this module changes any of them, which is
 # what the relabel below compares against to decide what needs restoring. Every macro here has to

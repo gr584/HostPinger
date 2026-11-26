@@ -171,6 +171,27 @@ jobs:
             exit 1
           fi
 
+          # Without the trigger a runtime update leaves the service running the old runtime, and
+          # nothing about the package looks wrong. The SDK installed above brings Fedora's runtime
+          # packages, so each watched folder is checked to be one they install: a trigger on a
+          # path nothing installs to never fires and never fails.
+          triggers=$(rpm -qp --filetriggers "$rpm_file")
+          for dir in Microsoft.AspNetCore.App Microsoft.NETCore.App; do
+            path=/usr/lib64/dotnet/shared/$dir
+            if ! grep -q "^transfiletriggerin .* -- .*$path\(,\|\$\)" <<<"$triggers"; then
+              echo "::error::the package does not watch the runtime's $dir folder"
+              exit 1
+            fi
+            if ! rpm -qf "$path" >/dev/null; then
+              echo "::error::no installed package owns $path; the trigger watches the wrong place"
+              exit 1
+            fi
+          done
+          if ! grep -q 'try-restart hostpinger.service' <<<"$triggers"; then
+            echo "::error::the runtime trigger does not restart the service"
+            exit 1
+          fi
+
           rpm -qpi "$rpm_file"
 
           # The policy module is what lets the service run at all on an enforcing machine, and it
@@ -314,6 +335,20 @@ jobs:
             exit 1
           fi
 
+          # Without the trigger a runtime update leaves the service running the old runtime, and
+          # nothing about the package looks wrong. The install step below proves the paths match
+          # what Microsoft's packages install.
+          for dir in Microsoft.AspNetCore.App Microsoft.NETCore.App; do
+            if ! grep -qx "interest-noawait /usr/share/dotnet/shared/$dir" control/triggers; then
+              echo "::error::the package does not watch the runtime's $dir folder"
+              exit 1
+            fi
+          done
+          if ! grep -q 'try-restart hostpinger.service' control/postinst; then
+            echo "::error::postinst does not restart the service when triggered"
+            exit 1
+          fi
+
           dpkg-deb -I "$deb_file"
 
       # Every check above reads the package; this one runs it, and it is the only thing here that
@@ -337,6 +372,30 @@ jobs:
           test -x /usr/lib/hostpinger/HostPinger
           if [ ! -L /etc/systemd/system/multi-user.target.wants/hostpinger.service ]; then
             echo "::error::installing the package did not enable the service"
+            exit 1
+          fi
+
+      # Reinstalling Microsoft's runtime packages unpacks their files again, which is what an
+      # update does as far as dpkg's file triggers are concerned. If the interest paths in
+      # debian/triggers no longer match where those packages put the runtime, nothing fires and
+      # nothing fails, so the trigger being processed is checked in dpkg's log. The restart
+      # itself is skipped here for want of systemd; a failure in the triggered case would still
+      # leave the package short of "installed", which is checked too.
+      - name: Update the runtime under the package
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          before=$(wc -l < /var/log/dpkg.log)
+          apt-get install -y --reinstall aspnetcore-runtime-10.0 dotnet-runtime-10.0
+
+          if ! tail -n +"$((before + 1))" /var/log/dpkg.log | grep -q ' trigproc hostpinger:'; then
+            echo "::error::reinstalling the runtime did not trigger hostpinger"
+            tail -n +"$((before + 1))" /var/log/dpkg.log
+            exit 1
+          fi
+          status=$(dpkg-query -W -f='${db:Status-Abbrev}' hostpinger)
+          if [ "$status" != "ii " ]; then
+            echo "::error::hostpinger is '$status' after its trigger ran, not installed"
             exit 1
           fi
 
