@@ -632,8 +632,15 @@ sudo ufw allow 8080/tcp
 | --- | --- |
 | `/usr/lib/hostpinger/` | The application. Replaced wholesale on upgrade. |
 | `/var/lib/hostpinger/` | Database, saved settings, data protection keys. Created by systemd; neither removing nor purging the package deletes it. |
-| `/etc/default/hostpinger` | Port, time zone, runtime diagnostics switch. A conffile, so local edits survive upgrades without being asked about. |
+| `/etc/default/hostpinger` | Port, time zone, runtime diagnostics switch. A conffile, so local edits survive upgrades. |
 | `/usr/lib/systemd/system/hostpinger.service` | The unit. |
+
+An edited `/etc/default/hostpinger` is kept on upgrade, but when a release changes the packaged copy
+as well, dpkg asks which of the two to keep. An unattended `apt-get -y` can't answer, so it stops
+there: the new version is left unpacked but not configured, and the old one goes on running until
+someone answers. An automatic update keeps the edited copy without asking if it passes
+`-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold`; the packaged copy then
+arrives beside it as `/etc/default/hostpinger.dpkg-dist`.
 
 The package depends on `aspnetcore-runtime-10.0` from Microsoft's repository, so the runtime is
 patched by its publisher rather than bundled here.
