@@ -41,14 +41,16 @@ namespace HostPinger.UITest
         /// <inheritdoc cref="ListedHostName"/>
         public const string ListedHostNames = $"{ListedHostName};*.starred.example";
 
-        private readonly Process _process;
-        private readonly List<string> _output;
+        private readonly WebAppStart _how;
+        private readonly string _directory;
+        private readonly List<string> _output = [];
         private readonly string _dataDirectory;
+        private Process _process = null!;
 
-        private WebApp(Process process, List<string> output, string dataDirectory, string databasePath, string baseUrl)
+        private WebApp(WebAppStart how, string directory, string dataDirectory, string databasePath, string baseUrl)
         {
-            _process = process;
-            _output = output;
+            _how = how;
+            _directory = directory;
             _dataDirectory = dataDirectory;
             DatabasePath = databasePath;
             BaseUrl = baseUrl;
@@ -112,11 +114,43 @@ namespace HostPinger.UITest
             {
                 SeedSettings(databasePath);
             }
-            var baseUrl = $"http://127.0.0.1:{FreePort()}";
+            var app = new WebApp(how, directory, dataDirectory, databasePath, $"http://127.0.0.1:{FreePort()}");
+            try
+            {
+                await app.LaunchAsync();
+            }
+            catch
+            {
+                await app.DisposeAsync();
+                throw;
+            }
+
+            return app;
+        }
+
+        /// <summary>
+        /// Stops this instance and starts it again on the same database, data protection keys and
+        /// address, as a restart of the service would: whatever it held in memory is gone, and
+        /// everything it keeps on disk is still there. Killed rather than asked to stop, which a
+        /// test cannot do portably; nothing a restart is about lies between the two.
+        /// </summary>
+        public async Task RestartAsync()
+        {
+            await StopAsync();
+            _process.Dispose();
+
+            // So that a launch that fails before it has a process leaves DisposeAsync nothing to stop.
+            _process = null!;
+            await LaunchAsync();
+        }
+
+        private async Task LaunchAsync()
+        {
+            var assemblyPath = Path.Combine(_directory, "HostPinger.dll");
             var start = new ProcessStartInfo("dotnet")
             {
-                ArgumentList = { assemblyPath, "--urls", baseUrl },
-                WorkingDirectory = directory,
+                ArgumentList = { assemblyPath, "--urls", BaseUrl },
+                WorkingDirectory = _directory,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
             };
@@ -131,39 +165,28 @@ namespace HostPinger.UITest
 
             // The development settings name a database inside the checkout; this is read after
             // them and is what keeps the run in its own temporary directory.
-            start.Environment["Pinger__DatabasePath"] = databasePath;
+            start.Environment["Pinger__DatabasePath"] = DatabasePath;
 
             // As a deployment reached by a full name sets it; HostNameFilterTests asks under these.
             start.Environment["Security__AllowedHostNames"] = ListedHostNames;
-            foreach (var (name, value) in how.Environment)
+            foreach (var (name, value) in _how.Environment)
             {
                 start.Environment[name] = value;
             }
 
-            var process = Process.Start(start)
+            _process = Process.Start(start)
                 ?? throw new InvalidOperationException("Could not start the application.");
 
             // Drained so a full pipe cannot block the application; kept for the failure message,
-            // and for a test that looks for what was logged.
-            var output = new List<string>();
-            process.OutputDataReceived += (_, e) => Capture(output, e.Data);
-            process.ErrorDataReceived += (_, e) => Capture(output, e.Data);
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
+            // and for a test that looks for what was logged. One list across a restart, so what the
+            // instance before it logged can still be found.
+            _process.OutputDataReceived += (_, e) => Capture(_output, e.Data);
+            _process.ErrorDataReceived += (_, e) => Capture(_output, e.Data);
+            _process.BeginOutputReadLine();
+            _process.BeginErrorReadLine();
 
-            var app = new WebApp(process, output, dataDirectory, databasePath, baseUrl);
-            try
-            {
-                await app.WaitUntilAnsweringAsync(output, how.ReadyAt);
-                await app.CheckItServesTheFrameworkScriptAsync();
-            }
-            catch
-            {
-                await app.DisposeAsync();
-                throw;
-            }
-
-            return app;
+            await WaitUntilAnsweringAsync(_output, _how.ReadyAt);
+            await CheckItServesTheFrameworkScriptAsync();
         }
 
         /// <summary>
@@ -367,15 +390,23 @@ namespace HostPinger.UITest
             }
         }
 
-        public async ValueTask DisposeAsync()
+        private async Task StopAsync()
         {
             if (!_process.HasExited)
             {
                 _process.Kill(entireProcessTree: true);
                 await _process.WaitForExitAsync();
             }
+        }
 
-            _process.Dispose();
+        public async ValueTask DisposeAsync()
+        {
+            // Null when the process never started: Process.Start can throw.
+            if (_process is not null)
+            {
+                await StopAsync();
+                _process.Dispose();
+            }
 
             try
             {

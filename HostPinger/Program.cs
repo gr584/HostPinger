@@ -92,8 +92,10 @@ namespace HostPinger
             builder.Services.AddScoped<LockPrompt>();
 
             // The key ring would otherwise default to the user profile, which a container throws
-            // away on every restart; the Blazor circuits of any open browser then fail to
-            // reconnect, and the unlock cookie, which the same keys protect, stops being readable.
+            // away on every restart, and a form left open across one — the unlock page, the
+            // password page — would then be refused for its antiforgery token. The unlock cookie
+            // is sealed with the same keys, but a restart locks every browser regardless
+            // (PasswordGate).
             builder.Services.AddDataProtection()
                 .PersistKeysToFileSystem(new DirectoryInfo(
                     Path.Combine(Path.GetDirectoryName(paths.DatabasePath)!, "DataProtection-Keys")));

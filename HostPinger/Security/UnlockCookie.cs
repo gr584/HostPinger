@@ -18,7 +18,8 @@ namespace HostPinger.Security
         public static readonly TimeSpan Lifetime = TimeSpan.FromHours(12);
 
         /// <summary>
-        /// Deliberately not persistent, so closing the browser locks it again, and SameAsRequest
+        /// Deliberately not persistent, so closing the browser locks it again — as restarting the
+        /// service does, through the stamp <see cref="PasswordGate"/> checks — and SameAsRequest
         /// rather than Always because the service is normally reached over plain HTTP — a cookie
         /// marked secure there would never come back.
         /// </summary>

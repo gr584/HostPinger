@@ -1,7 +1,9 @@
 using System.Security.Claims;
 using HostPinger.Core.Options;
 using HostPinger.Security;
+using HostPinger.Core.Data;
 using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
 
 namespace HostPinger.Test
 {
@@ -16,6 +18,7 @@ namespace HostPinger.Test
         private static readonly ClaimsPrincipal Anonymous = new(new ClaimsIdentity());
 
         private SqliteConnection _connection = null!;
+        private DbContextOptions<HostPingerDbContext> _options = null!;
         private TestOptionsMonitor<SecurityOptions> _configured = null!;
         private UserSettingsStore _store = null!;
         private PasswordGate _gate = null!;
@@ -23,10 +26,10 @@ namespace HostPinger.Test
         [SetUp]
         public void SetUp()
         {
-            (_connection, var options) = TestDb.CreateInMemory();
+            (_connection, _options) = TestDb.CreateInMemory();
             _configured = new TestOptionsMonitor<SecurityOptions>(new SecurityOptions());
             _store = new UserSettingsStore(
-                new TestDb.Factory(options),
+                new TestDb.Factory(_options),
                 new TestOptionsMonitor<PingerOptions>(new PingerOptions()),
                 _configured);
             _gate = new PasswordGate(_store);
@@ -121,6 +124,50 @@ namespace HostPinger.Test
                 Assert.That(_gate.Verify(Password), Is.True, "the same password");
                 Assert.That(_gate.IsUnlocked(issuedBefore), Is.False);
                 Assert.That(_gate.IsUnlocked(_gate.CreatePrincipal()), Is.True);
+            });
+        }
+
+        /// <summary>
+        /// A restart of the service locks every browser again, the way a change of password does,
+        /// though the password, the database and the keys the cookie is sealed with are all as they
+        /// were: what the restarted service has is a new gate over the settings loaded afresh. An
+        /// unlock issued after it counts.
+        /// </summary>
+        [Test]
+        public async Task IsUnlocked_IsFalseForAnUnlockIssuedBeforeARestart()
+        {
+            await SetPasswordAsync(Password);
+            var issuedBefore = _gate.CreatePrincipal();
+
+            var restartedStore = new UserSettingsStore(
+                new TestDb.Factory(_options),
+                new TestOptionsMonitor<PingerOptions>(new PingerOptions()),
+                _configured);
+            await restartedStore.LoadAsync();
+            var restarted = new PasswordGate(restartedStore);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(restartedStore.UnlockStamp, Is.EqualTo(_store.UnlockStamp), "the same password, and no restore");
+                Assert.That(restarted.IsUnlocked(issuedBefore), Is.False);
+                Assert.That(restarted.IsUnlocked(restarted.CreatePrincipal()), Is.True);
+                Assert.That(_gate.IsUnlocked(issuedBefore), Is.True, "the instance that issued it, still running");
+            });
+        }
+
+        /// <summary>
+        /// With no password set there is nothing for a restart to lock: everybody is let through
+        /// before it and after it.
+        /// </summary>
+        [Test]
+        public void IsUnlocked_IsTrueForEverybodyAfterARestartWhileNoPasswordIsSet()
+        {
+            var restarted = new PasswordGate(_store);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(restarted.IsUnlocked(Anonymous), Is.True);
+                Assert.That(restarted.IsUnlocked(_gate.CreatePrincipal()), Is.True);
             });
         }
 

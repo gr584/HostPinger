@@ -55,7 +55,15 @@ namespace HostPinger.UITest
         /// that socket is what makes a test's first click mean anything. Every page here carries
         /// the layout's lock control, which is interactive, so every page connects one.
         /// </remarks>
-        protected async Task GoAsync(string path = "/")
+        protected Task GoAsync(string path = "/") => GoAsync(BaseUrl, path);
+
+        /// <summary>
+        /// Opens a page of <paramref name="app"/>, an instance a test started for itself, and waits
+        /// until it is live; see <see cref="GoAsync(string)"/>.
+        /// </summary>
+        protected Task GoAsync(WebApp app, string path = "/") => GoAsync(app.BaseUrl, path);
+
+        private async Task GoAsync(string baseUrl, string path)
         {
             var connected = new TaskCompletionSource();
             void Opened(object? sender, IWebSocket socket)
@@ -70,7 +78,7 @@ namespace HostPinger.UITest
             Page.WebSocket += Opened;
             try
             {
-                await Page.GotoAsync($"{BaseUrl}{path}");
+                await Page.GotoAsync($"{baseUrl}{path}");
                 await connected.Task.WaitAsync(CircuitTimeout);
             }
             catch (TimeoutException)

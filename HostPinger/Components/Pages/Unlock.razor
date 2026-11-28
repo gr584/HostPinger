@@ -60,7 +60,7 @@
                         </div>
                         <div class="form-text">
                             Unlocks adding, editing and removing hosts, pausing them, and changing
-                            settings, for this browser until it is closed. Everything else is
+                            settings, for this browser until it is closed or the service restarts. Everything else is
                             readable without it.
                         </div>
                     </form>
@@ -149,7 +149,8 @@
 
         Logger.LogInformation("Unlocked from {Address}.", RequestOrigin.Describe(HttpContext));
 
-        // Not persistent: the unlock lasts until this browser is closed.
+        // Not persistent: the unlock lasts until this browser is closed, or until the service
+        // restarts, which PasswordGate sees to.
         await HttpContext!.SignInAsync(
             CookieAuthenticationDefaults.AuthenticationScheme,
             Gate.CreatePrincipal(),

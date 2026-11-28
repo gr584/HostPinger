@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Security.Cryptography;
 using HostPinger.Core.Options;
 
 namespace HostPinger.Security
@@ -11,7 +12,8 @@ namespace HostPinger.Security
     /// </summary>
     /// <remarks>
     /// Reads the store on every call rather than capturing its answer, so a password set, changed
-    /// or removed on another browser takes effect the moment that save returns.
+    /// or removed on another browser takes effect the moment that save returns. A singleton, made
+    /// once per run of the service, which is what <see cref="_run"/> relies on.
     /// </remarks>
     public sealed class PasswordGate(UserSettingsStore settings)
     {
@@ -25,11 +27,19 @@ namespace HostPinger.Security
 
         /// <summary>
         /// Carries <see cref="UserSettingsStore.UnlockStamp"/> as it was when the cookie was
-        /// issued: a fingerprint of the password, and of the restore that put the database in
-        /// place. Comparing it against the one in force is what makes a change or a removal of the
-        /// password, and every restore, invalidate the cookies that came before it.
+        /// issued — a fingerprint of the password, and of the restore that put the database in
+        /// place — followed by <see cref="_run"/>. Comparing it against the one in force is what
+        /// makes a change or a removal of the password, every restore and every restart of the
+        /// service invalidate the cookies that came before it.
         /// </summary>
         private const string StampClaimType = "hostpinger:stamp";
+
+        /// <summary>
+        /// Drawn afresh each time the service starts and never written down, so that a restart
+        /// locks every browser. The cookie alone would not: the data protection keys it is sealed
+        /// with are kept on disk (see Program), and the stored stamp is the same before and after.
+        /// </summary>
+        private readonly string _run = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
 
         private string? StoredHash => settings.PasswordHash;
 
@@ -39,9 +49,10 @@ namespace HostPinger.Security
         /// <summary>
         /// Whether <paramref name="user"/> may change things: always, while no password is set, and
         /// otherwise only while holding an unlock issued under the password in force now, since the
-        /// last restore. A restore puts every browser back to locked, the one that restored
-        /// included, even where the backup brings the password already in force: whoever goes on
-        /// has to know the password the backup brought.
+        /// last restore and since the service last started. A restore puts every browser back to
+        /// locked, the one that restored included, even where the backup brings the password
+        /// already in force: whoever goes on has to know the password the backup brought. A
+        /// restart does the same.
         /// </summary>
         /// <remarks>
         /// Says nothing of a backup or a restore under way, which keeps every browser from changing
@@ -58,7 +69,7 @@ namespace HostPinger.Security
             }
 
             return user?.Identity?.IsAuthenticated == true
-                && user.FindFirstValue(StampClaimType) == stamp;
+                && user.FindFirstValue(StampClaimType) == stamp + _run;
         }
 
         /// <summary>
@@ -72,16 +83,17 @@ namespace HostPinger.Security
         public bool Verify(string password) => PasswordHash.Verify(StoredHash, password);
 
         /// <summary>
-        /// The principal to sign a browser in as, stamped from the password in force. A save is in
-        /// force the moment it returns, so the page that has just written a password can sign its
-        /// browser in from here and get the stamp of the hash it wrote.
+        /// The principal to sign a browser in as, stamped from the password in force and this run
+        /// of the service. A save is in force the moment it returns, so the page that has just
+        /// written a password can sign its browser in from here and get the stamp of the hash it
+        /// wrote.
         /// </summary>
         public ClaimsPrincipal CreatePrincipal()
         {
             var identity = new ClaimsIdentity(
                 [
                     new Claim(ClaimTypes.Name, UnlockedName),
-                    new Claim(StampClaimType, settings.UnlockStamp),
+                    new Claim(StampClaimType, settings.UnlockStamp + _run),
                 ],
                 AuthenticationType);
 

@@ -259,13 +259,13 @@ service, locked or not.
 - **No password is set by default**, and nothing is locked until one is. A HostPinger that nobody
   has given a password behaves exactly as it did before the feature existed, and says so on the
   Configuration page.
-- **Unlocking is per browser and lasts until that browser is closed**, or until twelve hours pass
-  in which it loads no page. It is not remembered any longer than that, and nothing is remembered
+- **Unlocking is per browser and lasts until that browser is closed** or the service restarts, or
+  until twelve hours pass in which it loads no page. It is not remembered any longer than that, and nothing is remembered
   about who unlocked it — there is nobody to remember. Locking applies from the next page each open
   window loads, so a window left sitting on the host list keeps what it had until it is used again.
   **Lock** forgets the unlock in that browser only; a copy of its cookie taken off the network goes
-  on working until those twelve hours run out or the password changes, so changing the password is
-  how to end every unlock at once.
+  on working until those twelve hours run out, the password changes or the service restarts, so
+  changing the password or restarting the service is how to end every unlock at once.
 - **Changing the password locks every browser again**, including the one that changed it, which is
   signed straight back in under the new one. Removing it unlocks everything for everyone. So does
   restoring a backup that brings a password, whichever password it is: every browser is locked
@@ -406,9 +406,9 @@ service, locked or not.
 
 - It runs as the systemd unit `hostpinger`, and starts with the machine.
 - The database — settings included — and the data protection keys live under
-  `/var/lib/hostpinger`. Both survive an upgrade or an uninstall. The keys are what let an
-  unlocked browser stay unlocked across a restart of the service, as well as reconnecting a page
-  that was open when it went down.
+  `/var/lib/hostpinger`. Both survive an upgrade or an uninstall. The keys are what let a form
+  that was open when the service went down, such as the unlock page, still be sent once it is back.
+  A restart, an upgrade or a runtime update included, locks every browser that was unlocked.
 - `/health` answers for liveness probes. It deliberately touches nothing, so a pruning pass
   holding the database busy is not read as an unhealthy service. It answers while the service is
   still opening its database too, so that a long upgrade is not read as an unhealthy service
@@ -525,7 +525,7 @@ The package requires `aspnetcore-runtime-10.0` from the Fedora repositories, so 
 patched with the distribution rather than bundled. An update to that runtime restarts the service
 at the end of the dnf transaction that installs it. The running service would otherwise keep the
 old runtime in memory, unpatched, until something else restarted it. A service you have stopped
-stays stopped.
+stays stopped. Like any restart, it locks every browser that was unlocked.
 
 ## Installing on Debian
 
@@ -560,8 +560,8 @@ sudo apt upgrade hostpinger
 
 An update to Microsoft's ASP.NET Core or .NET runtime restarts the service too, at the end of the
 apt run that installs it. The running service would otherwise keep the old runtime in memory,
-unpatched, until something else restarted it. A service you have stopped stays stopped. Debian
-does not install Microsoft's updates by itself unless you have set that up: unattended-upgrades
+unpatched, until something else restarted it. A service you have stopped stays stopped. Like
+any restart, it locks every browser that was unlocked. Debian does not install Microsoft's updates by itself unless you have set that up: unattended-upgrades
 takes only Debian's own archives by default, so either run `apt upgrade` or add
 `"origin=microsoft-debian-trixie-prod trixie";` to its `Unattended-Upgrade::Origins-Pattern`.
 
